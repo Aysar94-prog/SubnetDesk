@@ -1,6 +1,6 @@
 # SubnetDesk Windows helper status
 
-2026-10-07. User-authorized execution; upstream v1.3.0 commit
+2026-10-07 source work; 2026-10-08 build checkpoint. User-authorized execution; upstream v1.3.0 commit
 `a412726163265a0e18deb0b8244ac1e87fb6ffd5`, hbb_common
 `ce351cc6147420147e4950ce25e6affbeecd191e`.
 
@@ -21,6 +21,11 @@
 
 No Android implementation/build, wire-format change or LAN Messenger application change.
 No installed executable has been replaced; no network/session acceptance claimed.
+The original SubnetDesk service is Running/Auto at
+`C:\Program Files\SubnetDesk\SubnetDesk.exe --service`; it was inspected read-only and not stopped.
+That old service can still launch the old/headless CM. Opening this candidate alongside it is
+not proof that a session uses the patched backend. Service/backend handoff needs the user's
+direction and must account for any active sessions.
 
 ## Verification
 
@@ -32,10 +37,15 @@ No installed executable has been replaced; no network/session acceptance claimed
 - Complete Flutter test suite: 53/53 pass. Full Flutter analysis has no errors and reports 315
   existing style/deprecation/unused warnings/information (non-fatal warning/info mode).
 - LAN-only source gate passes; diff whitespace check passes.
-- Full native dependencies, generated Rust/Dart bridge and Windows executable build
-  are in progress. FRB code generation completed successfully; native vcpkg and Flutter Windows
-  builds are still running. First Cargo attempt confirmed missing VCPKG_ROOT; it must be retried
-  after native libraries are installed. No executable completion or device acceptance claimed.
+- Complete native manifest installation: all 16 packages pass. FRB generation completed.
+- Full Rust library (flutter,software-update,hwcodec,vram), Flutter Windows Release build,
+  virtual-display DLL and pinned WindowInjection DLL all build with exit 0. Earlier dependency
+  failures were resolved without unrelated application/dependency source refactors.
+- Candidate CLI/native-loader smoke in isolated APPDATA/LOCALAPPDATA: exit 0, version 1.3.0.
+  This is not graphical CM, remote-session, audible Voice or physical device acceptance.
+- Candidate: `D:\LAN-Messenger\outputs\SubnetDesk-helper-cm\Windows-x64-v1.3.0-cm-dock`.
+  Original auxiliary driver resources/notices included; printer archives match published
+  checksums. No driver installation or service change performed.
 
 ## Required physical acceptance
 
@@ -57,5 +67,8 @@ Scoped CARGO_HOME/RUSTUP_HOME/PUB_CACHE; no global PATH/toolchain changes.
 Flutter's generated plugin links use local directory junctions because this user token cannot
 create symlinks. Developer Mode/security settings were not changed. Build with --no-pub to
 preserve these generated junctions; a future pub get may recreate the link directory.
+`tools/vcpkg/installed` is a local junction to `tools/native-installed`: some upstream Rust
+dependencies ignore VCPKG_INSTALLED_ROOT and require VCPKG_ROOT/installed. No upstream dependency
+source was patched to compensate.
 Build outputs belong in `D:\LAN-Messenger\outputs\SubnetDesk-helper-cm`.
 Do not treat this helper as integrated into LAN Messenger or as an Android change.
