@@ -1,5 +1,7 @@
 #[cfg(target_os = "windows")]
 use super::login_failure_check::try_acquire_os_credential_login_gate;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use super::cm_launch::connection_manager_launch_args;
 use super::login_failure_check::{
     clear_lan_auth_source, evaluate_os_credential_policy, lan_auth_retry_after,
     record_lan_auth_failure, record_os_credential_failure, try_acquire_lan_auth_gate, FailureScope,
@@ -4969,11 +4971,6 @@ impl Connection {
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn connection_manager_launch_args() -> Vec<&'static str> {
-    vec!["--cm-no-ui"]
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 // IPC bootstrap summary:
 // - Resolve target CM socket (headless/non-headless, optional UID-scoped path on Linux).
 // - Start CM when missing, then bridge bidirectional messages between this task and CM IPC.
@@ -5808,12 +5805,6 @@ mod test {
         assert!(Ipv6Addr::from_str("::1").is_ok());
         assert!(Ipv6Addr::from_str("127.0.0.1").is_err());
         assert!(Ipv6Addr::from_str("0").is_err());
-    }
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    #[test]
-    fn lan_connection_manager_is_always_headless() {
-        assert_eq!(connection_manager_launch_args(), vec!["--cm-no-ui"]);
     }
 
     fn msg(set: impl FnOnce(&mut Message)) -> Message {

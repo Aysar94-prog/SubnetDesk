@@ -292,6 +292,11 @@ class ChatModel with ChangeNotifier {
 
   var _togglingCMSidePage = false; // protect order for await
   toggleCMSidePage() async {
+    if (isWindows && isConnManager) {
+      _isShowCMSidePage = !_isShowCMSidePage;
+      notifyListeners();
+      return;
+    }
     if (_togglingCMSidePage) return false;
     _togglingCMSidePage = true;
     if (_isShowCMSidePage) {
@@ -412,11 +417,14 @@ class ChatModel with ChangeNotifier {
         return;
       }
       if (isDesktop) {
-        windowOnTop(null);
+        final foldedWindowsPanel =
+            isWindows && isConnManager && session.serverModel.windowsCmCollapsed;
+        if (!foldedWindowsPanel) windowOnTop(null);
         // disable auto jumpTo other tab when hasFocus, and mark unread message
         final currentSelectedTab =
             session.serverModel.tabController.state.value.selectedTabInfo;
-        if (currentSelectedTab.key != id.toString() && inputNode.hasFocus) {
+        if (foldedWindowsPanel ||
+            (currentSelectedTab.key != id.toString() && inputNode.hasFocus)) {
           client.unreadChatMessageCount.value += 1;
         } else {
           parent.target?.serverModel.jumpTo(id);

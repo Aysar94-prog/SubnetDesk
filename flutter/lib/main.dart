@@ -280,7 +280,8 @@ void runMultiWindow(Map<String, dynamic> argument, String appType) async {
 void runConnectionManagerScreen() async {
   await initEnv(kAppTypeConnectionManager);
   _runApp('', const DesktopServerPage(), MyTheme.currentThemeMode());
-  final hide = await bind.cmGetConfig(name: "hide_cm") == 'true';
+  // This helper's Windows session dock is always visible on incoming access.
+  final hide = !isWindows && await bind.cmGetConfig(name: "hide_cm") == 'true';
   gFFI.serverModel.hideCm = hide;
   if (hide) {
     await hideCmWindow(isStartup: true);
@@ -294,10 +295,19 @@ void runConnectionManagerScreen() async {
 
 bool _isCmReadyToShow = false;
 
-showCmWindow({bool isStartup = false}) async {
+Future<void> resizeWindowsCmPanel() async {
+  await windowManager.setSizeAlignment(
+    gFFI.serverModel.windowsCmCollapsed
+        ? kWindowsCmPanelFoldedSize
+        : kWindowsCmPanelSize,
+    Alignment.bottomRight,
+  );
+}
+
+showCmWindow({bool isStartup = false, bool restore = false}) async {
   if (isStartup) {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-      size: kConnectionManagerWindowSizeClosedChat,
+      size: isWindows ? kWindowsCmPanelSize : kConnectionManagerWindowSizeClosedChat,
       alwaysOnTop: true,
     );
     await windowManager.waitUntilReadyToShow(windowOptions, null);
@@ -308,21 +318,40 @@ showCmWindow({bool isStartup = false}) async {
       windowManager.setOpacity(1),
     ]);
     // ensure initial window size to be changed
-    await windowManager.setSizeAlignment(
-      kConnectionManagerWindowSizeClosedChat,
-      Alignment.topRight,
-    );
-    _isCmReadyToShow = true;
-  } else if (_isCmReadyToShow) {
-    if (await windowManager.getOpacity() != 1) {
-      await windowManager.setOpacity(1);
-      await windowManager.focus();
-      await windowManager.minimize(); //needed
+    if (isWindows) {
+      await resizeWindowsCmPanel();
+    } else {
       await windowManager.setSizeAlignment(
         kConnectionManagerWindowSizeClosedChat,
         Alignment.topRight,
       );
+    }
+    _isCmReadyToShow = true;
+  } else if (_isCmReadyToShow) {
+    if (await windowManager.getOpacity() != 1) {
+      await windowManager.setOpacity(1);
+      if (isWindows) {
+        await windowManager.show();
+        await windowManager.restore();
+      } else {
+        await windowManager.focus();
+        await windowManager.minimize(); //needed
+      }
+      if (isWindows) {
+        await resizeWindowsCmPanel();
+      } else {
+        await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat,
+          Alignment.topRight,
+        );
+      }
       windowOnTop(null);
+    } else if (isWindows && restore) {
+      // Restore for a new incoming session, never for the periodic state poll.
+      await windowManager.show();
+      await windowManager.restore();
+      await resizeWindowsCmPanel();
+      await windowManager.focus();
     }
   }
 }

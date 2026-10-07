@@ -307,6 +307,8 @@ extension StringExtension on String {
 
 const Size kConnectionManagerWindowSizeClosedChat = Size(300, 490);
 const Size kConnectionManagerWindowSizeOpenChat = Size(700, 490);
+const Size kWindowsCmPanelSize = Size(360, 600);
+const Size kWindowsCmPanelFoldedSize = Size(360, 44);
 // Tabbar transition duration, now we remove the duration
 const Duration kTabTransitionDuration = Duration.zero;
 const double kEmptyMarginTop = 50;

@@ -128,7 +128,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
   flutter::DartProject project(L"data");
-  // connection manager hide icon from taskbar
+  // The connection manager has its own title and taskbar entry so a manually
+  // minimized incoming session can be found again.
   bool is_cm_page = false;
   auto cmParam = std::string("--cm");
   if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, cmParam.size(), cmParam.c_str()) == 0) {
@@ -167,7 +168,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   } else {
     window_title = app_name;
   }
-  if (!window.CreateAndShow(window_title, origin, size, !is_cm_page)) {
+  if (!window.CreateAndShow(window_title, origin, size, true)) {
       return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

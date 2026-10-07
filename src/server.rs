@@ -62,6 +62,8 @@ pub mod input_service {
 }
 
 mod connection;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod cm_launch;
 pub mod display_service;
 mod login_failure_check;
 #[cfg(windows)]

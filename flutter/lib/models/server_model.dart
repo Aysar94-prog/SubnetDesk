@@ -27,6 +27,7 @@ class ServerModel with ChangeNotifier {
   bool _clipboardOk = false;
   bool _showElevation = false;
   bool hideCm = false;
+  bool windowsCmCollapsed = false;
   int _zeroClientLengthCounter = 0;
 
   final tabController = DesktopTabController(tabType: DesktopTabType.cm);
@@ -384,7 +385,8 @@ class ServerModel with ChangeNotifier {
         tabController.remove(index_disconnected);
       }
       if (desktopType == DesktopType.cm && !hideCm) {
-        showCmWindow();
+        if (isWindows) windowsCmCollapsed = false;
+        showCmWindow(restore: isWindows);
       }
       scrollToBottom();
       notifyListeners();
@@ -402,10 +404,10 @@ class ServerModel with ChangeNotifier {
         onTap: () {},
         page: desktop.buildConnectionCard(client)));
     Future.delayed(Duration.zero, () async {
-      if (!hideCm) windowOnTop(null);
+      if (!hideCm && !isWindows) windowOnTop(null);
     });
-    // Only do the hidden task when on Desktop.
-    if (isDesktop) {
+    // Windows sessions stay visible until the user minimizes the manager.
+    if (isDesktop && !isWindows) {
       cmHiddenTimer = Timer(const Duration(seconds: 3), () {
         if (!hideCm) windowManager.minimize();
         cmHiddenTimer = null;
@@ -542,6 +544,13 @@ class ServerModel with ChangeNotifier {
           } else {
             // Has incoming phone call, let's set the window on top.
             Future.delayed(Duration.zero, () {
+              if (isWindows && desktopType == DesktopType.cm) {
+                jumpTo(client.id);
+                windowsCmCollapsed = false;
+                notifyListeners();
+                showCmWindow(restore: true);
+                return;
+              }
               windowOnTop(null);
             });
           }

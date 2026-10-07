@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/desktop/widgets/cm_session_panel.dart';
+import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/utils/platform_channel.dart';
@@ -166,6 +168,9 @@ class ConnectionManagerState extends State<ConnectionManager>
   @override
   Widget build(BuildContext context) {
     final serverModel = Provider.of<ServerModel>(context);
+    if (isWindows && desktopType == DesktopType.cm) {
+      return _buildWindowsSessionPanel(serverModel);
+    }
     pointerHandler(PointerEvent e) {
       if (serverModel.cmHiddenTimer != null) {
         serverModel.cmHiddenTimer!.cancel();
@@ -285,6 +290,90 @@ class ConnectionManagerState extends State<ConnectionManager>
     } else {
       return ChatPage(type: ChatPageType.desktopCM);
     }
+  }
+
+  Widget _buildWindowsSessionPanel(ServerModel serverModel) {
+    return Obx(() {
+      final tabs = serverModel.tabController.state.value;
+      final selected = tabs.selected;
+      final client = selected >= 0 && selected < tabs.tabs.length
+          ? serverModel.clients.firstWhereOrNull(
+              (c) => c.id.toString() == tabs.tabs[selected].key)
+          : null;
+      final chatModel = Provider.of<ChatModel>(context);
+      if (client != null && chatModel.currentKey.connId != client.id) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || !serverModel.clients.contains(client)) return;
+          serverModel.tabController.onSelected?.call(client.id.toString());
+          if (client.type_() != ClientType.file) {
+            chatModel.showChatPage(MessageKey(client.peerId, client.id));
+          }
+        });
+      }
+      final unread = serverModel.clients.fold<int>(
+          0, (sum, c) => sum + c.unreadChatMessageCount.value);
+      final controls = client == null
+          ? Center(child: Text(translate('Waiting')))
+          : buildConnectionCard(client);
+      final chat = client == null
+          ? Center(child: Text(translate('Waiting')))
+          : Column(children: [
+              Expanded(child: client.type_() == ClientType.file
+                  ? _FileTransferLogPage()
+                  : ChatPage(type: ChatPageType.desktopCM)),
+              if (!client.disconnected)
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: _CmControlPanel(client: client)),
+            ]);
+      Widget protect(Widget child, RxBool block, {required bool mask}) =>
+          allowRemoteCMModification() ? child : buildRemoteBlock(
+            child: mask ? child : _buildKeyEventBlock(child),
+            block: block, mask: mask);
+      return CmSessionPanel(
+        title: client == null ? 'SubnetDesk' :
+            '${client.name} · ${translate(client.disconnected ? "Disconnected" : "Connected")}',
+        collapsed: serverModel.windowsCmCollapsed,
+        showChat: chatModel.isShowCMSidePage,
+        chatLabel: translate(client?.type_() == ClientType.file
+            ? 'Transfer file' : 'Chat'),
+        controlsLabel: translate('Permissions'),
+        foldLabel: translate('Collapse toolbar'),
+        unreadCount: unread,
+        sessionPicker: serverModel.clients.length < 2
+            ? const SizedBox.shrink()
+            : Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: DropdownButton<int>(
+                  isExpanded: true,
+                  value: client?.id,
+                  items: serverModel.clients.map((c) => DropdownMenuItem<int>(
+                    value: c.id,
+                    child: Text(c.name, overflow: TextOverflow.ellipsis),
+                  )).toList(),
+                  onChanged: (id) { if (id != null) serverModel.jumpTo(id); },
+                ),
+              ),
+        chat: protect(chat, _sidePageBlock, mask: true),
+        controls: protect(controls, _controlPageBlock, mask: false),
+        onFold: () async {
+          setState(() {
+            serverModel.windowsCmCollapsed = !serverModel.windowsCmCollapsed;
+          });
+          if (!serverModel.windowsCmCollapsed && client != null &&
+              chatModel.isShowCMSidePage) {
+            client.unreadChatMessageCount.value = 0;
+          }
+          await resizeWindowsCmPanel();
+        },
+        onShowChat: () {
+          if (!chatModel.isShowCMSidePage) chatModel.toggleCMSidePage();
+          if (client != null) client.unreadChatMessageCount.value = 0;
+        },
+        onShowControls: () {
+          if (chatModel.isShowCMSidePage) chatModel.toggleCMSidePage();
+        },
+      );
+    });
   }
 
   Widget _buildKeyEventBlock(Widget child) {
