@@ -1365,6 +1365,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                 }
+                Some(message::Union::LanAccessPending(pending)) => {
+                    let is_manual = self.handler.lan_credential().map(|c| c.access_method == hbb_common::lan::ACCESS_MANUAL).unwrap_or(false);
+                    if is_manual && pending.version == hbb_common::lan::ACCESS_VERSION && pending.timeout_seconds <= 60 {
+                        self.handler.msgbox("lan-access-pending", "Waiting for approval", "Waiting for the receiver to approve this connection (up to 60 seconds).", "");
+                    }
+                }
                 Some(message::Union::LoginResponse(lr)) => {
                     self.handler.set_auth_retry_after(lr.retry_after_seconds);
                     match lr.union {

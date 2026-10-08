@@ -268,6 +268,8 @@ impl AuthConnType {
 enum ConnAuditPrimaryAuth {
     None = 0,
     LanCredential = 5,
+    LanCode = 6,
+    LanManual = 7,
 }
 
 impl ConnAuditPrimaryAuth {
@@ -390,6 +392,8 @@ pub struct Connection {
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
     credential_revision_at_auth: u64,
+    pending_lan_approval: Option<String>,
+    lan_access_probed: bool,
 }
 
 impl ConnInner {
@@ -431,6 +435,10 @@ const SEC30: Duration = Duration::from_secs(30);
 const H1: Duration = Duration::from_secs(3600);
 const MILLI1: Duration = Duration::from_millis(1);
 const SEND_TIMEOUT_VIDEO: u64 = 12_000;
+
+fn preauth_cm_command_allowed(data: &ipc::Data) -> bool {
+    matches!(data, ipc::Data::Close | ipc::Data::CmErr(_) | ipc::Data::LanApprovalDecision { .. })
+}
 const SEND_TIMEOUT_OTHER: u64 = SEND_TIMEOUT_VIDEO * 10;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -548,6 +556,8 @@ impl Connection {
             terminal_user_token: None,
             terminal_generic_service: None,
             credential_revision_at_auth: 0,
+            pending_lan_approval: None,
+            lan_access_probed: false,
             conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
         };
         let addr = hbb_common::try_into_v4(addr);
@@ -602,7 +612,15 @@ impl Connection {
                 // biased; // video has higher priority // causing test_delay_timer failed while transferring big file
 
                 Some(data) = rx_from_cm.recv() => {
+                    // An early CM is display/decision only. Raw packets and every
+                    // operational command remain blocked before backend authorization.
+                    if !conn.authorized && !preauth_cm_command_allowed(&data) {
+                        continue;
+                    }
                     match data {
+                        ipc::Data::LanApprovalDecision { nonce, accept } => {
+                            if !conn.handle_lan_approval(nonce, accept).await { break; }
+                        }
                         ipc::Data::Close => {
                             conn.chat_unanswered = false; // seen
                             conn.file_transferred = false; //seen
@@ -773,6 +791,7 @@ impl Connection {
                     }
                 }
                 Some((instant, value)) = rx_video.recv() => {
+                    if !conn.authorized { continue; }
                     if !conn.video_ack_required {
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
@@ -784,6 +803,7 @@ impl Connection {
                     }
                 },
                 Some((instant, value)) = rx.recv() => {
+                    if !conn.authorized { continue; }
                     let latency = instant.elapsed().as_millis() as i64;
                     #[allow(unused_mut)]
                     let mut msg = value;
@@ -845,6 +865,7 @@ impl Connection {
                     }
                 },
                 Some(data) = rx_from_authed.recv() => {
+                    if !conn.authorized { continue; }
                     match data {
                         #[cfg(all(target_os = "windows", feature = "flutter"))]
                         ipc::Data::PrinterData(data) => {
@@ -854,6 +875,11 @@ impl Connection {
                     }
                 }
                 _ = second_timer.tick() => {
+                    if conn.pending_lan_approval.is_some() && !crate::lan_access::manual_pending(conn.inner.id()) {
+                        conn.send_login_error("Approval expired, disabled, or unavailable").await;
+                        conn.on_close("LAN approval unavailable", false).await;
+                        break;
+                    }
                     if conn.authorized
                         && conn.credential_revision_at_auth != 0
                         && conn.credential_revision_at_auth != Config::get_credential_revision()
@@ -1693,15 +1719,15 @@ impl Connection {
             name,
             avatar: self.lr.avatar.clone(),
             authorized,
-            keyboard: self.keyboard,
-            clipboard: self.clipboard,
-            audio: self.audio,
-            file: self.file,
-            file_transfer_enabled: self.file,
-            restart: self.restart,
-            recording: self.recording,
-            block_input: self.block_input,
-            privacy_mode: self.privacy_mode,
+            keyboard: authorized && self.keyboard,
+            clipboard: authorized && self.clipboard,
+            audio: authorized && self.audio,
+            file: authorized && self.file,
+            file_transfer_enabled: authorized && self.file,
+            restart: authorized && self.restart,
+            recording: authorized && self.recording,
+            block_input: authorized && self.block_input,
+            privacy_mode: authorized && self.privacy_mode,
             from_switch: false,
         });
     }
@@ -1855,6 +1881,11 @@ impl Connection {
             self.send_login_error("LAN login protocol required").await;
             return false;
         };
+        if self.pending_lan_approval.is_some() {
+            self.send_login_error("An approval request is already pending").await;
+            self.on_close("Duplicate approval request", false).await;
+            return false;
+        }
         if !crate::camera_access::allowed(matches!(
             lr.union.as_ref(), Some(login_request::Union::ViewCamera(_))
         )) {
@@ -1876,6 +1907,51 @@ impl Connection {
             )
             .await;
             return true;
+        }
+        if login.access_method != hbb_common::lan::ACCESS_PASSWORD {
+            if !self.lan_access_probed || !login.access_username.is_empty()
+                || !login.access_password.is_empty() || !lr.username.is_empty() || !lr.password.is_empty()
+                || self.web_client || !crate::lan_access::available() {
+                self.send_login_error("Selected access method is unavailable").await;
+                return false;
+            }
+            match login.access_method {
+                hbb_common::lan::ACCESS_CODE => {
+                    if crate::lan_access::consume_code(&login.temporary_code).is_err() {
+                        let retry = record_lan_auth_failure(&failure_keys);
+                        self.send_login_error_with_retry("Temporary code is invalid, expired, or used", retry).await;
+                        return false;
+                    }
+                    return self.grant_lan_access(lr, ConnAuditPrimaryAuth::LanCode).await;
+                }
+                hbb_common::lan::ACCESS_MANUAL if login.temporary_code.is_empty() => {
+                    let nonce = match crate::lan_access::request_manual(self.inner.id(), &self.ip) {
+                        Ok(nonce) => nonce,
+                        Err(_) => { self.send_login_error("Manual approval is disabled or busy").await; return false; }
+                    };
+                    self.pending_lan_approval = Some(nonce.clone());
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    self.try_start_cm_ipc();
+                    self.try_start_cm(lr.my_id.clone(), crate::lan::sanitize_lan_device_name(&lr.my_name), false);
+                    let scope = match lr.union.as_ref() {
+                        None => "Screen sharing and control",
+                        Some(login_request::Union::FileTransfer(_)) => "File transfer",
+                        Some(login_request::Union::PortForward(_)) => "Port forwarding",
+                        Some(login_request::Union::Terminal(_)) => "Terminal",
+                        _ => "Unsupported",
+                    };
+                    self.send_to_cm(ipc::Data::LanApprovalRequest { nonce, source: self.ip.clone(), scope: scope.to_owned(), timeout_seconds: 60 });
+                    let mut msg = Message::new();
+                    msg.set_lan_access_pending(LanAccessPending { version: hbb_common::lan::ACCESS_VERSION, timeout_seconds: 60, ..Default::default() });
+                    self.send(msg).await;
+                    return true;
+                }
+                _ => { self.send_login_error("Unsupported access method").await; return false; }
+            }
+        }
+        if !login.temporary_code.is_empty() {
+            self.send_login_error("Invalid password login payload").await;
+            return false;
         }
         let permit = match try_acquire_lan_auth_gate() {
             Ok(permit) => permit,
@@ -1910,11 +1986,28 @@ impl Connection {
             .await;
             return true;
         }
+        self.grant_lan_access(lr, ConnAuditPrimaryAuth::LanCredential).await
+    }
+
+    async fn handle_lan_approval(&mut self, nonce: String, accept: bool) -> bool {
+        if self.authorized || self.pending_lan_approval.as_deref() != Some(nonce.as_str()) { return true; }
+        let result = crate::lan_access::decide_manual(self.inner.id(), &nonce, accept);
+        self.pending_lan_approval = None;
+        if !matches!(result, Ok(true)) {
+            self.send_login_error("Approval denied or expired").await;
+            self.on_close("LAN approval denied", false).await;
+            return false;
+        }
+        let lr = self.lr.clone();
+        self.grant_lan_access(&lr, ConnAuditPrimaryAuth::LanManual).await
+    }
+
+    async fn grant_lan_access(&mut self, lr: &LoginRequest, auth: ConnAuditPrimaryAuth) -> bool {
         clear_lan_auth_source(&self.ip);
         self.credential_revision_at_auth = Config::get_credential_revision();
-        self.set_conn_audit_primary_auth(ConnAuditPrimaryAuth::LanCredential);
+        self.set_conn_audit_primary_auth(auth);
         if let Some(permissions) = web_permission_set_for_transport(
-            is_web_client,
+            self.web_client,
             &Config::get_option("web-permission-profile"),
         ) {
             self.keyboard = permissions.keyboard;
@@ -2006,6 +2099,17 @@ impl Connection {
     }
 
     async fn on_message(&mut self, msg: Message) -> bool {
+        if let Some(message::Union::LanAccessProbe(probe)) = &msg.union {
+            if self.authorized || !self.stream.is_secured() || probe.version != hbb_common::lan::ACCESS_VERSION {
+                return false;
+            }
+            self.lan_access_probed = true;
+            let (code_enabled, manual_enabled) = crate::lan_access::capabilities();
+            let mut reply = Message::new();
+            reply.set_lan_access_capabilities(LanAccessCapabilities { version: hbb_common::lan::ACCESS_VERSION, code_enabled, manual_enabled, ..Default::default() });
+            self.send(reply).await;
+            return true;
+        }
         if let Some(message::Union::Misc(misc)) = &msg.union {
             // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
             if let Some(misc::Union::CloseReason(s)) = &misc.union {
@@ -4003,6 +4107,8 @@ impl Connection {
     }
 
     async fn on_close(&mut self, reason: &str, lock: bool) {
+        crate::lan_access::cancel(self.inner.id());
+        self.pending_lan_approval = None;
         if self.closed {
             return;
         }
@@ -4016,9 +4122,9 @@ impl Connection {
         //
         // We can add a (Vec<conn_id>, input device) to avoid this.
         // But it's not necessary now and we have to consider two audio services(client, server).
-        crate::audio_service::set_voice_call_input_device(None, true);
+        if self.authorized { crate::audio_service::set_voice_call_input_device(None, true); }
         log::info!("#{} Connection closed: {}", self.inner.id(), reason);
-        if lock && self.lock_after_session_end && self.keyboard {
+        if self.authorized && lock && self.lock_after_session_end && self.keyboard {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             lock_screen().await;
         }
@@ -4339,7 +4445,7 @@ impl Connection {
 
     #[cfg(windows)]
     fn portable_check(&mut self) {
-        if self.portable.is_installed || !self.is_remote() || !self.keyboard {
+        if !self.authorized || self.portable.is_installed || !self.is_remote() || !self.keyboard {
             return;
         }
         let running = portable_client::running();
@@ -5456,6 +5562,8 @@ impl Default for PortableState {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        crate::lan_access::cancel(self.inner.id());
+        if let Some(nonce) = self.pending_lan_approval.as_mut() { nonce.zeroize(); }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_pressed_modifiers();
 
@@ -6187,5 +6295,34 @@ mod test {
         assert!(!collaboration.restart);
         assert!(web_permission_set_for_transport(false, "view-only").is_none());
         assert!(web_permission_set_for_transport(true, "view-only").is_some());
+    }
+
+    #[test]
+    fn lan_access_pending_cm_is_decision_only() {
+        assert!(preauth_cm_command_allowed(&ipc::Data::Close));
+        assert!(preauth_cm_command_allowed(&ipc::Data::CmErr("expected".into())));
+        assert!(preauth_cm_command_allowed(&ipc::Data::LanApprovalDecision { nonce: "nonce".into(), accept: true }));
+        assert!(preauth_cm_command_allowed(&ipc::Data::LanApprovalDecision { nonce: "nonce".into(), accept: false }));
+    }
+
+    #[test]
+    fn lan_access_pending_cm_blocks_operational_commands_and_raw_injection() {
+        for command in [
+            ipc::Data::ChatMessage { text: "synthetic".into() },
+            ipc::Data::RawMessage(vec![1]),
+            ipc::Data::VoiceCallResponse(true),
+            ipc::Data::CloseVoiceCall("synthetic".into()),
+            ipc::Data::ClickTime(1),
+            ipc::Data::FileReadDone { id: 1, file_num: 0, conn_id: 1 },
+            ipc::Data::FileReadError { id: 1, file_num: 0, err: "synthetic".into(), conn_id: 1 },
+            ipc::Data::ReadJobInitResult { id: 1, file_num: 0, include_hidden: false, conn_id: 1, result: Err("synthetic".into()) },
+            ipc::Data::LanApprovalRequest { nonce: "nonce".into(), source: "ip".into(), scope: "screen".into(), timeout_seconds: 60 },
+        ] { assert!(!preauth_cm_command_allowed(&command)); }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn lan_access_pending_cm_blocks_elevation() {
+        assert!(!preauth_cm_command_allowed(&ipc::Data::DataPortableService(ipc::DataPortableService::RequestStart)));
     }
 }

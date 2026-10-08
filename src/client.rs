@@ -2752,6 +2752,51 @@ pub async fn send_lan_login(
     send_lan_login_with_os_login(lc, username, password, String::new(), String::new(), peer).await;
 }
 
+pub(crate) async fn send_optional_lan_login(
+    lc: Arc<RwLock<LoginConfigHandler>>, method: u32, mut code: String, peer: &mut Stream,
+) -> ResultType<()> {
+    let result = async {
+        if !peer.is_secured() { bail!("Encrypted LAN session required"); }
+        let mut probe = Message::new();
+        probe.set_lan_access_probe(LanAccessProbe { version: hbb_common::lan::ACCESS_VERSION, ..Default::default() });
+        peer.send(&probe).await?;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let capabilities = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+            if remaining == 0 { bail!("Remote version does not support the selected access method"); }
+            let Some(bytes) = peer.next_timeout(remaining).await else { bail!("Remote version does not support the selected access method"); };
+            let bytes = bytes?;
+            let msg = Message::parse_from_bytes(&bytes)?;
+            match msg.union {
+                Some(message::Union::LanAccessCapabilities(caps)) if caps.version == hbb_common::lan::ACCESS_VERSION => break caps,
+                Some(message::Union::TestDelay(test)) if !test.from_client => {
+                    let mut reply = Message::new(); reply.set_test_delay(test); peer.send(&reply).await?;
+                }
+                Some(message::Union::LoginResponse(_)) => bail!("Remote version rejected access negotiation"),
+                _ => {},
+            }
+        };
+        let enabled = match method {
+            hbb_common::lan::ACCESS_CODE => capabilities.code_enabled,
+            hbb_common::lan::ACCESS_MANUAL => capabilities.manual_enabled,
+            _ => false,
+        };
+        if !enabled { bail!("Selected access method is disabled on the receiver"); }
+        let mut request = lc.read().unwrap().create_login_msg(String::new(), String::new(), Vec::new()).login_request().clone();
+        request.username.clear(); request.password.clear();
+        request.my_id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
+        request.lan_login = MessageField::some(LanLoginRequest { access_method: method, temporary_code: std::mem::take(&mut code), ..Default::default() });
+        let mut msg = Message::new(); msg.set_login_request(request);
+        let result = peer.send(&msg).await;
+        if let Some(message::Union::LoginRequest(lr)) = msg.union.as_mut() {
+            if let Some(login) = lr.lan_login.as_mut() { login.temporary_code.zeroize(); }
+        }
+        result
+    }.await;
+    code.zeroize();
+    result
+}
+
 pub async fn send_lan_login_with_os_login(
     lc: Arc<RwLock<LoginConfigHandler>>,
     username: String,

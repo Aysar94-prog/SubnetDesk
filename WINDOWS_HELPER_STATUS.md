@@ -1,5 +1,23 @@
 # SubnetDesk Windows helper status
 
+## Approved continuation checkpoint:2026-10-08
+
+This supersedes older pending/not-implemented statements below. Chat-only80 Windows and
+Android builds/packages verified, neither installed; physical reconnect cleanup pending.
+Android credentials d422290/a9eea0f implemented: Keystore AES256-GCM, fingerprint binding,
+encrypted username/password, opt-in after success, checked read/forget and no plaintext
+history account metadata. Payload4/4, Flutter89/89, ARM64 and internal APK81 build/identity/
+signature/no-camera/alignment/native verification PASS. Preflight81 not installed and
+does not contain final hardening a9eea0f; device instrumentation/paired acceptance pending.
+Optional code/manual login now wired in SOURCE; post-trust encrypted capability negotiation,
+volatile Windows toggles, libsodium one-use120s/5-fail code, manual60s nonce/connId/queue8/
+source2, known-active-unlocked/same-process listener fail-closed, CM decisions-only UI and
+network/IPC/outbound preauth gates. Shared grant preserves scope/permissions. Android selector
+and pending cancel implemented. Policy7/7 and FRB generation PASS; compiler/Flutter/interop
+verification ongoing. No final access release/device-acceptance or all-work-complete claim.
+Original apps/data/signing/permissions/service settings unchanged. Own generated Rust cache
+verified/migrated to C with D junction, no source/private/app/release data removed.
+
 ## Session-only chat memory:2026-10-08 (build80)
 
 User correctly identified password saving, three access methods and chat cleanup as open.

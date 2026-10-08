@@ -8,6 +8,7 @@ import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/desktop/widgets/cm_session_panel.dart';
+import 'package:flutter_hbb/desktop/widgets/lan_approval_panel.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/cm_file_model.dart';
@@ -312,10 +313,16 @@ class ConnectionManagerState extends State<ConnectionManager>
       }
       final unread = serverModel.clients.fold<int>(
           0, (sum, c) => sum + c.unreadChatMessageCount.value);
-      final controls = client == null
+      final pending = client != null && !client.authorized && !client.disconnected;
+      Widget approval() => LanApprovalPanel(key: ValueKey(client?.lanApprovalNonce),
+        name: client?.name ?? '', source: client?.lanApprovalSource ?? '',
+        scope: client?.lanApprovalScope ?? '', ready: client?.lanApprovalNonce.isNotEmpty == true,
+        onDecision: (accept) => bind.cmDecideLanRequest(id: client!.id,
+          nonce: client.lanApprovalNonce, accept: accept));
+      final controls = pending ? approval() : client == null
           ? Center(child: Text(translate('Waiting')))
           : buildConnectionCard(client);
-      final chat = client == null
+      final chat = pending ? approval() : client == null
           ? Center(child: Text(translate('Waiting')))
           : Column(children: [
               Expanded(child: client.type_() == ClientType.file
@@ -331,7 +338,7 @@ class ConnectionManagerState extends State<ConnectionManager>
             block: block, mask: mask);
       return CmSessionPanel(
         title: client == null ? 'SubnetDesk' :
-            '${client.name} · ${translate(client.disconnected ? "Disconnected" : "Connected")}',
+            '${client.name} · ${pending ? "بانتظار الموافقة" : translate(client.disconnected ? "Disconnected" : "Connected")}',
         collapsed: serverModel.windowsCmCollapsed,
         showChat: chatModel.isShowCMSidePage,
         chatLabel: translate(client?.type_() == ClientType.file
@@ -342,9 +349,9 @@ class ConnectionManagerState extends State<ConnectionManager>
           attention: serverModel.chatAttention.attentionSessionId == client?.id &&
               client != null,
           soundMuted: serverModel.chatAttention.muted,
-          onToggleSound: serverModel.chatAttention.toggleMuted,
+          onToggleSound: pending ? null : serverModel.chatAttention.toggleMuted,
           voiceRingMuted: serverModel.voiceRing.muted,
-          onToggleVoiceRing: serverModel.voiceRing.toggleMuted,
+          onToggleVoiceRing: pending ? null : serverModel.voiceRing.toggleMuted,
           voiceRingError: serverModel.voiceRing.playbackError,
         sessionPicker: serverModel.clients.length < 2
             ? const SizedBox.shrink()

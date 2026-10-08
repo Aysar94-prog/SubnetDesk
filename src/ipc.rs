@@ -367,6 +367,8 @@ pub enum Data {
     #[cfg(windows)]
     ControlledSessionCount(usize),
     CmErr(String),
+    LanApprovalRequest { nonce: String, source: String, scope: String, timeout_seconds: u32 },
+    LanApprovalDecision { nonce: String, accept: bool },
     // CM-side file reading responses (Windows only)
     // These are sent from CM back to Connection when CM handles file reading
     /// Response to ReadFile: contains initial file list or error

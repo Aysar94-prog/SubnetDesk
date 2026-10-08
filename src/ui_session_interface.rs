@@ -55,6 +55,8 @@ const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct LanSessionCredential {
+    pub access_method: u32,
+    pub temporary_code: String,
     pub username: String,
     pub password: Vec<u8>,
     pub remember: bool,
@@ -221,6 +223,8 @@ impl<T: InvokeUiSession> Session<T> {
         let username = hbb_common::lan::validate_username(&username)?;
         hbb_common::lan::validate_password(password.as_bytes())?;
         let credential = LanSessionCredential {
+            access_method: hbb_common::lan::ACCESS_PASSWORD,
+            temporary_code: String::new(),
             username: username.clone(),
             password: password.as_bytes().to_vec(),
             remember,
@@ -1754,6 +1758,12 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     }
 
     async fn handle_login_error(&self, err: &str) -> bool {
+        // Optional login never clears a saved password or falls back to its dialog,
+        // even if a remote version returns a password-specific error string.
+        if self.lan_credential().map(|c| c.access_method != hbb_common::lan::ACCESS_PASSWORD).unwrap_or(false) {
+            self.msgbox("error", "Login Error", err, "");
+            return false;
+        }
         handle_login_error(self.lc.clone(), err, self).await
     }
 
@@ -1809,6 +1819,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         // legacy fingerprint-bound credential only now, never when the user
         // merely submits the dialog.
         if let Some(credential) = self.lan_credential.lock().unwrap().take() {
+            if credential.access_method == hbb_common::lan::ACCESS_PASSWORD {
             let lc = self.lc.clone();
             let interface = self.clone();
             let _ = tokio::task::spawn_blocking(move || {
@@ -1835,6 +1846,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     }
                 }
             });
+            }
         }
         // Save recent peers, then push event to flutter. So flutter can refresh peer page.
         self.lc.write().unwrap().handle_peer_info(&pi);
@@ -1877,6 +1889,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     async fn send_initial_lan_login(&self, peer: &mut Stream) {
         let mut credential = self.lan_credential();
+        if let Some(optional) = credential.as_mut().filter(|c| c.access_method != hbb_common::lan::ACCESS_PASSWORD) {
+            let result = crate::client::send_optional_lan_login(self.lc.clone(), optional.access_method,
+                std::mem::take(&mut optional.temporary_code), peer).await;
+            if let Err(err) = result {
+                self.msgbox("error", "Login Error", &err.to_string(), "");
+                self.send(Data::Close);
+            }
+            return;
+        }
         let mut explicit_identity_requested = false;
         if credential.is_none() {
             let requested_identity = self.lan_identity_request.lock().unwrap().clone();
@@ -1895,6 +1916,8 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             match identity_result {
                 Ok(Ok(Some((identity, bind_identity_on_success)))) => {
                     let identity_credential = LanSessionCredential {
+                        access_method: hbb_common::lan::ACCESS_PASSWORD,
+                        temporary_code: String::new(),
                         username: identity.username,
                         password: identity.password,
                         remember: false,
@@ -1934,6 +1957,8 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             };
             if let Some((username, password)) = remembered {
                 let remembered = LanSessionCredential {
+                    access_method: hbb_common::lan::ACCESS_PASSWORD,
+                    temporary_code: String::new(),
                     username,
                     password,
                     remember: true,

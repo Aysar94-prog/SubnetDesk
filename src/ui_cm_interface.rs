@@ -147,6 +147,10 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    pub lan_approval_nonce: String,
+    pub lan_approval_source: String,
+    pub lan_approval_scope: String,
+    pub lan_approval_timeout_seconds: u32,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -261,6 +265,10 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
+            lan_approval_nonce: String::new(),
+            lan_approval_source: String::new(),
+            lan_approval_scope: String::new(),
+            lan_approval_timeout_seconds: 0,
         };
         CLIENTS
             .write()
@@ -482,6 +490,19 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     }
                                     self.running = true;
                                     break;
+                                }
+                                Data::LanApprovalRequest { nonce, source, scope, timeout_seconds } => {
+                                    let updated = {
+                                        let mut clients = CLIENTS.write().unwrap();
+                                        clients.get_mut(&self.conn_id).filter(|c| !c.authorized && !c.disconnected).map(|client| {
+                                            client.lan_approval_nonce = nonce;
+                                            client.lan_approval_source = source;
+                                            client.lan_approval_scope = scope;
+                                            client.lan_approval_timeout_seconds = timeout_seconds;
+                                            client.clone()
+                                        })
+                                    };
+                                    if let Some(client) = updated { self.cm.ui_handler.add_connection(&client); }
                                 }
                                 Data::Close => {
                                     log::info!("cm ipc connection closed from connection request");
@@ -1543,6 +1564,20 @@ pub fn can_elevate() -> bool {
     return !crate::platform::is_installed();
     #[cfg(not(windows))]
     return false;
+}
+
+pub(crate) fn decide_lan_request(id: i32, nonce: String, accept: bool) -> Result<(), &'static str> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let clients = CLIENTS.read().unwrap();
+        let Some(client) = clients.get(&id) else { return Err("Request no longer exists"); };
+        if client.authorized || client.disconnected || nonce.is_empty() || client.lan_approval_nonce != nonce {
+            return Err("Request no longer awaits approval");
+        }
+        client.tx.send(Data::LanApprovalDecision { nonce, accept }).map_err(|_| "Connection manager channel closed")
+    }
+    #[cfg(target_os = "ios")]
+    { let _ = (id, nonce, accept); Err("Unsupported platform") }
 }
 
 pub fn elevate_portable(_id: i32) {

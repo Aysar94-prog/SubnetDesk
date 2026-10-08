@@ -50,6 +50,10 @@ pub type FlutterSession = Arc<Session<FlutterHandler>>;
 struct LanCredentialPayload {
     lan_version: u32,
     #[serde(default)]
+    access_method: u32,
+    #[serde(default)]
+    temporary_code: String,
+    #[serde(default)]
     identity_id: String,
     #[serde(default)]
     username: String,
@@ -1402,7 +1406,23 @@ pub fn session_add(
         if payload.lan_version != hbb_common::lan::PROTOCOL_VERSION {
             bail!("Unsupported LAN credential payload version");
         }
-        if !payload.identity_id.is_empty() {
+        if payload.access_method != hbb_common::lan::ACCESS_PASSWORD {
+            if !payload.identity_id.is_empty() || !payload.username.is_empty() || !payload.password.is_empty()
+                || payload.remember || payload.bind_identity {
+                bail!("Optional access must not include or save credentials");
+            }
+            match payload.access_method {
+                hbb_common::lan::ACCESS_CODE if payload.temporary_code.len() == 6
+                    && payload.temporary_code.bytes().all(|byte| byte.is_ascii_digit()) => {},
+                hbb_common::lan::ACCESS_MANUAL if payload.temporary_code.is_empty() => {},
+                _ => bail!("Invalid access method or temporary code"),
+            }
+            (Some(LanSessionCredential { access_method: payload.access_method, temporary_code: payload.temporary_code,
+                username: String::new(), password: Vec::new(), remember: false, identity_id: String::new(),
+                bind_identity_on_success: false }), None)
+        } else if !payload.temporary_code.is_empty() {
+            bail!("Password login must not include a temporary code");
+        } else if !payload.identity_id.is_empty() {
             if !payload.username.is_empty() || !payload.password.is_empty() {
                 bail!("LAN identity payload must not include plaintext credentials");
             }
@@ -1421,6 +1441,8 @@ pub fn session_add(
             hbb_common::lan::validate_password(payload.password.as_bytes())?;
             (
                 Some(LanSessionCredential {
+                    access_method: hbb_common::lan::ACCESS_PASSWORD,
+                    temporary_code: String::new(),
                     username,
                     password: payload.password.into_bytes(),
                     remember: payload.remember,

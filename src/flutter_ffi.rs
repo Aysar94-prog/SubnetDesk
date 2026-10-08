@@ -2331,6 +2331,20 @@ pub fn cm_send_chat(conn_id: i32, msg: String) {
     crate::ui_cm_interface::send_chat(conn_id, msg);
 }
 
+pub fn main_get_lan_optional_access() -> String { crate::lan_access::state_json() }
+
+pub fn main_set_lan_optional_access(code: bool, manual: bool) -> String {
+    crate::lan_access::configure(code, manual).err().unwrap_or_default().to_owned()
+}
+
+pub fn main_regenerate_lan_code() -> String {
+    crate::lan_access::regenerate_code().err().unwrap_or_default().to_owned()
+}
+
+pub fn cm_decide_lan_request(id: i32, nonce: String, accept: bool) -> String {
+    crate::ui_cm_interface::decide_lan_request(id, nonce, accept).err().unwrap_or_default().to_owned()
+}
+
 pub fn cm_close_connection(conn_id: i32) {
     #[cfg(not(any(target_os = "ios")))]
     crate::ui_cm_interface::close(conn_id);

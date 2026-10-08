@@ -384,9 +384,28 @@ class ServerModel with ChangeNotifier {
         _clients[index].privacyMode = client.privacyMode;
         if (isWindows && desktopType == DesktopType.cm) {
           _clients[index].authorized = client.authorized;
+          _clients[index].isFileTransfer = client.isFileTransfer;
+          _clients[index].isTerminal = client.isTerminal;
+          _clients[index].portForward = client.portForward;
+          _clients[index].keyboard = client.keyboard;
+          _clients[index].clipboard = client.clipboard;
+          _clients[index].audio = client.audio;
+          _clients[index].file = client.file;
+          _clients[index].restart = client.restart;
+          _clients[index].recording = client.recording;
+          _clients[index].blockInput = client.blockInput;
           _clients[index].disconnected = client.disconnected;
           _clients[index].inVoiceCall = client.inVoiceCall;
           _clients[index].incomingVoiceCall = client.incomingVoiceCall;
+          _clients[index].lanApprovalNonce = client.lanApprovalNonce;
+          _clients[index].lanApprovalSource = client.lanApprovalSource;
+          _clients[index].lanApprovalScope = client.lanApprovalScope;
+          _clients[index].lanApprovalTimeoutSeconds = client.lanApprovalTimeoutSeconds;
+          if (client.lanApprovalNonce.isNotEmpty && !hideCm) {
+            windowsCmCollapsed = false;
+            jumpTo(client.id);
+            showCmWindow(restore: true);
+          }
           _syncVoiceRing();
         }
         notifyListeners();
@@ -677,6 +696,10 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
+  String lanApprovalNonce = '';
+  String lanApprovalSource = '';
+  String lanApprovalScope = '';
+  int lanApprovalTimeoutSeconds = 0;
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -706,6 +729,10 @@ class Client {
     fromSwitch = json['from_switch'];
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
+    lanApprovalNonce = json['lan_approval_nonce'] ?? '';
+    lanApprovalSource = json['lan_approval_source'] ?? '';
+    lanApprovalScope = json['lan_approval_scope'] ?? '';
+    lanApprovalTimeoutSeconds = json['lan_approval_timeout_seconds'] ?? 0;
   }
 
   Map<String, dynamic> toJson() {
@@ -731,6 +758,10 @@ class Client {
     data['from_switch'] = fromSwitch;
     data['in_voice_call'] = inVoiceCall;
     data['incoming_voice_call'] = incomingVoiceCall;
+    data['lan_approval_nonce'] = lanApprovalNonce;
+    data['lan_approval_source'] = lanApprovalSource;
+    data['lan_approval_scope'] = lanApprovalScope;
+    data['lan_approval_timeout_seconds'] = lanApprovalTimeoutSeconds;
     return data;
   }
 

@@ -1055,6 +1055,13 @@ pub fn get_current_process_session_id() -> Option<u32> {
     get_session_id_of_process(unsafe { GetCurrentProcessId() })
 }
 
+pub(crate) fn optional_lan_access_available() -> bool {
+    extern "C" { fn is_session_known_unlocked(session_id: DWORD) -> BOOL; }
+    let Some(sid) = get_current_process_session_id() else { return false; };
+    sid != 0 && !get_session_username(sid).is_empty()
+        && unsafe { is_session_known_unlocked(sid) == TRUE }
+}
+
 pub fn get_session_id_of_process(pid: DWORD) -> Option<u32> {
     let mut sid = 0;
     if unsafe { ProcessIdToSessionId(pid, &mut sid) == TRUE } {

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:auto_size_text_field/auto_size_text_field.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/formatter/id_formatter.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
 import 'package:get/get.dart';
@@ -45,6 +46,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _rememberPassword = false;
+  int _accessMethod = 0;
+  final TextEditingController _codeController = TextEditingController();
   String _credentialEndpoint = '';
 
   final AllPeersLoader _allPeersLoader = AllPeersLoader();
@@ -112,7 +115,12 @@ class _ConnectionPageState extends State<ConnectionPage> {
     final endpoint = _idController.id;
     final username = _usernameController.text.trim();
     final password = _passwordController.text;
-    if (endpoint.isEmpty || (username.isEmpty && password.isNotEmpty)) {
+    final code = _codeController.text.trim();
+    if (_accessMethod == 1 && !RegExp(r'^[0-9]{6}$').hasMatch(code)) {
+      showToast('أدخل كودًا من 6 أرقام');
+      return;
+    }
+    if (endpoint.isEmpty || (_accessMethod == 0 && username.isEmpty && password.isNotEmpty)) {
       showToast(
         '${translate('Local Address')} · ${translate('Username')} · ${translate('Password')}',
       );
@@ -124,7 +132,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
       isFileTransfer: isFileTransfer,
       isViewCamera: isViewCamera,
       isTerminal: isTerminal,
-      password: password.isEmpty
+      password: _accessMethod != 0
+          ? jsonEncode({'lan_version': 1, 'access_method': _accessMethod,
+              'temporary_code': _accessMethod == 1 ? code : ''})
+          : password.isEmpty
           ? null
           : jsonEncode({
               'lan_version': 1,
@@ -134,6 +145,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
             }),
     );
     _passwordController.clear();
+    _codeController.clear();
     if (mounted) setState(() => _rememberPassword = false);
   }
 
@@ -378,6 +390,31 @@ class _ConnectionPageState extends State<ConnectionPage> {
             true,
           ).marginOnly(bottom: 10, top: 15, left: 12),
         w,
+        if (isAndroid)
+          DropdownButtonFormField<int>(
+            value: _accessMethod,
+            decoration: const InputDecoration(labelText: 'طريقة الدخول'),
+            items: const [
+              DropdownMenuItem(value: 0, child: Text('كلمة المرور / المحفوظة')),
+              DropdownMenuItem(value: 1, child: Text('كود مؤقت من المستقبل')),
+              DropdownMenuItem(value: 2, child: Text('طلب موافقة يدوية')),
+            ],
+            onChanged: (value) => setState(() {
+              _accessMethod = value ?? 0;
+              _rememberPassword = false;
+              _passwordController.clear();
+              _codeController.clear();
+            }),
+          ),
+        if (_accessMethod == 1)
+          TextField(controller: _codeController, keyboardType: TextInputType.number,
+            autocorrect: false, enableSuggestions: false, maxLength: 6,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: const InputDecoration(labelText: 'كود المستقبل (6 أرقام)'),
+            onSubmitted: (_) => onConnect()),
+        if (_accessMethod == 2)
+          const Padding(padding: EdgeInsets.all(8), child: Text('سيظهر طلب على الكمبيوتر؛ لا يبدأ التحكم قبل القبول.')),
+        if (_accessMethod == 0)
         TextField(
           controller: _usernameController,
           autocorrect: false,
@@ -387,7 +424,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
             prefixIcon: const Icon(Icons.person_outline),
           ),
         ).marginSymmetric(horizontal: 4, vertical: 4),
-        TextField(
+        if (_accessMethod == 0) TextField(
           controller: _passwordController,
           obscureText: true,
           autocorrect: false,
@@ -398,7 +435,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
           ),
           onSubmitted: (_) => onConnect(),
         ).marginSymmetric(horizontal: 4, vertical: 4),
-        if (isAndroid)
+        if (isAndroid && _accessMethod == 0)
           CheckboxListTile(
             value: _rememberPassword,
             onChanged: (value) => setState(() => _rememberPassword = value == true),
@@ -460,6 +497,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
     _idEditingController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _codeController.dispose();
     if (Get.isRegistered<IDTextEditingController>()) {
       Get.delete<IDTextEditingController>();
     }

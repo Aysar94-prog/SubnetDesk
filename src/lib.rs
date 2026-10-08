@@ -23,6 +23,8 @@ mod android_credentials;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod lan_mdns;
 mod lan_protocol;
+mod lan_access_policy;
+mod lan_access;
 mod chat_attention;
 mod private_build;
 mod camera_access;

@@ -999,7 +999,10 @@ class FfiModel with ChangeNotifier {
       parent.target?.inputModel.setRelativeMouseMode(false);
     }
 
-    if (type == 'lan-login-required') {
+    if (type == 'lan-access-pending') {
+      dialogManager.dismissAll();
+      dialogManager.showLoading('بانتظار موافقة المستقبل (حتى 60 ثانية)', onCancel: closeConnection);
+    } else if (type == 'lan-login-required') {
       enterLanLoginDialog(
         sessionId,
         dialogManager,
