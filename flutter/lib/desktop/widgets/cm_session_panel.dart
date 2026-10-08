@@ -23,6 +23,7 @@ class CmSessionPanel extends StatelessWidget {
     this.onToggleSound,
     this.voiceRingMuted = false,
     this.onToggleVoiceRing,
+    this.voiceRingError,
   });
 
   final String title;
@@ -43,6 +44,7 @@ class CmSessionPanel extends StatelessWidget {
   final VoidCallback? onToggleSound;
   final bool voiceRingMuted;
   final VoidCallback? onToggleVoiceRing;
+  final String? voiceRingError;
 
   @override
   Widget build(BuildContext context) {
@@ -121,6 +123,12 @@ class CmSessionPanel extends StatelessWidget {
           ),
         ),
         if (!collapsed) ...[
+          if (voiceRingError != null)
+            Padding(
+              padding: const EdgeInsets.all(8),
+              child: Text(voiceRingError!, key: const ValueKey('cm-voice-ring-error'),
+                  style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            ),
           sessionPicker,
           Row(
             children: [

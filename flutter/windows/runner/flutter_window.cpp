@@ -13,12 +13,14 @@
 #include <flutter/standard_method_codec.h>
 
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <optional>
 #include <memory>
 #include <algorithm>
 
 #include "win32_desktop.h"
+#include "voice_ring_wave.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -41,6 +43,34 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  voice_audio_channel_ = std::make_unique<flutter::MethodChannel<>>(
+      flutter_controller_->engine()->messenger(), "subnetdesk/audio",
+      &flutter::StandardMethodCodec::GetInstance());
+  voice_audio_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<>& call,
+             std::unique_ptr<flutter::MethodResult<>> result) {
+        if (call.method_name() == "playVoiceRing") {
+          const auto& wave = VoiceRingWave();
+          // No SND_SYSTEM: use this app's audio session and respect its volume.
+          if (!PlaySoundW(reinterpret_cast<LPCWSTR>(wave.data()), nullptr,
+                          SND_MEMORY | SND_ASYNC | SND_NODEFAULT)) {
+            result->Error("audio-playback", "Windows could not start the ringtone");
+            return;
+          }
+          voice_audio_started_ = true;
+          result->Success();
+        } else if (call.method_name() == "stopVoiceRing") {
+          if (voice_audio_started_ && !PlaySoundW(nullptr, nullptr, 0)) {
+            result->Error("audio-stop", "Windows could not stop the ringtone");
+            return;
+          }
+          voice_audio_started_ = false;
+          result->Success();
+        } else {
+          result->NotImplemented();
+        }
+      });
 
   attention_channel_ = std::make_unique<flutter::MethodChannel<>>(
       flutter_controller_->engine()->messenger(), "subnetdesk/window",
@@ -130,6 +160,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (voice_audio_started_) PlaySoundW(nullptr, nullptr, 0);
+  voice_audio_channel_.reset();
   attention_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;

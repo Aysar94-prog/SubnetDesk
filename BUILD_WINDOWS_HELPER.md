@@ -1,5 +1,20 @@
 # Local Windows helper build checkpoint
 
+## Incoming ringtone build79:2026-10-08
+
+Windows frontend/runner-only repair. Backend1.3.3 and Android APK unchanged.
+Use outputs/SubnetDesk-helper-cm/checks/build-private-helper.ps1 with
+`-FrontendOnly -BuildName 1.3.3 -BuildNumber 79`. FrontendOnly verifies the existing
+no-updater DLL hash9054FD39049AF4C52CCE0D7DB86F82D53A9EE85EFA59552F68958BDC62F2D570
+and skips Rust build/tests; never substitute a software-update-feature test DLL.
+Native waveform and command-line tests: configure/build/ctest the runner/tests CMake
+project with Visual Studio17 2022 and an explicit matching generator instance (the old
+cached native-cmake directory incorrectly points a VS17 generator at a VS18 instance).
+Fresh checks/native-ring-cmake79 passes2/2 with /W4 /WX.
+Build file version1.3.3+79 is distinct from frozen1.3.3+78; Rust CLI/UI still reports1.3.3.
+Dedicated memory buffer has static lifetime during asynchronous PlaySound; no sound scheme
+lookup, no SND_SYSTEM/volume override. Real audible test is separate from automated tests.
+
 ## Private1.3.3+78 camera-removal checkpoint:2026-10-08
 
 This version removes View camera entry points and rejects camera sessions natively while

@@ -3,6 +3,39 @@ import 'package:flutter_hbb/desktop/widgets/cm_session_panel.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('native ringtone failure is displayed in the dock', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SizedBox(
+            width: 360,
+            height: 600,
+            child: CmSessionPanel(
+              title: 'Phone',
+              collapsed: false,
+              showChat: true,
+              chatLabel: 'Chat',
+              controlsLabel: 'Controls',
+              foldLabel: 'Fold',
+              sessionPicker: const SizedBox.shrink(),
+              chat: const Text('Chat'),
+              controls: const Text('Controls'),
+              onFold: () {},
+              onShowChat: () {},
+              onShowControls: () {},
+              voiceRingError: 'Ringtone playback failed.',
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(find.byKey(const ValueKey('cm-voice-ring-error')), findsOneWidget);
+    expect(find.text('Ringtone playback failed.'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   Future<void> mount(WidgetTester tester, {int unread = 0}) async {
     await tester.pumpWidget(MaterialApp(home: _PanelHost(unread: unread)));
   }
@@ -58,7 +91,9 @@ void main() {
     expect(find.text('keep draft'), findsOneWidget);
   });
 
-  testWidgets('chat input accepts keyboard text after reopening', (tester) async {
+  testWidgets('chat input accepts keyboard text after reopening', (
+    tester,
+  ) async {
     await mount(tester);
     await tester.tap(find.byKey(const ValueKey('cm-fold')));
     await tester.pump();

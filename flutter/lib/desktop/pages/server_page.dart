@@ -345,6 +345,7 @@ class ConnectionManagerState extends State<ConnectionManager>
           onToggleSound: serverModel.chatAttention.toggleMuted,
           voiceRingMuted: serverModel.voiceRing.muted,
           onToggleVoiceRing: serverModel.voiceRing.toggleMuted,
+          voiceRingError: serverModel.voiceRing.playbackError,
         sessionPicker: serverModel.clients.length < 2
             ? const SizedBox.shrink()
             : Padding(
@@ -946,6 +947,7 @@ class _CmControlPanel extends StatelessWidget {
   }
 
   void handleDisconnect() {
+    gFFI.serverModel.voiceRing.silence(client.id);
     bind.cmCloseConnection(connId: client.id);
   }
 
@@ -963,6 +965,7 @@ class _CmControlPanel extends StatelessWidget {
   }
 
   void handleVoiceCall(bool accept) {
+    gFFI.serverModel.voiceRing.silence(client.id);
     bind.cmHandleIncomingVoiceCall(id: client.id, accept: accept);
   }
 

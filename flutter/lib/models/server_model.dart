@@ -357,6 +357,7 @@ class ServerModel with ChangeNotifier {
         debugPrint("Failed to decode clientJson '$clientJson', error $e");
       }
     }
+    _syncVoiceRing();
     if (desktopType == DesktopType.cm) {
       if (_clients.isEmpty) {
         hideCmWindow();
@@ -379,6 +380,13 @@ class ServerModel with ChangeNotifier {
         _clients.add(client);
       } else {
         _clients[index].privacyMode = client.privacyMode;
+        if (isWindows && desktopType == DesktopType.cm) {
+          _clients[index].authorized = client.authorized;
+          _clients[index].disconnected = client.disconnected;
+          _clients[index].inVoiceCall = client.inVoiceCall;
+          _clients[index].incomingVoiceCall = client.incomingVoiceCall;
+          _syncVoiceRing();
+        }
         notifyListeners();
         return;
       }
@@ -390,6 +398,7 @@ class ServerModel with ChangeNotifier {
         _clients.removeAt(index_disconnected);
         tabController.remove(index_disconnected);
       }
+      _syncVoiceRing();
       if (desktopType == DesktopType.cm && !hideCm) {
         if (isWindows) windowsCmCollapsed = false;
         showCmWindow(restore: isWindows);
@@ -424,6 +433,7 @@ class ServerModel with ChangeNotifier {
   }
 
   handleVoiceCall(Client client, bool accept) {
+    if (isWindows && desktopType == DesktopType.cm) voiceRing.silence(client.id);
     parent.target?.invokeMethod("cancel_notification", client.id);
     bind.cmHandleIncomingVoiceCall(id: client.id, accept: accept);
   }
@@ -523,6 +533,7 @@ class ServerModel with ChangeNotifier {
     await Future.wait(
         _clients.map((client) => bind.cmCloseConnection(connId: client.id)));
     _clients.clear();
+    _syncVoiceRing();
     tabController.state.value.tabs.clear();
     if (isAndroid) androidUpdatekeepScreenOn();
   }
@@ -573,13 +584,9 @@ class ServerModel with ChangeNotifier {
       final client = Client.fromJson(jsonDecode(evt["client"]));
       final index = _clients.indexWhere((element) => element.id == client.id);
       if (index != -1) {
-        if (isWindows && desktopType == DesktopType.cm) {
-          voiceRing.update(client.id, incoming: client.incomingVoiceCall &&
-              !client.inVoiceCall && _clients[index].authorized &&
-              !_clients[index].disconnected);
-        }
         _clients[index].inVoiceCall = client.inVoiceCall;
         _clients[index].incomingVoiceCall = client.incomingVoiceCall;
+        _syncVoiceRing();
         if (client.incomingVoiceCall) {
           if (isAndroid) {
             showVoiceCallDialog(client);
@@ -598,10 +605,21 @@ class ServerModel with ChangeNotifier {
           }
         }
         notifyListeners();
+      } else if (isWindows && desktopType == DesktopType.cm) {
+        // Native state is authoritative; never authorize an unknown event here.
+        updateClientState();
       }
     } catch (e) {
       debugPrint("updateVoiceCallState failed: $e");
     }
+  }
+
+  void _syncVoiceRing() {
+    if (!isWindows || desktopType != DesktopType.cm) return;
+    voiceRing.synchronize(_clients.where((client) => IncomingVoiceRing.shouldRing(
+        authorized: client.authorized, connected: !client.disconnected,
+        incoming: client.incomingVoiceCall, inCall: client.inVoiceCall))
+        .map((client) => client.id));
   }
 
   void androidUpdatekeepScreenOn() async {

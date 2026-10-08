@@ -1,5 +1,29 @@
 # SubnetDesk Windows helper status
 
+## Incoming ringtone repair:2026-10-08 (build79)
+
+Physical ring acceptance on running1.3.3+78 FAILED: user heard no ring. Actual child CM7416
+of main25332 showed Accept/Dismiss and "Mute call ringtone" (mute off). System sound file
+exists; OS output/volume were not changed. Source SystemSound.alert called MessageBeep
+through Flutter, whose return was ignored; snapshot/add paths could miss starting the ring.
+These are verified source weaknesses, not a proven single runtime cause.
+
+Windows-only repair replaces SystemSound with app-owned 16kHz mono PCM double-burst tone,
+asynchronous WinMM playback on the app audio session (not system-sounds session). Native
+start/stop return values checked; failure displayed in the expanded dock. Snapshot/add/event
+paths synchronize authorized connected pending calls. Duplicate sync cannot reset30s limit;
+local answer/reject stays silent until native clears pending state. Mute/last cancellation/
+timeout/disconnect/dispose stop actual playback, not only the schedule. No auto-answer,
+microphone access, volume override or new dependencies. Windows system winmm linked only.
+
+Windows frontend1.3.3+79 release PASS; frozen-source rebuild and Flutter73/73 PASS;
+CTest2/2 PASS (production runner arguments and waveform format/amplitude/buffer lifetime).
+Candidate is staged separately; archives/status follow after this source snapshot.
+No audible acceptance claim; running78 has not been switched. User repeated the call while
+78 was still running and again heard no sound; this does not test79. Rust backend1.3.3 remains unchanged; hash pinned to
+9054FD39049AF4C52CCE0D7DB86F82D53A9EE85EFA59552F68958BDC62F2D570.
+Android APK/signing/native library and frozen78 artifacts unchanged. No wire/LAN changes.
+
 ## Camera removal checkpoint:2026-10-08
 
 Final Windows1.3.3+78 native no-updater release and Flutter release builds PASS; full Flutter
