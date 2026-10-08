@@ -1,5 +1,25 @@
 # SubnetDesk Windows helper status
 
+## Final feature82 automated checkpoint:2026-10-08
+
+Feature inputs frozen at bd628d9cf9f6ebb8287b710e6d162be90da46cf6, common3bc0a6d.
+Version1.3.4, intended Windows1.3.4+82 / helper Android1.3.4(code2082).
+Compiled native access policy/CM preauth10/10, common encrypted wire contract3/3,
+final Flutter96/96 PASS. Extra compiled native tests PASS: no-updater3/3, camera3/3,
+credential payload4/4, encrypted LAN handshake/transport6/6. Current native test
+build excludes software-update (the feature-enabled check is earlier historical evidence).
+ARM64 native82 PASS4m18s; Windows full release and Android final APK still building.
+Device credential instrumentation APK built8m11s but not installed/run yet. No final
+release/runtime/paired acceptance claim; old Windows79/helper Android78 still running.
+The optional Windows control pane is bounded/scrollable and defaults off; listener
+unavailable cannot enable it. Human handles app security settings/local decisions.
+
+Reproduction uses output checks/build-private-helper.ps1 -AccessTest, -ProtocolTest,
+then full -BuildName1.3.4 -BuildNumber82 (not FrontendOnly); Android uses full
+build-android-private-helper.ps1 -KeepNativeCache -BuildName1.3.4 -BuildNumber82
+(not ApkOnly). Matching-source packaging includes regenerated FRB and patched common.
+Original apps/data/service settings, side-by-side package/signing and permissions preserved.
+
 ## Approved continuation checkpoint:2026-10-08
 
 This supersedes older pending/not-implemented statements below. Chat-only80 Windows and
