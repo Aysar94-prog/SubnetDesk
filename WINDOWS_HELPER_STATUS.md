@@ -1,5 +1,22 @@
 # SubnetDesk Windows helper status
 
+## Session-only chat memory:2026-10-08 (build80)
+
+User correctly identified password saving, three access methods and chat cleanup as open.
+Chat cleanup now implemented in shared Flutter only: peer+connection identity (not peer
+lifetime), clear held message lists before removal, clear selected draft/latest/unread state
+on incoming disconnect even when its disconnected card remains, authoritative snapshot
+recovery, outgoing connection-error/restart/reconnect and close/dispose. Async receives
+check connection/generation after yields; hiding/folding/tabs and voice-call end alone do
+not clear chat. Logical application-owned state cleanup, not forensic RAM/string zeroing.
+
+Memory8/8 and ChatModel lifecycle8/8; final full Flutter89/89 PASS. Windows frontend release
+1.3.3+80 PASS149.0s; existing private no-updater Rust DLL preserved/verified. Android APK80
+build pending. No new code/protocol/signing/permission changes outside chat lifecycle.
+Neither running app switched for this task; paired real reconnect and network-loss acceptance
+still pending. Password Keystore storage and code/manual access remain approved NOT implemented.
+No all-requests completion claim. See canonical PLAN-SUBNETDESK-CHAT-MEMORY.md.
+
 ## Incoming ringtone repair:2026-10-08 (build79)
 
 Physical ring acceptance on running1.3.3+78 FAILED: user heard no ring. Actual child CM7416

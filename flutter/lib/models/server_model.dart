@@ -358,6 +358,8 @@ class ServerModel with ChangeNotifier {
       }
     }
     _syncVoiceRing();
+    parent.target?.chatModel.retainIncomingSessions(_clients
+        .where((client) => !client.disconnected).map((client) => client.id).toSet());
     if (desktopType == DesktopType.cm) {
       if (_clients.isEmpty) {
         hideCmWindow();
@@ -509,6 +511,7 @@ class ServerModel with ChangeNotifier {
       if (_clients.any((c) => c.id == id)) {
         final index = _clients.indexWhere((client) => client.id == id);
         if (index >= 0) {
+          _clients[index].unreadChatMessageCount.value = 0;
           if (close) {
             _clients.removeAt(index);
             tabController.remove(index);
@@ -519,6 +522,7 @@ class ServerModel with ChangeNotifier {
         parent.target?.dialogManager.dismissByTag(getLoginDialogTag(id));
         parent.target?.invokeMethod("cancel_notification", id);
       }
+      parent.target?.chatModel.removeSession(id);
       if (desktopType == DesktopType.cm && _clients.isEmpty) {
         hideCmWindow();
       }
@@ -534,6 +538,7 @@ class ServerModel with ChangeNotifier {
         _clients.map((client) => bind.cmCloseConnection(connId: client.id)));
     _clients.clear();
     _syncVoiceRing();
+    parent.target?.chatModel.retainIncomingSessions({});
     tabController.state.value.tabs.clear();
     if (isAndroid) androidUpdatekeepScreenOn();
   }

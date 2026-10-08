@@ -984,6 +984,11 @@ class FfiModel with ChangeNotifier {
     final text = evt['text'];
     final link = evt['link'];
 
+    // A lost/restarted remote connection starts a fresh chat on reconnect.
+    if (title == 'Connection Error' || type == 'restarting' || type == 'restarting-show') {
+      parent.target?.chatModel.resetClientMode();
+    }
+
     // Disable relative mouse mode on any error-type message to ensure cursor is released.
     // This includes connection errors, session-ending messages, elevation errors, etc.
     // Safety: releasing pointer lock on errors prevents the user from being stuck.
@@ -1226,6 +1231,7 @@ class FfiModel with ChangeNotifier {
     bool _manual,
   ) {
     // Disable relative mouse mode before reconnecting to ensure cursor is released.
+    parent.target?.chatModel.resetClientMode();
     parent.target?.inputModel.setRelativeMouseMode(false);
     _cancelPendingMonitorRestore();
     bind.sessionReconnect(sessionId: sessionId);
