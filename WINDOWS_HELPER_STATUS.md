@@ -1,5 +1,24 @@
 # SubnetDesk Windows helper status
 
+## Build82 runtime checkpoint:2026-10-08
+
+Full Windows native8m50s + Flutter130.1s + final Flutter96/96 PASS; staged matching
+DLL8EB80CAC7EA125751BA05DCB4EE7C1CAEF1AA8B30C7663AABD0CC885D803CABD,
+runnerA7D305785ED5E65DD6E89B0F7A453E841F1E2E463E504B2A06EE4EFC358EA2EA,
+file1.3.4+82. Old idle79 closed normally; new main PID25660 owns listener21118,
+UI confirms v1.3.4. Windows Firewall prompt requires human action; no security UI
+automation, settings or original-service mutation (original remains Stopped/Automatic).
+Actual local host Wi-Fi192.168.1.12; historical192.168.1.61 is another discovered peer.
+Full Android native4m18s/APK390.2s, preserved signer/version/no-camera/alignment/exact
+native checks PASS, approved helper install-r1.3.4/code2082 succeeded, original2075
+unchanged. Existing user microphone grant retained. Device Keystore instrumentation
+PASS against actual release helper: synthetic save/load/random nonce/fingerprint AAD/
+tamper/forget/path validation. Initial Kotlin driver crashed before tests on Function1
+removed by release shrinking; framework-only Java driver f678dbd fixed test dependency,
+no production source changed. This does not prove native JNI/paired remember flows.
+Paired save/restart/forget/new-IP/trust/code/manual/chat/ringtone acceptance remains;
+optional methods off by default and human must enable/approve. Not all requests complete.
+
 ## Final feature82 automated checkpoint:2026-10-08
 
 Feature inputs frozen at bd628d9cf9f6ebb8287b710e6d162be90da46cf6, common3bc0a6d.
