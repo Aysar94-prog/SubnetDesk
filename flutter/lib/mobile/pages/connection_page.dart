@@ -44,6 +44,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
   final TextEditingController _idEditingController = TextEditingController();
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  bool _rememberPassword = false;
 
   final AllPeersLoader _allPeersLoader = AllPeersLoader();
 
@@ -56,6 +57,13 @@ class _ConnectionPageState extends State<ConnectionPage> {
     if (!isWeb) _uniLinksSubscription = listenUniLinks();
     _idController.addListener(() {
       _idEmpty.value = _idController.text.isEmpty;
+      if (_rememberPassword) {
+        if (mounted) {
+          setState(() => _rememberPassword = false);
+        } else {
+          _rememberPassword = false;
+        }
+      }
     });
     Get.put<IDTextEditingController>(_idController);
   }
@@ -119,10 +127,11 @@ class _ConnectionPageState extends State<ConnectionPage> {
               'lan_version': 1,
               'username': username,
               'password': password,
-              'remember': false,
+              'remember': _rememberPassword,
             }),
     );
     _passwordController.clear();
+    if (mounted) setState(() => _rememberPassword = false);
   }
 
   void onFocusChanged() {
@@ -386,6 +395,16 @@ class _ConnectionPageState extends State<ConnectionPage> {
           ),
           onSubmitted: (_) => onConnect(),
         ).marginSymmetric(horizontal: 4, vertical: 4),
+        if (isAndroid)
+          CheckboxListTile(
+            value: _rememberPassword,
+            onChanged: (value) => setState(() => _rememberPassword = value == true),
+            dense: true,
+            contentPadding: EdgeInsets.symmetric(horizontal: 4),
+            controlAffinity: ListTileControlAffinity.leading,
+            title: Text(translate('Remember password')),
+            subtitle: Text('يحفظ لهذا الجهاز بعد نجاح الدخول فقط'),
+          ),
         LayoutBuilder(
           builder: (context, constraints) {
             final singleColumn = constraints.maxWidth < 340;

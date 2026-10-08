@@ -1830,7 +1830,9 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                         interface.msgbox("error", "Failed", "Remember password", "");
                     }
                 } else {
-                    lc.clear_remembered_lan_credential();
+                    if lc.clear_remembered_lan_credential_checked().is_err() {
+                        interface.msgbox("error", "Failed", "Unable to remove the saved credential", "");
+                    }
                 }
             });
         }
@@ -1916,11 +1918,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         if credential.is_none() && !explicit_identity_requested {
             let lc = self.lc.clone();
             let remembered = match tokio::task::spawn_blocking(move || {
-                lc.read().unwrap().load_remembered_lan_credential()
+                lc.read().unwrap().load_remembered_lan_credential_checked()
             })
             .await
             {
-                Ok(remembered) => remembered,
+                Ok(Ok(remembered)) => remembered,
+                Ok(Err(_)) => {
+                    self.msgbox("error", "Failed", "Unable to read the encrypted credential store. Enter credentials manually or use Forget password.", "");
+                    None
+                }
                 Err(err) => {
                     log::warn!("Failed to read the remembered LAN credential: {err}");
                     None

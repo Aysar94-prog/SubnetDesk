@@ -18,6 +18,8 @@ pub mod common;
 pub mod ipc;
 mod lan;
 mod lan_identity;
+#[cfg(any(target_os = "android", test))]
+mod android_credentials;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod lan_mdns;
 mod lan_protocol;

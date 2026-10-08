@@ -683,6 +683,33 @@ abstract class BasePeerCard extends StatelessWidget {
   Future<List<MenuEntryBase<String>>> _lanIdentityActions(
     BuildContext context,
   ) async {
+    if (isAndroid && peer.fingerprint.isNotEmpty) {
+      bool saved;
+      bool storeError = false;
+      try {
+        saved = await gFFI.invokeMethod('has_remembered_lan_password', peer.fingerprint);
+      } catch (_) {
+        saved = false;
+        storeError = true;
+      }
+      if (!saved && !storeError) return const [];
+      return [MenuEntryButton<String>(
+        childBuilder: (style) => Text(
+          saved ? 'كلمة المرور محفوظة · نسيان كلمة المرور' : 'تعذر قراءة الحفظ · نسيان كلمة المرور',
+          style: style,
+        ),
+        proc: () async {
+          try {
+            final forgotten = await gFFI.invokeMethod('forget_remembered_lan_password', peer.fingerprint);
+            showToast(forgotten ? translate('Successful') : 'تعذر حذف كلمة المرور المحفوظة');
+          } catch (_) {
+            showToast('تعذر حذف كلمة المرور المحفوظة');
+          }
+        },
+        padding: menuPadding,
+        dismissOnClicked: true,
+      )];
+    }
     if (!isDesktop) return const [];
     final actions = <MenuEntryBase<String>>[
       MenuEntryButton<String>(

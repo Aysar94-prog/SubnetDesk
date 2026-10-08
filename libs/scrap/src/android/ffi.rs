@@ -23,6 +23,7 @@ lazy_static! {
     static ref JVM: RwLock<Option<JavaVM>> = RwLock::new(None);
     static ref MAIN_SERVICE_CTX: RwLock<Option<GlobalRef>> = RwLock::new(None); // MainService -> video service / audio service / info
     static ref APPLICATION_CONTEXT: RwLock<Option<GlobalRef>> = RwLock::new(None);
+    static ref LAN_CREDENTIAL_CLASS: RwLock<Option<GlobalRef>> = RwLock::new(None);
     static ref VIDEO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT));
     static ref AUDIO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("audio", MAX_AUDIO_FRAME_TIMEOUT));
     static ref NDK_CONTEXT_INITED: Mutex<bool> = Default::default();
@@ -501,11 +502,74 @@ pub extern "system" fn Java_ffi_FFI_onAppStart(mut env: JNIEnv, _class: JClass, 
         return;
     }
     if let Ok(jvm) = env.get_java_vm() {
+        {
+            let mut vm = JVM.write().unwrap();
+            if vm.is_none() { *vm = Some(jvm); }
+        }
+        match env.find_class("com/carriez/flutter_hbb/LanCredentialStore")
+            .and_then(|class| env.new_global_ref(class)) {
+            Ok(class) => *LAN_CREDENTIAL_CLASS.write().unwrap() = Some(class),
+            Err(_) => {
+                let _ = env.exception_clear();
+                log::error!("Android encrypted credential store initialization failed");
+            }
+        }
         if let Ok(context) = env.new_global_ref(ctx) {
-            let java_vm = jvm.get_java_vm_pointer() as *mut c_void;
             let context_jobject = context.as_obj().as_raw() as *mut c_void;
             *APPLICATION_CONTEXT.write().unwrap() = Some(context);
             try_init_rustls_platform_verifier(&mut env, context_jobject);
         }
     }
+}
+
+fn with_lan_credential_store<T>(
+    operation: impl FnOnce(&mut JNIEnv, &GlobalRef, &GlobalRef) -> JniResult<T>,
+) -> JniResult<T> {
+    let class = LAN_CREDENTIAL_CLASS.read().unwrap().clone()
+        .ok_or(JniError::ThrowFailed(-1))?;
+    let context = APPLICATION_CONTEXT.read().unwrap().clone()
+        .ok_or(JniError::ThrowFailed(-1))?;
+    let vm_guard = JVM.read().unwrap();
+    let vm = vm_guard.as_ref().ok_or(JniError::ThrowFailed(-1))?;
+    let mut env = vm.attach_current_thread()?;
+    let result = operation(&mut env, &class, &context);
+    // Never describe Java exceptions: their messages may contain sensitive data.
+    if env.exception_check()? {
+        env.exception_clear()?;
+        return Err(JniError::JavaException);
+    }
+    result
+}
+
+pub fn load_lan_credential(fingerprint: &str) -> JniResult<Option<Vec<u8>>> {
+    with_lan_credential_store(|env, class, context| {
+        let fingerprint = JObject::from(env.new_string(fingerprint)?);
+        let value = env.call_static_method(class, "load",
+            "(Landroid/content/Context;Ljava/lang/String;)[B",
+            &[JValue::Object(context.as_obj()), JValue::Object(&fingerprint)])?.l()?;
+        if value.is_null() { return Ok(None); }
+        let array = jni::objects::JByteArray::from(value);
+        let bytes = env.convert_byte_array(&array)?;
+        env.set_byte_array_region(&array, 0, &vec![0; bytes.len()])?;
+        Ok(Some(bytes))
+    })
+}
+
+pub fn save_lan_credential(fingerprint: &str, payload: &[u8]) -> JniResult<()> {
+    with_lan_credential_store(|env, class, context| {
+        let fingerprint = JObject::from(env.new_string(fingerprint)?);
+        let payload = JObject::from(env.byte_array_from_slice(payload)?);
+        env.call_static_method(class, "save", "(Landroid/content/Context;Ljava/lang/String;[B)V",
+            &[JValue::Object(context.as_obj()), JValue::Object(&fingerprint), JValue::Object(&payload)])?;
+        Ok(())
+    })
+}
+
+pub fn forget_lan_credential(fingerprint: &str) -> JniResult<()> {
+    with_lan_credential_store(|env, class, context| {
+        let fingerprint = JObject::from(env.new_string(fingerprint)?);
+        env.call_static_method(class, "forget", "(Landroid/content/Context;Ljava/lang/String;)V",
+            &[JValue::Object(context.as_obj()), JValue::Object(&fingerprint)])?;
+        Ok(())
+    })
 }

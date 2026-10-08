@@ -116,6 +116,7 @@ android {
         targetSdkVersion flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+        testInstrumentationRunner "com.carriez.flutter_hbb.CredentialStoreInstrumentation"
     }
 
     signingConfigs {

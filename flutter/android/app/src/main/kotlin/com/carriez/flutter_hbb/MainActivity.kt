@@ -274,6 +274,27 @@ class MainActivity : FlutterActivity() {
                 "on_voice_call_closed" -> {
                     onVoiceCallClosed()
                 }
+                "has_remembered_lan_password", "forget_remembered_lan_password" -> {
+                    val fingerprint = call.arguments as? String
+                    if (fingerprint == null) {
+                        result.error("credential_store", "Invalid device fingerprint", null)
+                    } else {
+                        thread {
+                            try {
+                                val answer = if (call.method == "has_remembered_lan_password") {
+                                    LanCredentialStore.has(applicationContext, fingerprint)
+                                } else {
+                                    LanCredentialStore.forget(applicationContext, fingerprint)
+                                    true
+                                }
+                                runOnUiThread { result.success(answer) }
+                            } catch (_: Exception) {
+                                // No exception text, fingerprint, username or password in logs.
+                                runOnUiThread { result.error("credential_store", "Encrypted credential store unavailable", null) }
+                            }
+                        }
+                    }
+                }
                 else -> {
                     result.error("-1", "No such method", null)
                 }

@@ -126,6 +126,18 @@ fn lan_credential_config_id_for_fingerprint(fingerprint: &str) -> Option<String>
 pub(crate) fn load_remembered_lan_credential_for_fingerprint(
     fingerprint: &str,
 ) -> Option<(String, Vec<u8>)> {
+    #[cfg(target_os = "android")]
+    {
+        return match crate::android_credentials::load(fingerprint) {
+            Ok(credential) => credential,
+            Err(_) => {
+                log::warn!("Unable to read Android's encrypted LAN credential store");
+                None
+            }
+        };
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     let config_id = lan_credential_config_id_for_fingerprint(fingerprint)?;
     let config = PeerConfig::load(&config_id);
     let username = config
@@ -164,9 +176,18 @@ pub(crate) fn load_remembered_lan_credential_for_fingerprint(
     {
         None
     }
+    }
 }
 
 pub(crate) fn clear_remembered_lan_credential_for_fingerprint(fingerprint: &str) {
+    #[cfg(target_os = "android")]
+    {
+        if crate::android_credentials::forget(fingerprint).is_err() {
+            log::warn!("Unable to remove the saved Android LAN credential");
+        }
+        return;
+    }
+    #[cfg(not(target_os = "android"))]
     if let Some(config_id) = lan_credential_config_id_for_fingerprint(fingerprint) {
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         match keyring::Entry::new(LAN_CREDENTIAL_KEYRING_SERVICE, &config_id)
@@ -1224,11 +1245,31 @@ impl LoginConfigHandler {
         load_remembered_lan_credential_for_fingerprint(&self.lan_fingerprint)
     }
 
+    pub fn load_remembered_lan_credential_checked(&self) -> ResultType<Option<(String, Vec<u8>)>> {
+        #[cfg(target_os = "android")]
+        { crate::android_credentials::load(&self.lan_fingerprint) }
+        #[cfg(not(target_os = "android"))]
+        { Ok(self.load_remembered_lan_credential()) }
+    }
+
+    pub fn clear_remembered_lan_credential_checked(&self) -> ResultType<()> {
+        #[cfg(target_os = "android")]
+        { crate::android_credentials::forget(&self.lan_fingerprint) }
+        #[cfg(not(target_os = "android"))]
+        { self.clear_remembered_lan_credential(); Ok(()) }
+    }
+
     pub fn save_remembered_lan_credential(
         &self,
         username: &str,
         password: &[u8],
     ) -> ResultType<()> {
+        #[cfg(target_os = "android")]
+        {
+            return crate::android_credentials::save(&self.lan_fingerprint, username, password);
+        }
+        #[cfg(not(target_os = "android"))]
+        {
         let config_id = self
             .lan_credential_config_id()
             .ok_or_else(|| anyhow!("LAN device fingerprint is not available"))?;
@@ -1257,6 +1298,7 @@ impl LoginConfigHandler {
             .insert(LAN_CREDENTIAL_USERNAME_OPTION.to_owned(), username);
         config.store(&config_id);
         Ok(())
+        }
     }
 
     pub fn clear_remembered_lan_credential(&self) {
@@ -2655,12 +2697,12 @@ pub async fn handle_login_error(
         interface.msgbox("input-password", "Password Required", "", "");
         true
     } else if err == LOGIN_MSG_LAN_CREDENTIALS_WRONG {
-        if let Err(err) = tokio::task::spawn_blocking(move || {
-            lc.read().unwrap().clear_remembered_lan_credential();
-        })
-        .await
-        {
-            log::warn!("Failed to clear the remembered LAN credential: {err}");
+        let cleared = tokio::task::spawn_blocking(move || {
+            lc.read().unwrap().clear_remembered_lan_credential_checked()
+        }).await;
+        if !matches!(cleared, Ok(Ok(()))) {
+            log::warn!("Unable to remove the rejected saved LAN credential");
+            interface.msgbox("error", "Failed", "Unable to remove the saved credential. Use Forget password before reconnecting.", "");
         }
         interface.msgbox(
             "lan-login-required",
