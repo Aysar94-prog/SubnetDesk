@@ -1,5 +1,20 @@
 # SubnetDesk Windows helper status
 
+## Voice diagnosis and new buzzer plan: 2026-10-08
+
+Read-only connected-phone inspection confirms installed Android1.3.0/code2075 RECORD_AUDIO
+granted=false/AppOps ignore, with matching10:01:23 capture-permission and onVoiceCallStarted
+failure logs. Microphone permission was not changed; no new call or audible retest performed.
+This recorded failure is on Android capture, not evidence that Windows audio has passed.
+User-supplied login secrets are not stored in source/status/log artifacts.
+
+New chat-buzzer plan is in D:/LAN-Messenger/source/PLAN-SUBNETDESK-CHAT-BUZZER.md: first-stage
+Android sender -> Windows receiver, typed optional session event, short sound/visible dock
+attention, receiver mute/rate limits and mixed-version tests. Explicit start still required;
+no app code/build/protocol or package identity changed. No persistent chat/buzz history added.
+Android password saving remains separate and plan-only. Current Windows1.3.1 artifacts
+remain unchanged; initial dock visibility acceptance does not imply audible Voice acceptance.
+
 ## Latest physical acceptance: 2026-10-08
 
 User confirmed "ok now this is good" after reconnecting phone: initial incoming dock visibility
