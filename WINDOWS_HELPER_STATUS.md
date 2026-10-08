@@ -2,14 +2,27 @@
 
 ## Camera removal checkpoint:2026-10-08
 
+Final Windows1.3.3+78 native no-updater release and Flutter release builds PASS; full Flutter
+65/65 rerun PASS. Staged Windows-x64-v1.3.3-private native DLL matches rebuilt output.
+CLI --version returns1.3.3/exit0; --update exits0 without installing (blocked branch returns
+normally, so exit0 alone is not updater acceptance). Source/API feature-enabled denial tests
+above are the operation-denial evidence. User approved runtime switch after build completion.
+Old1.3.1 closed normally using Windows UI; no active TCP session at handoff. Initial new
+hidden-start process was restarted before connections; visible new PID25332 owns listener21118
+and UI showsv1.3.3. Windows Firewall permission dialog requires user handling; automation
+stopped at this security prompt. Original installed service remains Stopped/Auto/path unchanged.
+Paired screen/voice/camera-denial/ring/buzzer acceptance and Android APK remain pending.
+Android main native dependencies completed successfully; Windows-host libsodium cross-build
+is a separate prerequisite in progress. No source claims of working Android APK yet.
+
 User explicitly approved removal of SubnetDesk View camera on Windows and Android only.
 Mobile/peer/desktop toolbar entry points removed; shared connect and native session/client
 routes reject camera. Encrypted incoming login/scope guards deny old camera requests and
 advertised support_view_camera is false. Remote screen/control and voice code retained;
 LAN Messenger video is not modified. Source1.3.3/Flutter1.3.3+78 identifies this candidate.
 Windows frontend release and Flutter65/65 pass; native camera3/3, updater4/4 (feature enabled),
-chat attention5/5, encrypted loopback/protocol6/6 and visible CM launch1/1 pass. Final native
-release and candidate/source archives pending. Physical old-peer camera denial,
+chat attention5/5, encrypted loopback/protocol6/6 and visible CM launch1/1 pass. Candidate/source
+archives pending. Physical old-peer camera denial,
 screen/voice regression and new buzzer/ring acceptance not completed; old1.3.1 not switched.
 Android native dependency build is in progress in scoped user SDK/NDK/output directories.
 Narrow Android-on-Windows AOM assembler and FFmpeg argument delimiter fixes preserve the

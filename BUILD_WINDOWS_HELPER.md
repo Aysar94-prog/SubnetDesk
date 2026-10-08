@@ -6,7 +6,8 @@ This version removes View camera entry points and rejects camera sessions native
 retaining screen/control and voice. Camera FFI signatures remain for compatibility, but deny
 camera requests before endpoint parsing/registration; no bridge regeneration required here.
 Windows frontend release and Flutter65/65 pass. Native camera3/3 and updater4/4 (feature enabled)
-pass; final native release and physical acceptance remain separate gates.
+pass. Final no-updater native release and Flutter release PASS; Flutter65/65 rerun PASS.
+Physical acceptance remains separate, including Windows Firewall permission handled by user.
 build-private-helper.ps1 defaults to1.3.3+78;
 package-private-helper.ps1 stages a new1.3.3 folder and matched source archive, preserving1.3.2.
 Use -PolicyTest for updater-feature and camera/session-constructor tests. Normal release omits
