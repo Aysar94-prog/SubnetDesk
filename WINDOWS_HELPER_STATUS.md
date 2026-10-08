@@ -12,8 +12,11 @@ hidden-start process was restarted before connections; visible new PID25332 owns
 and UI showsv1.3.3. Windows Firewall permission dialog requires user handling; automation
 stopped at this security prompt. Original installed service remains Stopped/Auto/path unchanged.
 Paired screen/voice/camera-denial/ring/buzzer acceptance and Android APK remain pending.
-Android main native dependencies completed successfully; Windows-host libsodium cross-build
-is a separate prerequisite in progress. No source claims of working Android APK yet.
+Android main native dependencies, libsodium/OpenSSL and actual Rust release now PASS.
+Build-only Windows-host/Android repairs documented in BUILD_ANDROID_HELPER.md; scoped codec
+patch/default Windows dependency unchanged. ARM64/16KB LOAD alignment/JNI exports and native
+copy SHA256 verified. APK packaging/signature/install and actual device acceptance pending.
+Windows12a8dac artifacts remain frozen and are not rebuilt/replaced by Android build support.
 
 User explicitly approved removal of SubnetDesk View camera on Windows and Android only.
 Mobile/peer/desktop toolbar entry points removed; shared connect and native session/client
