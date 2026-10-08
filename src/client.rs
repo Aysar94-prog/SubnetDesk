@@ -1958,9 +1958,15 @@ impl LoginConfigHandler {
             LocalConfig::set_remote_id(&connected_endpoint);
         }
         if !self.lan_fingerprint.is_empty() && !self.lan_access_username.is_empty() {
+            // Android saves the access username only inside the encrypted payload.
+            // History may retain public peer display information, not the login account.
+            #[cfg(target_os = "android")]
+            let recent_username = if pi.username.is_empty() { "Device" } else { &pi.username };
+            #[cfg(not(target_os = "android"))]
+            let recent_username = &self.lan_access_username;
             if let Err(err) = LocalConfig::record_recent_lan_endpoint(
                 &connected_endpoint,
-                &self.lan_access_username,
+                recent_username,
                 &pi.hostname,
                 &pi.platform,
                 &self.lan_fingerprint,

@@ -8,6 +8,7 @@ import android.util.AtomicFile
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.io.DataInputStream
 import java.security.KeyStore
 import java.util.Locale
 import javax.crypto.Cipher
@@ -65,16 +66,25 @@ object LanCredentialStore {
             val nonce = cipher.iv
             check(nonce.size == 12)
             val ciphertext = cipher.doFinal(payload)
+            val envelope = magic + nonce + ciphertext
             val atomic = file(context, fingerprint)
             val stream = atomic.startWrite()
             try {
-                stream.write(magic)
-                stream.write(nonce)
-                stream.write(ciphertext)
+                stream.write(envelope)
                 atomic.finishWrite(stream)
             } catch (error: Exception) {
                 atomic.failWrite(stream)
                 throw error
+            }
+            // AtomicFile can log a failed final rename instead of throwing.
+            // Report failed persistence explicitly; never claim an old entry was saved.
+            atomic.openRead().use { input ->
+                val persisted = ByteArray(envelope.size)
+                val reader = DataInputStream(input)
+                reader.readFully(persisted)
+                if (reader.read() != -1 || !persisted.contentEquals(envelope)) {
+                    throw IOException("Credential store write failed")
+                }
             }
         } finally {
             payload.fill(0)

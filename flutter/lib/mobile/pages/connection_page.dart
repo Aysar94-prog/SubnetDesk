@@ -45,6 +45,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
   bool _rememberPassword = false;
+  String _credentialEndpoint = '';
 
   final AllPeersLoader _allPeersLoader = AllPeersLoader();
 
@@ -57,13 +58,15 @@ class _ConnectionPageState extends State<ConnectionPage> {
     if (!isWeb) _uniLinksSubscription = listenUniLinks();
     _idController.addListener(() {
       _idEmpty.value = _idController.text.isEmpty;
-      if (_rememberPassword) {
+      final endpoint = _idController.id;
+      if (_credentialEndpoint != endpoint && _rememberPassword) {
         if (mounted) {
           setState(() => _rememberPassword = false);
         } else {
           _rememberPassword = false;
         }
       }
+      _credentialEndpoint = endpoint;
     });
     Get.put<IDTextEditingController>(_idController);
   }
