@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iostream>
 
+#include "command_line.h"
 #include "win32_desktop.h"
 #include "flutter_window.h"
 #include "utils.h"
@@ -47,7 +48,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       GetCommandLineArguments();
   // Remove possible trailing whitespace from command line arguments
   for (auto& argument : command_line_arguments) {
-    argument.erase(argument.find_last_not_of(" \n\r\t"));
+    TrimTrailingArgumentWhitespace(argument);
   }
 
   int args_len = 0;

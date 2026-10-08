@@ -1,5 +1,28 @@
 # Local Windows helper build checkpoint
 
+## Current runner repair: 2026-10-08
+
+User authorized implementation after the first candidate failed live incoming dock acceptance.
+Native runner argument trim now preserves the final character and handles empty arguments.
+Native production-header regression: old0/17 -> fixed17/17; launch policy2/2 rechecked.
+Rust package1.3.1, Flutter1.3.1+76: local test candidate, not official upstream1.3.1.
+Full rebuild completed: Rust release exit0 (46 existing warnings), Flutter Release exit0,
+Flutter53/53; CTest1/1 and launch policy2/2. Reproducible local orchestration is
+`D:\LAN-Messenger\outputs\SubnetDesk-helper-cm\checks\build-runner-fix.ps1`.
+It imports MSVC2022 environment in-process, checks/maps unused S:, builds Rust with locked
+dependencies and original full features, builds Flutter with --no-pub and explicit version,
+runs Flutter tests, and removes only its own validated S: mapping. No global PATH change.
+Native test-only mode: `-NativeTestsOnly`. Portable CMake/CTest instructions are under
+flutter/windows/runner/tests/README.md. Keep native runtime acceptance separate from tests.
+Original installed service is now Stopped/Auto with explicit user approval; installed files
+remain untouched. New1.3.1+76 candidate switched in at09:47:38/PID4052 and owns TCP21118.
+Direct --cm reaches Flutter CM initialization instead of immediate exit1. With no session,
+it later closes consistent with existing6s idle policy. Actual incoming dock acceptance remains
+pending user reconnect; native startup is not visual/session acceptance. Reboot may restore
+old installed service. Final staging renames upstream-built rustdesk.exe to SubnetDesk.exe,
+copies original auxiliary resources without installing drivers, and checks rebuilt DLL hashes.
+Older build observations below are historical.
+
 Source changes are Windows-only and committed locally; the 2026-10-08 candidate is fully built
 but not accepted against a real session. Do not replace the installed
 SubnetDesk without user direction. Do not combine this application
