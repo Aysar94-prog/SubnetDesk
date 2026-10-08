@@ -38,6 +38,7 @@ pub(crate) fn available() -> bool {
     #[cfg(windows)]
     {
         crate::lan_server::LanServer::is_running()
+            && !hbb_common::config::option2bool("stop-service", &hbb_common::config::Config::get_option("stop-service"))
             && crate::platform::optional_lan_access_available()
     }
     #[cfg(not(windows))]
