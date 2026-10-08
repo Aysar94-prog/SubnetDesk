@@ -144,7 +144,7 @@ pub(crate) fn load_remembered_lan_credential_for_fingerprint(
         .options
         .get(LAN_CREDENTIAL_USERNAME_OPTION)
         .cloned()?;
-    if hbb_common::lan::validate_username(&username).is_err() {
+    if hbb_common::lan::validate_credential_username(&username).is_err() {
         return None;
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1273,7 +1273,7 @@ impl LoginConfigHandler {
         let config_id = self
             .lan_credential_config_id()
             .ok_or_else(|| anyhow!("LAN device fingerprint is not available"))?;
-        let username = hbb_common::lan::validate_username(username)?;
+        let username = hbb_common::lan::validate_credential_username(username)?;
         hbb_common::lan::validate_password(password)?;
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
@@ -1957,13 +1957,10 @@ impl LoginConfigHandler {
             }
             LocalConfig::set_remote_id(&connected_endpoint);
         }
-        if !self.lan_fingerprint.is_empty() && !self.lan_access_username.is_empty() {
+        if !self.lan_fingerprint.is_empty() {
             // Android saves the access username only inside the encrypted payload.
             // History may retain public peer display information, not the login account.
-            #[cfg(target_os = "android")]
             let recent_username = if pi.username.is_empty() { "Device" } else { &pi.username };
-            #[cfg(not(target_os = "android"))]
-            let recent_username = &self.lan_access_username;
             if let Err(err) = LocalConfig::record_recent_lan_endpoint(
                 &connected_endpoint,
                 recent_username,
@@ -2712,8 +2709,8 @@ pub async fn handle_login_error(
         }
         interface.msgbox(
             "lan-login-required",
-            "Username or password is incorrect",
-            "Enter the access username and password configured on the remote device.",
+            "Password is incorrect",
+            "Enter the unattended access password configured on the remote device.",
             "",
         );
         true
@@ -2748,40 +2745,108 @@ pub async fn send_lan_login(
     username: String,
     password: Vec<u8>,
     peer: &mut Stream,
-) {
-    send_lan_login_with_os_login(lc, username, password, String::new(), String::new(), peer).await;
+) -> ResultType<()> {
+    send_lan_login_with_os_login(lc, username, password, String::new(), String::new(), peer).await
+}
+
+async fn negotiate_lan_access(peer: &mut Stream, method: u32) -> ResultType<()> {
+    if !peer.is_secured() { bail!("Encrypted LAN session required"); }
+    let mut probe = Message::new();
+    probe.set_lan_access_probe(LanAccessProbe { version: hbb_common::lan::ACCESS_VERSION, ..Default::default() });
+    peer.send(&probe).await?;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+        if remaining == 0 { bail!("Remote version does not support the selected access method"); }
+        let Some(bytes) = peer.next_timeout(remaining).await else { bail!("Remote version does not support the selected access method"); };
+        let msg = Message::parse_from_bytes(&bytes?)?;
+        match msg.union {
+            Some(message::Union::LanAccessCapabilities(caps)) if caps.version == hbb_common::lan::ACCESS_VERSION => {
+                let enabled = match method {
+                    hbb_common::lan::ACCESS_CODE => caps.code_enabled,
+                    hbb_common::lan::ACCESS_MANUAL => caps.manual_enabled,
+                    hbb_common::lan::ACCESS_PASSWORD_ONLY => caps.password_only_enabled,
+                    _ => false,
+                };
+                if !enabled { bail!("Selected access method is disabled or unsupported on the receiver"); }
+                return Ok(());
+            }
+            Some(message::Union::TestDelay(test)) if !test.from_client => {
+                let mut reply = Message::new(); reply.set_test_delay(test); peer.send(&reply).await?;
+            }
+            Some(message::Union::LoginResponse(_)) => bail!("Remote version rejected access negotiation"),
+            _ => {},
+        }
+    }
+}
+
+#[cfg(test)]
+mod password_only_contract_tests {
+    use super::*;
+    use hbb_common::sodiumoxide;
+    use hbb_common::tokio::net::{TcpListener, TcpStream};
+
+    async fn pair() -> (Stream, Stream) {
+        sodiumoxide::init().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, remote) = listener.accept().await.unwrap();
+        let key = sodiumoxide::crypto::secretbox::gen_key();
+        let mut client = Stream::from(client, address);
+        let mut server = Stream::from(server, remote);
+        client.set_key(key.clone()); server.set_key(key);
+        (client, server)
+    }
+    async fn exercise(enabled: bool) {
+        let (mut client, mut server) = pair().await;
+        let server_task = tokio::spawn(async move {
+            let bytes = server.next_timeout(2000).await.unwrap().unwrap();
+            assert!(matches!(Message::parse_from_bytes(&bytes).unwrap().union, Some(message::Union::LanAccessProbe(_))));
+            let mut reply = Message::new();
+            reply.set_lan_access_capabilities(LanAccessCapabilities { version: hbb_common::lan::ACCESS_VERSION,
+                password_only_enabled: enabled, ..Default::default() });
+            server.send(&reply).await.unwrap();
+            if enabled {
+                let bytes = server.next_timeout(2000).await.unwrap().unwrap();
+                let msg = Message::parse_from_bytes(&bytes).unwrap();
+                let login = msg.login_request().lan_login.as_ref().unwrap();
+                assert_eq!(login.access_method, hbb_common::lan::ACCESS_PASSWORD_ONLY);
+                assert!(login.access_username.is_empty());
+                assert_eq!(login.access_password.as_ref(), b"synthetic-password");
+            } else {
+                // No password and no legacy fallback after a negative/old reply.
+                assert!(server.next_timeout(100).await.is_none());
+            }
+        });
+        let config = Arc::new(RwLock::new(LoginConfigHandler::default()));
+        let result = send_lan_login(config, String::new(), b"synthetic-password".to_vec(), &mut client).await;
+        assert_eq!(result.is_ok(), enabled);
+        server_task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn positive_capability_precedes_password_only_login() { exercise(true).await; }
+    #[tokio::test]
+    async fn old_or_disabled_capability_sends_no_password_or_fallback() { exercise(false).await; }
+    #[tokio::test]
+    async fn unsecured_stream_never_gets_password_or_probe() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, remote) = listener.accept().await.unwrap();
+        let mut client = Stream::from(client, address);
+        let mut server = Stream::from(server, remote);
+        let config = Arc::new(RwLock::new(LoginConfigHandler::default()));
+        assert!(send_lan_login(config, String::new(), b"synthetic-password".to_vec(), &mut client).await.is_err());
+        assert!(server.next_timeout(100).await.is_none());
+    }
 }
 
 pub(crate) async fn send_optional_lan_login(
     lc: Arc<RwLock<LoginConfigHandler>>, method: u32, mut code: String, peer: &mut Stream,
 ) -> ResultType<()> {
     let result = async {
-        if !peer.is_secured() { bail!("Encrypted LAN session required"); }
-        let mut probe = Message::new();
-        probe.set_lan_access_probe(LanAccessProbe { version: hbb_common::lan::ACCESS_VERSION, ..Default::default() });
-        peer.send(&probe).await?;
-        let deadline = Instant::now() + Duration::from_secs(4);
-        let capabilities = loop {
-            let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
-            if remaining == 0 { bail!("Remote version does not support the selected access method"); }
-            let Some(bytes) = peer.next_timeout(remaining).await else { bail!("Remote version does not support the selected access method"); };
-            let bytes = bytes?;
-            let msg = Message::parse_from_bytes(&bytes)?;
-            match msg.union {
-                Some(message::Union::LanAccessCapabilities(caps)) if caps.version == hbb_common::lan::ACCESS_VERSION => break caps,
-                Some(message::Union::TestDelay(test)) if !test.from_client => {
-                    let mut reply = Message::new(); reply.set_test_delay(test); peer.send(&reply).await?;
-                }
-                Some(message::Union::LoginResponse(_)) => bail!("Remote version rejected access negotiation"),
-                _ => {},
-            }
-        };
-        let enabled = match method {
-            hbb_common::lan::ACCESS_CODE => capabilities.code_enabled,
-            hbb_common::lan::ACCESS_MANUAL => capabilities.manual_enabled,
-            _ => false,
-        };
-        if !enabled { bail!("Selected access method is disabled on the receiver"); }
+        negotiate_lan_access(peer, method).await?;
         let mut request = lc.read().unwrap().create_login_msg(String::new(), String::new(), Vec::new()).login_request().clone();
         request.username.clear(); request.password.clear();
         request.my_id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
@@ -2804,17 +2869,24 @@ pub async fn send_lan_login_with_os_login(
     os_username: String,
     os_password: String,
     peer: &mut Stream,
-) {
-    let username = match hbb_common::lan::validate_username(&username) {
+) -> ResultType<()> {
+    let username = match hbb_common::lan::validate_credential_username(&username) {
         Ok(value) => value,
         Err(_) => {
             password.zeroize();
-            return;
+            bail!("Invalid LAN credential");
         }
     };
     if hbb_common::lan::validate_password(&password).is_err() {
         password.zeroize();
-        return;
+        bail!("Invalid LAN password");
+    }
+    let password_only = username.is_empty();
+    if password_only {
+        if let Err(err) = negotiate_lan_access(peer, hbb_common::lan::ACCESS_PASSWORD_ONLY).await {
+            password.zeroize();
+            return Err(err);
+        }
     }
     let mut request = lc
         .read()
@@ -2828,6 +2900,7 @@ pub async fn send_lan_login_with_os_login(
         access_username: username,
         access_password: Bytes::copy_from_slice(&password),
         credential_revision_hint: 0,
+        access_method: if password_only { hbb_common::lan::ACCESS_PASSWORD_ONLY } else { hbb_common::lan::ACCESS_PASSWORD },
         ..Default::default()
     });
     request.my_id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
@@ -2836,9 +2909,7 @@ pub async fn send_lan_login_with_os_login(
     let result = peer.send(&message).await;
     password.zeroize();
     scrub_lan_password(&mut message);
-    if let Err(err) = result {
-        log::debug!("Failed to send LAN login request: {err}");
-    }
+    result
 }
 
 fn scrub_lan_password(message: &mut Message) {
@@ -2873,7 +2944,7 @@ pub async fn handle_login_from_ui(
     access_username: String,
     access_password: Vec<u8>,
     peer: &mut Stream,
-) {
+) -> ResultType<()> {
     let _ = remember;
     send_lan_login_with_os_login(
         lc,
@@ -2883,7 +2954,7 @@ pub async fn handle_login_from_ui(
         os_password,
         peer,
     )
-    .await;
+    .await
 }
 
 /// Interface for client to send data and commands.

@@ -220,7 +220,7 @@ impl<T: InvokeUiSession> Session<T> {
         mut password: String,
         remember: bool,
     ) -> hbb_common::ResultType<()> {
-        let username = hbb_common::lan::validate_username(&username)?;
+        let username = hbb_common::lan::validate_credential_username(&username)?;
         hbb_common::lan::validate_password(password.as_bytes())?;
         let credential = LanSessionCredential {
             access_method: hbb_common::lan::ACCESS_PASSWORD,
@@ -1908,8 +1908,10 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     crate::lan_identity::load(&request.identity_id)
                         .map(|identity| Some((identity, request.bind_on_success)))
                 } else {
-                    crate::lan_identity::load_for_fingerprint(&fingerprint)
-                        .map(|identity| identity.map(|identity| (identity, false)))
+                    // Account profiles are legacy, explicit opt-ins. Normal login uses
+                    // a fingerprint-bound saved password, never a hidden account.
+                    let _ = fingerprint;
+                    Ok(None)
                 }
             })
             .await;
@@ -1955,11 +1957,11 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     None
                 }
             };
-            if let Some((username, password)) = remembered {
+            if let Some((_legacy_username, password)) = remembered {
                 let remembered = LanSessionCredential {
                     access_method: hbb_common::lan::ACCESS_PASSWORD,
                     temporary_code: String::new(),
-                    username,
+                    username: String::new(),
                     password,
                     remember: true,
                     identity_id: String::new(),
@@ -1971,18 +1973,22 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             }
         }
         if let Some(mut credential) = credential {
-            crate::client::send_lan_login(
+            let result = crate::client::send_lan_login(
                 self.lc.clone(),
                 std::mem::take(&mut credential.username),
                 std::mem::take(&mut credential.password),
                 peer,
             )
             .await;
+            if let Err(err) = result {
+                self.msgbox("error", "Login Error", &err.to_string(), "");
+                self.send(Data::Close);
+            }
         } else {
             self.msgbox(
                 "lan-login-required",
-                "LAN access credentials required",
-                "Enter the access username and password configured on the remote device.",
+                "Password Required",
+                "Enter the unattended access password configured on the remote device.",
                 "",
             );
         }
@@ -1997,7 +2003,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         peer: &mut Stream,
     ) {
         if let Some(mut credential) = self.lan_credential() {
-            handle_login_from_ui(
+            let result = handle_login_from_ui(
                 self.lc.clone(),
                 os_username,
                 os_password,
@@ -2008,11 +2014,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 peer,
             )
             .await;
+            if let Err(err) = result {
+                self.msgbox("error", "Login Error", &err.to_string(), "");
+                self.send(Data::Close);
+            }
         } else {
             self.msgbox(
                 "lan-login-required",
-                "LAN access credentials required",
-                "Enter the access username and password configured on the remote device.",
+                "Password Required",
+                "Enter the unattended access password configured on the remote device.",
                 "",
             );
         }

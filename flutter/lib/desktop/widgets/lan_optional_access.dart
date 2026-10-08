@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import '../../common.dart';
 import '../../models/platform_model.dart';
 
 /// Local, volatile receiver controls. No code is persisted by Flutter.
 class LanOptionalAccess extends StatefulWidget {
-  const LanOptionalAccess({super.key, this.readState, this.setMethods, this.generateCode});
+  const LanOptionalAccess({super.key, this.readState, this.setMethods, this.generateCode,
+    this.showSettings = false, this.translateText});
+  final bool showSettings;
+  final String Function(String)? translateText;
   final Future<String> Function()? readState;
   final Future<String> Function(bool code, bool manual)? setMethods;
   final Future<String> Function()? generateCode;
@@ -18,6 +22,7 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
   bool _busy = false;
   bool _reading = false;
   String _error = '';
+  String t(String text) => widget.translateText?.call(text) ?? translate(text);
   @override
   void initState() {
     super.initState();
@@ -31,7 +36,7 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
       final state = jsonDecode(await (widget.readState?.call() ?? bind.mainGetLanOptionalAccess())) as Map<String, dynamic>;
       if (mounted) setState(() => _state = state);
     } catch (_) {
-      if (mounted) setState(() { _state = {}; _error = 'تعذر قراءة حالة طرق الدخول'; });
+      if (mounted) setState(() { _state = {}; _error = 'Unable to read access methods'; });
     } finally { _reading = false; }
   }
   Future<void> _change(Future<String> Function() action) async {
@@ -41,7 +46,7 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
       if (mounted) setState(() => _error = error);
       await _refresh();
     } catch (_) {
-      if (mounted) setState(() => _error = 'لم يُطبّق التغيير');
+      if (mounted) setState(() => _error = 'The change could not be applied');
     } finally { if (mounted) setState(() => _busy = false); }
   }
   Future<String> _set(bool code, bool manual) => widget.setMethods?.call(code, manual)
@@ -57,26 +62,29 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
     final code = _state['code']?.toString() ?? '';
     return Padding(padding: const EdgeInsets.all(10), child: Column(
       crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('طرق الدخول الإضافية'),
-        const Text('كلمة المرور تبقى متاحة. الخيارات التالية تُغلق عند إعادة تشغيل البرنامج.', style: TextStyle(fontSize: 11)),
-        if (!available) const Text('متاحة فقط عندما تكون هذه النسخة مستقبِلة والشاشة غير مقفلة.', style: TextStyle(fontSize: 11)),
-        CheckboxListTile(dense: true, contentPadding: EdgeInsets.zero,
-          title: const Text('كود مؤقت'), value: codeEnabled,
-          onChanged: _busy || (!available && !codeEnabled) ? null : (value) => _change(() =>
-            _set(value == true, manualEnabled))),
+        if (!widget.showSettings) ...[
+        Text(t('Temporary code'), key: const ValueKey('lan-code-heading')),
+        if (!available) Text(t('Available only while this receiver is running and the screen is unlocked.'), style: const TextStyle(fontSize: 11)),
         if (available && codeEnabled) ...[
-          if (code.isNotEmpty) Text('$code · ${_state['expires_seconds']} ثانية',
-            key: const ValueKey('lan-temporary-code'), style: const TextStyle(fontSize: 20)),
-          if (code.isEmpty) const Text('لا يوجد كود صالح. أنشئ كودًا جديدًا.'),
+          if (code.isNotEmpty) SelectableText(code,
+            key: const ValueKey('lan-temporary-code'), style: const TextStyle(fontSize: 26, letterSpacing: 3)),
+          if (code.isNotEmpty) Text('${_state['expires_seconds']} ${t('seconds')}', style: const TextStyle(fontSize: 11)),
+          if (code.isEmpty) Text(t((_state['retry_seconds'] as num? ?? 0) > 0
+            ? 'Too many attempts. Please wait before using a new code.' : 'Preparing a new temporary code...')),
           OutlinedButton(onPressed: _busy ? null : () => _change(_generate),
-            child: const Text('إنشاء كود / استبداله')),
-          const Text('6 أرقام · دقيقتان · استخدام واحد', style: TextStyle(fontSize: 11)),
+            child: Text(t('New code'))),
+          Text(t('6 digits · 2 minutes · single use'), style: const TextStyle(fontSize: 11)),
         ],
+        ],
+        if (widget.showSettings) ...[
+        Text(t('Manual approval')),
+        Text(t('Requires local acceptance. Disabled when the app restarts.'), style: const TextStyle(fontSize: 11)),
         CheckboxListTile(dense: true, contentPadding: EdgeInsets.zero,
-          title: const Text('الموافقة اليدوية'), value: manualEnabled,
+          title: Text(t('Enable manual approval')), value: manualEnabled,
           onChanged: _busy || (!available && !manualEnabled) ? null : (value) => _change(() =>
-            _set(codeEnabled, value == true))),
-        if (_error.isNotEmpty) Text(_error, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            _set(true, value == true))),
+        ],
+        if (_error.isNotEmpty) Text(t(_error), style: TextStyle(color: Theme.of(context).colorScheme.error)),
       ]));
   }
 }

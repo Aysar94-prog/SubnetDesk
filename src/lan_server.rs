@@ -96,8 +96,10 @@ impl LanServer {
                 };
             ACTIVE_LISTENERS.store(native_listener_count, Ordering::SeqCst);
             set_runtime_status(RUNTIME_STATE_LISTENING, String::new());
+            crate::lan_access::maintain();
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                crate::lan_access::maintain();
                 if generation != RESTART_GENERATION.load(Ordering::SeqCst)
                     || signature != listener_signature()
                     || !service_ready()
@@ -109,6 +111,7 @@ impl LanServer {
                 log::debug!("LAN listener stop receivers already closed");
             }
             ACTIVE_LISTENERS.store(0, Ordering::SeqCst);
+            crate::lan_access::maintain();
             set_runtime_status(
                 if service_ready() {
                     RUNTIME_STATE_STARTING
@@ -161,7 +164,9 @@ pub fn normalize_allowed_networks(value: &str) -> ResultType<String> {
 }
 
 fn service_ready() -> bool {
-    Config::lan_credentials_configured()
+    // Windows can receive code/manual requests without setting a permanent password.
+    // Actual grants still require the unlocked interactive authority or a verified password.
+    (cfg!(windows) || Config::lan_credentials_configured())
         && !option2bool("stop-service", &Config::get_option("stop-service"))
 }
 

@@ -113,16 +113,15 @@ class _ConnectionPageState extends State<ConnectionPage> {
     bool isTerminal = false,
   }) async {
     final endpoint = _idController.id;
-    final username = _usernameController.text.trim();
     final password = _passwordController.text;
     final code = _codeController.text.trim();
     if (_accessMethod == 1 && !RegExp(r'^[0-9]{6}$').hasMatch(code)) {
-      showToast('أدخل كودًا من 6 أرقام');
+      showToast(translate('Enter a 6-digit temporary code'));
       return;
     }
-    if (endpoint.isEmpty || (_accessMethod == 0 && username.isEmpty && password.isNotEmpty)) {
+    if (endpoint.isEmpty) {
       showToast(
-        '${translate('Local Address')} · ${translate('Username')} · ${translate('Password')}',
+        translate('Local Address'),
       );
       return;
     }
@@ -139,7 +138,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
           ? null
           : jsonEncode({
               'lan_version': 1,
-              'username': username,
+              'username': '',
               'password': password,
               'remember': _rememberPassword,
             }),
@@ -393,11 +392,11 @@ class _ConnectionPageState extends State<ConnectionPage> {
         if (isAndroid)
           DropdownButtonFormField<int>(
             value: _accessMethod,
-            decoration: const InputDecoration(labelText: 'طريقة الدخول'),
-            items: const [
-              DropdownMenuItem(value: 0, child: Text('كلمة المرور / المحفوظة')),
-              DropdownMenuItem(value: 1, child: Text('كود مؤقت من المستقبل')),
-              DropdownMenuItem(value: 2, child: Text('طلب موافقة يدوية')),
+            decoration: InputDecoration(labelText: translate('Access method')),
+            items: [
+              DropdownMenuItem(value: 0, child: Text(translate('Password / saved password'))),
+              DropdownMenuItem(value: 1, child: Text(translate('Temporary code'))),
+              DropdownMenuItem(value: 2, child: Text(translate('Manual approval'))),
             ],
             onChanged: (value) => setState(() {
               _accessMethod = value ?? 0;
@@ -410,20 +409,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
           TextField(controller: _codeController, keyboardType: TextInputType.number,
             autocorrect: false, enableSuggestions: false, maxLength: 6,
             inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-            decoration: const InputDecoration(labelText: 'كود المستقبل (6 أرقام)'),
+            decoration: InputDecoration(labelText: translate('Receiver code (6 digits)')),
             onSubmitted: (_) => onConnect()),
         if (_accessMethod == 2)
-          const Padding(padding: EdgeInsets.all(8), child: Text('سيظهر طلب على الكمبيوتر؛ لا يبدأ التحكم قبل القبول.')),
-        if (_accessMethod == 0)
-        TextField(
-          controller: _usernameController,
-          autocorrect: false,
-          enableSuggestions: false,
-          decoration: InputDecoration(
-            labelText: translate('Username'),
-            prefixIcon: const Icon(Icons.person_outline),
-          ),
-        ).marginSymmetric(horizontal: 4, vertical: 4),
+          Padding(padding: const EdgeInsets.all(8), child: Text(translate('A request appears on the receiver. Control starts only after acceptance.'))),
         if (_accessMethod == 0) TextField(
           controller: _passwordController,
           obscureText: true,
@@ -443,7 +432,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
             contentPadding: EdgeInsets.symmetric(horizontal: 4),
             controlAffinity: ListTileControlAffinity.leading,
             title: Text(translate('Remember password')),
-            subtitle: Text('يحفظ لهذا الجهاز بعد نجاح الدخول فقط'),
+            subtitle: Text(translate('Saved for this verified device only after successful login')),
           ),
         LayoutBuilder(
           builder: (context, constraints) {

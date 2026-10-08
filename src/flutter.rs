@@ -1437,7 +1437,7 @@ pub fn session_add(
                 }),
             )
         } else {
-            let username = hbb_common::lan::validate_username(&payload.username)?;
+            let username = hbb_common::lan::validate_credential_username(&payload.username)?;
             hbb_common::lan::validate_password(payload.password.as_bytes())?;
             (
                 Some(LanSessionCredential {

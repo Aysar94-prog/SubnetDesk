@@ -331,7 +331,7 @@ _connectDialog(
     }
 
     submit() {
-      if (osUsernameController != null && !usingLanIdentity) {
+      if (osUsernameController != null && !usingLanIdentity && !lanAccess) {
         if (osUsernameController.text.trim().isEmpty) {
           errUsername.value = translate('Empty Username');
           setState(() {});
@@ -360,7 +360,7 @@ _connectDialog(
         } else {
         final error = bind.sessionLoginLan(
           sessionId: sessionId,
-          username: osUsername,
+          username: '',
           password: osPassword,
           remember: rememberPassword,
         );
@@ -407,7 +407,7 @@ _connectDialog(
       return Column(
         children: [
           if (osAccountDescTip != null) descWidget(translate(osAccountDescTip)),
-          DialogTextField(
+          if (!lanAccess) DialogTextField(
             title: translate(DialogTextField.kUsernameTitle),
             controller: osUsernameController,
             prefixIcon: DialogTextField.kUsernameIcon,
@@ -456,7 +456,7 @@ _connectDialog(
           Icon(Icons.password_rounded, color: MyTheme.accent),
           Text(
             translate(
-              lanAccess ? 'LAN access credentials' : 'Password Required',
+              lanAccess ? 'Unattended access' : 'Password Required',
             ),
           ).paddingOnly(left: 10),
         ],
@@ -476,7 +476,7 @@ _connectDialog(
                 DropdownMenuItem(
                   value: lanIdentityManualValue,
                   child: Text(
-                    '${translate('Username')} · ${translate('Password')}',
+                    translate('Password'),
                   ),
                 ),
                 ...lanIdentities.map(

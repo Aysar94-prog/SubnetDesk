@@ -6,7 +6,8 @@ void main() {
   Future<void> show(WidgetTester tester, {bool ready = true,
     required Future<String> Function(bool) decide}) => tester.pumpWidget(MaterialApp(
       home: Scaffold(body: LanApprovalPanel(name: 'claimed phone', source: '192.0.2.1',
-        scope: 'Screen sharing and control', ready: ready, onDecision: decide))));
+        scope: 'Screen sharing and control', ready: ready, onDecision: decide,
+        translateText: (text) => text))));
   testWidgets('pending request exposes decisions, not session operations', (tester) async {
     await show(tester, decide: (_) async => '');
     expect(find.byKey(const ValueKey('lan-approve')), findsOneWidget);

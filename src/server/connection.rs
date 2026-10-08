@@ -1908,7 +1908,7 @@ impl Connection {
             .await;
             return true;
         }
-        if login.access_method != hbb_common::lan::ACCESS_PASSWORD {
+        if !matches!(login.access_method, hbb_common::lan::ACCESS_PASSWORD | hbb_common::lan::ACCESS_PASSWORD_ONLY) {
             if !self.lan_access_probed || !login.access_username.is_empty()
                 || !login.access_password.is_empty() || !lr.username.is_empty() || !lr.password.is_empty()
                 || self.web_client || !crate::lan_access::available() {
@@ -1953,6 +1953,12 @@ impl Connection {
             self.send_login_error("Invalid password login payload").await;
             return false;
         }
+        let password_only = login.access_method == hbb_common::lan::ACCESS_PASSWORD_ONLY;
+        if password_only && (!cfg!(windows) || !self.lan_access_probed || !login.access_username.is_empty()
+            || !lr.username.is_empty() || !lr.password.is_empty() || self.web_client) {
+            self.send_login_error("Invalid password-only login payload").await;
+            return false;
+        }
         let permit = match try_acquire_lan_auth_gate() {
             Ok(permit) => permit,
             Err(_) => {
@@ -1962,10 +1968,12 @@ impl Connection {
             }
         };
         let username = login.access_username.clone();
+        let revision = Config::get_credential_revision();
         let mut password = login.access_password.to_vec();
         let verified = match tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let result = Config::verify_lan_credentials(&username, &password).unwrap_or(false);
+            let result = if password_only { Config::verify_lan_password(&password) }
+                else { Config::verify_lan_credentials(&username, &password) }.unwrap_or(false);
             password.zeroize();
             result
         })
@@ -1977,7 +1985,7 @@ impl Connection {
                 false
             }
         };
-        if !verified {
+        if !verified || !Config::lan_password_access_enabled() || revision != Config::get_credential_revision() {
             let retry_after = record_lan_auth_failure(&failure_keys);
             self.send_login_error_with_retry(
                 crate::client::LOGIN_MSG_LAN_CREDENTIALS_WRONG,
@@ -2106,7 +2114,8 @@ impl Connection {
             self.lan_access_probed = true;
             let (code_enabled, manual_enabled) = crate::lan_access::capabilities();
             let mut reply = Message::new();
-            reply.set_lan_access_capabilities(LanAccessCapabilities { version: hbb_common::lan::ACCESS_VERSION, code_enabled, manual_enabled, ..Default::default() });
+            reply.set_lan_access_capabilities(LanAccessCapabilities { version: hbb_common::lan::ACCESS_VERSION,
+                code_enabled, manual_enabled, password_only_enabled: cfg!(windows) && Config::lan_password_access_enabled(), ..Default::default() });
             self.send(reply).await;
             return true;
         }

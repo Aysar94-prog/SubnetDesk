@@ -1,5 +1,25 @@
 # SubnetDesk Windows helper status
 
+## Home/password-only correction83:2026-10-09, execution approved
+
+Source implementation under verification, NOT a delivered/accepted83 yet. Actual normal
+navigation sidebar now mounts code card above navigation; incoming-only branch also does.
+Backend listener maintains volatile automatic single-use120s codes; five failures across
+regenerations impose120s cooldown, previous code differs, lock/stop suspends code/pending.
+Settings > Unattended access contains password only with explicit password-method control;
+manual approval separately opt-in. New Windows-only wiremethod3 requires positive encrypted
+capabilityflag, no old-peer fallback or hidden username. Legacy account method0 preserved
+only for explicitly selected old profiles; normal remembered login uses verified-device
+password only, migrates encrypted empty-username payload after success. Existing hashes
+preserved and checked config writes retain original encryption transformations. Android
+is sender; no automatic receiver parity. New strings use selected-language translation/
+English fallback, never forced Arabic. Private updater/camera/session-chat rules retained.
+Flutter101/101 PASS, including source-wiring and rendered-card/settings tests; whole real
+home UI still needs83 runtime inspection. Focused analyzer has no errors, existing legacy
+warnings/info remain. Native diagnostic compile was intentionally stopped for final auth/
+storage/scope hardening; final native/protocol/build/device verification still required.
+Versions planned1.3.5/build83 (Android2083), generated bridge regenerated successfully.
+
 ## Build82 runtime checkpoint:2026-10-08
 
 Full Windows native8m50s + Flutter130.1s + final Flutter96/96 PASS; staged matching

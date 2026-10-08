@@ -1850,6 +1850,7 @@ fn lan_server_info() -> String {
     );
     let data = serde_json::json!({
         "configured": configured,
+        "password_access_enabled": Config::lan_password_access_enabled(),
         "running": running,
         "portable_service_running": portable_service_running,
         "runtime_state": runtime_state,
@@ -1914,7 +1915,7 @@ pub fn main_apply_lan_settings(
     web_private_key_path: String,
 ) -> String {
     let result = (|| -> ResultType<()> {
-        let username = hbb_common::lan::validate_username(&username)?;
+        let username = hbb_common::lan::validate_credential_username(&username)?;
         let port = listen_port
             .parse::<u16>()
             .map_err(|_| hbb_common::anyhow::anyhow!("Listen port must be between 1 and 65535"))?;
@@ -1953,7 +1954,9 @@ pub fn main_apply_lan_settings(
         let allowed_networks = crate::lan_server::normalize_allowed_networks(&allowed_networks)?;
 
         let current_username = Config::get_lan_access_username();
-        if password.is_empty() {
+        if username.is_empty() {
+            if !password.is_empty() { Config::set_lan_password(password.as_bytes())?; }
+        } else if password.is_empty() {
             if !Config::lan_credentials_configured() || username != current_username {
                 hbb_common::bail!(
                     "A password is required when creating or renaming the LAN account"
@@ -1995,6 +1998,24 @@ pub fn main_apply_lan_settings(
     }
 
     String::new()
+}
+
+pub fn main_set_unattended_access(enabled: bool, mut password: String) -> String {
+    let result = (|| -> ResultType<()> {
+        if !cfg!(windows) { hbb_common::bail!("Unattended access settings are supported only by this Windows receiver"); }
+        if !password.is_empty() { Config::set_lan_password(password.as_bytes())?; }
+        if enabled && !Config::lan_credentials_configured() {
+            hbb_common::bail!("Set an unattended access password before enabling password access");
+        }
+        Config::set_lan_password_access_enabled(enabled)?;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if should_sync_lan_settings_to_background() {
+            crate::ipc::sync_current_config_to_server(2_000)?;
+        }
+        Ok(())
+    })();
+    password.zeroize();
+    result.err().map(|err| err.to_string()).unwrap_or_default()
 }
 
 pub fn cm_get_clients_state() -> String {

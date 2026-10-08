@@ -695,15 +695,15 @@ abstract class BasePeerCard extends StatelessWidget {
       if (!saved && !storeError) return const [];
       return [MenuEntryButton<String>(
         childBuilder: (style) => Text(
-          saved ? 'كلمة المرور محفوظة · نسيان كلمة المرور' : 'تعذر قراءة الحفظ · نسيان كلمة المرور',
+          translate(saved ? 'Password saved · Forget password' : 'Unable to read saved password · Forget password'),
           style: style,
         ),
         proc: () async {
           try {
             final forgotten = await gFFI.invokeMethod('forget_remembered_lan_password', peer.fingerprint);
-            showToast(forgotten ? translate('Successful') : 'تعذر حذف كلمة المرور المحفوظة');
+            showToast(translate(forgotten ? 'Successful' : 'Unable to remove the saved password'));
           } catch (_) {
-            showToast('تعذر حذف كلمة المرور المحفوظة');
+            showToast(translate('Unable to remove the saved password'));
           }
         },
         padding: menuPadding,

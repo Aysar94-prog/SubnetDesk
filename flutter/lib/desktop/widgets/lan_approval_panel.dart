@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
+import '../../common.dart';
 
 /// Unauthenticated requests get only a local accept/deny surface, never chat
 /// or session controls. The backend owns timeout, identity binding and grant.
 class LanApprovalPanel extends StatefulWidget {
   const LanApprovalPanel({super.key, required this.name, required this.source,
-    required this.scope, required this.ready, required this.onDecision});
+    required this.scope, required this.ready, required this.onDecision, this.translateText});
+  final String Function(String)? translateText;
   final String name;
   final String source;
   final String scope;
@@ -17,33 +19,34 @@ class LanApprovalPanel extends StatefulWidget {
 class _LanApprovalPanelState extends State<LanApprovalPanel> {
   bool _busy = false;
   String _error = '';
+  String t(String text) => widget.translateText?.call(text) ?? translate(text);
   Future<void> _decide(bool accept) async {
     setState(() { _busy = true; _error = ''; });
     String error;
     try { error = await widget.onDecision(accept); }
-    catch (_) { error = 'تعذر إرسال القرار؛ لم يتم منح الدخول'; }
+    catch (_) { error = 'Unable to send decision; access was not granted'; }
     if (mounted) setState(() { _error = error; _busy = error.isEmpty; });
   }
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
     padding: const EdgeInsets.all(12), child: Column(
       crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('طلب اتصال — لم يبدأ التحكم', key: ValueKey('lan-pending-title')),
+        Text(t('Connection request — control has not started'), key: const ValueKey('lan-pending-title')),
         const SizedBox(height: 8),
-        Text('اسم يعلنه المرسل: ${widget.name}'),
-        Text('عنوان الشبكة: ${widget.source}'),
-        Text('الوصول المطلوب: ${widget.scope}'),
-        const Text('ينتهي الطلب خلال 60 ثانية. اقبل فقط جهازًا تعرفه.'),
+        Text('${t('Claimed sender name')}: ${widget.name}'),
+        Text('${t('Network address')}: ${widget.source}'),
+        Text('${t('Requested access')}: ${t(widget.scope)}'),
+        Text(t('Request expires after 60 seconds. Accept only a device you recognize.')),
         const SizedBox(height: 12),
         Wrap(spacing: 10, children: [
           ElevatedButton(key: const ValueKey('lan-approve'),
             onPressed: widget.ready && !_busy ? () => _decide(true) : null,
-            child: const Text('قبول')),
+            child: Text(t('Accept'))),
           OutlinedButton(key: const ValueKey('lan-deny'),
             onPressed: widget.ready && !_busy ? () => _decide(false) : null,
-            child: const Text('رفض')),
+            child: Text(t('Deny'))),
         ]),
-        if (_busy) const Text('أُرسل القرار؛ بانتظار تأكيد الجهاز'),
-        if (_error.isNotEmpty) Text(_error),
+        if (_busy) Text(t('Decision sent; waiting for receiver confirmation')),
+        if (_error.isNotEmpty) Text(t(_error)),
       ]));
 }

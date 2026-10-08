@@ -547,8 +547,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
 
   Future<void> _showAddDeviceDialog(BuildContext context) async {
     _reloadLanIdentities();
-    var selectedIdentityId =
-        defaultLanIdentityId(_lanIdentities) ?? lanIdentityManualValue;
+    var selectedIdentityId = lanIdentityManualValue;
     var bindIdentity = true;
 
     await showDialog<void>(
@@ -626,7 +625,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                             DropdownMenuItem(
                               value: lanIdentityManualValue,
                               child: Text(
-                                '${translate('Username')} · ${translate('Password')}',
+                                translate('Password'),
                               ),
                             ),
                             ..._lanIdentities.map(
@@ -661,16 +660,6 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                   ),
                   const SizedBox(height: 12),
                   if (!usingIdentity) ...[
-                TextField(
-                  controller: _usernameController,
-                  autocorrect: false,
-                  enableSuggestions: false,
-                  decoration: InputDecoration(
-                    labelText: translate('Username'),
-                    prefixIcon: const Icon(Icons.person_outline),
-                  ),
-                ),
-                const SizedBox(height: 12),
                 TextField(
                   controller: _passwordController,
                   obscureText: true,
@@ -733,12 +722,10 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
     bool bindIdentity = false,
   }) async {
     final endpoint = _idController.id;
-    final username = _usernameController.text.trim();
     final password = _passwordController.text;
-    if (endpoint.isEmpty ||
-        (identityId == null && username.isEmpty && password.isNotEmpty)) {
+    if (endpoint.isEmpty) {
       showToast(
-        '${translate('Local Address')} · ${translate('Username')} · ${translate('Password')}',
+        translate('Local Address'),
       );
       return false;
     }
@@ -748,7 +735,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
         ? null
         : jsonEncode({
             'lan_version': 1,
-            'username': username,
+            'username': '',
             'password': password,
             'remember': _rememberPassword,
           });

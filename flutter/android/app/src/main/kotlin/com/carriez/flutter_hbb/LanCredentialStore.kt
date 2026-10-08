@@ -58,7 +58,7 @@ object LanCredentialStore {
     fun save(context: Context, deviceFingerprint: String, payload: ByteArray) {
         try {
             val fingerprint = fingerprint(deviceFingerprint)
-            require(payload.size in 4..MAX_PAYLOAD)
+            require(payload.size in 3..MAX_PAYLOAD)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             // Keystore generates the random IV; caller-supplied encryption IVs are forbidden.
             cipher.init(Cipher.ENCRYPT_MODE, key(true))
@@ -106,7 +106,7 @@ object LanCredentialStore {
                     if (read < 0) break
                     count += read
                 }
-                require(count in (HEADER_SIZE + 20)..maximum)
+                require(count in (HEADER_SIZE + 19)..maximum)
                 bytes.copyOf(count)
             }
         } catch (_: FileNotFoundException) {

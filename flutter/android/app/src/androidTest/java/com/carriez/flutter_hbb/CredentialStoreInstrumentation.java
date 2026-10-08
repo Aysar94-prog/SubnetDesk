@@ -59,7 +59,8 @@ public final class CredentialStoreInstrumentation extends Instrumentation {
         String second = fingerprint(random);
         String stage = "absent";
         boolean passed = false;
-        byte[] payload = new byte[] {0, 4, 117, 115, 101, 114, 116, 101, 115, 116};
+        // Password-only minimum payload: zero username length and one password byte.
+        byte[] payload = new byte[] {0, 0, 112};
         try {
             require(LanCredentialStore.load(getTargetContext(), first) == null);
             stage = "save_load";

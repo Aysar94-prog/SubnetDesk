@@ -25,6 +25,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common/widgets/dialog.dart';
+import '../widgets/lan_unattended_access.dart';
+import '../widgets/lan_optional_access.dart';
 
 const double _kTabWidth = 200;
 const double _kTabHeight = 42;
@@ -380,6 +382,10 @@ class _GeneralState extends State<_General> {
       controller: scrollController,
       children: [
         if (!isWeb) service(),
+        if (isWindows && !bind.isOutgoingOnly())
+          _Card(title: 'Unattended access', children: [const LanUnattendedAccess()]),
+        if (isWindows && !bind.isOutgoingOnly())
+          _Card(title: 'Connection approval', children: [const LanOptionalAccess(showSettings: true)]),
         theme(),
         _Card(title: 'Language', children: [language()]),
         if (!isWeb) hwcodec(),

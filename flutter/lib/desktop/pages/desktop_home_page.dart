@@ -127,7 +127,7 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
     );
     final runtimeError = info['runtime_error']?.toString() ?? '';
     final displayStatus = lanServerDisplayStatus(
-      configured: configured,
+      configured: configured || (isWindows && running),
       running: running,
       startupError: runtimeError,
     );
@@ -315,7 +315,7 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
                   ),
                 ),
               ],
-              if (!configured) ...[
+              if (!configured && !isWindows) ...[
                 const SizedBox(height: 14),
                 _buildCredentialSetupPrompt(
                   username: info['username']?.toString() ?? '',
@@ -356,12 +356,6 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
                   ),
                   icon: const Icon(Icons.edit_outlined, size: 15),
                 ),
-              ),
-              _buildCompactInfoRow(
-                icon: Icons.person_outline_rounded,
-                label: translate('Username'),
-                value: info['username']?.toString() ?? '-',
-                muted: muted,
               ),
               _buildCompactInfoRow(
                 icon: Icons.lan_outlined,
@@ -498,13 +492,6 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
                 ),
               ],
             ),
-            const SizedBox(height: 11),
-            Text(
-              translate('Username'),
-              style: TextStyle(fontSize: 12, color: muted),
-            ),
-            const SizedBox(height: 3),
-            SelectableText(info['username']?.toString() ?? '-'),
             const SizedBox(height: 11),
             Text(
               translate('Local Address'),
@@ -1190,7 +1177,7 @@ Future<void> showLanSettingsDialog(
                       ],
                     ),
                     const SizedBox(height: 22),
-                    responsiveFields([
+                    if (!isWindows) responsiveFields([
                       Expanded(
                         child: TextField(
                           controller: username,
@@ -1509,8 +1496,8 @@ Future<void> showLanSettingsDialog(
                                   }),
                                 );
                                 var result = await bind.mainApplyLanSettings(
-                                  username: username.text,
-                                  password: password.text,
+                                  username: isWindows ? '' : username.text,
+                                  password: isWindows ? '' : password.text,
                                   listenAddresses: listenAddresses.text,
                                   listenPort: listenPort.text,
                                   allowedNetworks: allowedNetworks.text,
@@ -1755,6 +1742,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
               child: Column(
                 children: [
                   const SizedBox(height: 8),
+                  if (isWindows && !bind.isOutgoingOnly()) const LanOptionalAccess(),
                   _buildSidebarItem(
                     context,
                     icon: Icons.devices_outlined,
@@ -2665,8 +2653,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         Align(alignment: Alignment.center, child: loadPowered(context)),
       Align(alignment: Alignment.center, child: loadLogo()),
       buildTip(context),
-      if (!isOutgoingOnly) const LanServerInfoPanel(compact: true),
       if (isWindows && !isOutgoingOnly) const LanOptionalAccess(),
+      if (!isOutgoingOnly) const LanServerInfoPanel(compact: true),
       FutureBuilder<Widget>(
         future: Future.value(buildHelpCards()),
         builder: (_, data) {

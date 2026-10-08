@@ -20,6 +20,7 @@ pub(crate) enum Rejection {
     Duplicate,
     QueueFull,
     Invalid,
+    Throttled,
 }
 
 struct Code {
@@ -49,9 +50,38 @@ pub(crate) struct AccessPolicy {
     manual_enabled: bool,
     code: Option<Code>,
     pending: HashMap<i32, Pending>,
+    last_code: Option<[u8; 6]>,
+    failed_codes: u8,
+    failure_window: Option<Instant>,
+    blocked_until: Option<Instant>,
+}
+
+impl Drop for AccessPolicy {
+    fn drop(&mut self) {
+        if let Some(code) = self.last_code.as_mut() { code.fill(0); }
+    }
 }
 
 impl AccessPolicy {
+    pub(crate) fn automatic_codes() -> Self {
+        let mut policy = Self::default();
+        policy.code_enabled = true;
+        policy
+    }
+    pub(crate) fn suspend(&mut self) {
+        self.code = None;
+        self.pending.clear();
+    }
+    pub(crate) fn retry_seconds(&self, now: Instant) -> u64 {
+        self.blocked_until.filter(|until| now < *until)
+            .map(|until| until.saturating_duration_since(now).as_secs().saturating_add(1)).unwrap_or(0)
+    }
+    pub(crate) fn needs_code(&self, now: Instant) -> bool {
+        self.code_enabled && self.retry_seconds(now) == 0 && self.visible_code(now).is_none()
+    }
+    pub(crate) fn is_previous_code(&self, digits: &[u8; 6]) -> bool {
+        self.last_code.as_ref() == Some(digits)
+    }
     pub(crate) fn capabilities(&self) -> (bool, bool) {
         (self.code_enabled, self.manual_enabled)
     }
@@ -96,9 +126,11 @@ impl AccessPolicy {
         if !self.code_enabled {
             return Err(Rejection::Disabled);
         }
+        if self.retry_seconds(now) > 0 { return Err(Rejection::Throttled); }
         if !random_digits.iter().all(u8::is_ascii_digit) {
             return Err(Rejection::Invalid);
         }
+        self.last_code = Some(random_digits);
         self.code = Some(Code {
             value: random_digits,
             expires: now + CODE_TTL,
@@ -117,6 +149,7 @@ impl AccessPolicy {
         if !self.code_enabled {
             return Err(Rejection::Disabled);
         }
+        if self.retry_seconds(now) > 0 { return Err(Rejection::Throttled); }
         let code = self.code.as_mut().ok_or(Rejection::Missing)?;
         if now >= code.expires {
             self.code = None;
@@ -127,6 +160,18 @@ impl AccessPolicy {
             return Ok(());
         }
         code.attempts -= 1;
+        if self.failure_window.map(|until| now >= until).unwrap_or(true) {
+            self.failed_codes = 0;
+            self.failure_window = Some(now + CODE_TTL);
+        }
+        self.failed_codes = self.failed_codes.saturating_add(1);
+        if self.failed_codes >= CODE_ATTEMPTS {
+            self.blocked_until = Some(now + CODE_TTL);
+            self.failed_codes = 0;
+            self.failure_window = Some(now + CODE_TTL);
+            self.code = None;
+            return Err(Rejection::Wrong);
+        }
         if code.attempts == 0 {
             self.code = None;
         }
@@ -219,6 +264,39 @@ mod tests {
         policy
     }
     #[test]
+    fn automatic_rotation_never_resets_guess_budget() {
+        let mut policy = AccessPolicy::automatic_codes();
+        let now = Instant::now();
+        assert!(policy.needs_code(now));
+        for attempt in 0..5 {
+            policy.issue_code(*b"123456", now).unwrap();
+            assert_eq!(policy.consume_code(now, |_| false), Err(Rejection::Wrong));
+            if attempt < 4 { assert_eq!(policy.retry_seconds(now), 0); }
+        }
+        assert!(!policy.needs_code(now));
+        assert_eq!(policy.issue_code(*b"654321", now), Err(Rejection::Throttled));
+        policy.suspend();
+        policy.configure(false, false);
+        policy.configure(true, false);
+        assert_eq!(policy.consume_code(now, |_| true), Err(Rejection::Throttled));
+        assert!(policy.needs_code(now + CODE_TTL));
+        policy.issue_code(*b"654321", now + CODE_TTL).unwrap();
+        assert_eq!(policy.consume_code(now + CODE_TTL, |_| true), Ok(()));
+        assert!(policy.needs_code(now + CODE_TTL));
+        assert!(policy.is_previous_code(b"654321"));
+    }
+    #[test]
+    fn suspend_revokes_code_and_pending_without_changing_manual_choice() {
+        let mut policy = enabled();
+        let now = Instant::now();
+        policy.issue_code(*b"123456", now).unwrap();
+        policy.request_manual(1, [1; 32], "ip", now).unwrap();
+        policy.suspend();
+        assert_eq!(policy.capabilities(), (true, true));
+        assert!(policy.visible_code(now).is_none());
+        assert!(!policy.manual_pending(1, now));
+    }
+    #[test]
     fn optional_methods_are_off_by_default() {
         let mut policy = AccessPolicy::default();
         let now = Instant::now();
@@ -255,7 +333,7 @@ mod tests {
         for _ in 0..5 {
             assert_eq!(policy.consume_code(now, |_| false), Err(Rejection::Wrong));
         }
-        assert_eq!(policy.consume_code(now, |_| true), Err(Rejection::Missing));
+        assert_eq!(policy.consume_code(now, |_| true), Err(Rejection::Throttled));
     }
     #[test]
     fn manual_decision_binds_connection_nonce_and_is_not_replayed() {

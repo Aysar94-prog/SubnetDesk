@@ -11,7 +11,7 @@ fn fingerprint_key(value: &str) -> ResultType<String> {
 }
 
 fn encode(username: &str, password: &[u8]) -> ResultType<Zeroizing<Vec<u8>>> {
-    let username = lan::validate_username(username)?;
+    let username = lan::validate_credential_username(username)?;
     lan::validate_password(password)?;
     let mut payload = Zeroizing::new(Vec::with_capacity(2 + username.len() + password.len()));
     payload.extend_from_slice(&(username.len() as u16).to_be_bytes());
@@ -21,16 +21,16 @@ fn encode(username: &str, password: &[u8]) -> ResultType<Zeroizing<Vec<u8>>> {
 }
 
 fn decode(payload: &[u8]) -> ResultType<(String, Vec<u8>)> {
-    if payload.len() < 4 || payload.len() > 2 + lan::MAX_USERNAME_LEN + lan::MAX_PASSWORD_LEN {
+    if payload.len() < 3 || payload.len() > 2 + lan::MAX_USERNAME_LEN + lan::MAX_PASSWORD_LEN {
         bail!("Invalid saved LAN credential");
     }
     let username_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
-    if username_len == 0 || username_len > lan::MAX_USERNAME_LEN || 2 + username_len >= payload.len() {
+    if username_len > lan::MAX_USERNAME_LEN || 2 + username_len >= payload.len() {
         bail!("Invalid saved LAN credential");
     }
     let username = std::str::from_utf8(&payload[2..2 + username_len])
         .map_err(|_| anyhow!("Invalid saved LAN credential"))?;
-    let username = lan::validate_username(username)?;
+    let username = lan::validate_credential_username(username)?;
     let password = &payload[2 + username_len..];
     lan::validate_password(password)?;
     Ok((username, password.to_vec()))
@@ -79,7 +79,8 @@ mod tests {
 
     #[test]
     fn reject_invalid_fields_and_boundaries() {
-        assert!(encode("", b"test").is_err());
+        let password_only = encode("", b"p").unwrap();
+        assert_eq!(decode(&password_only).unwrap(), (String::new(), b"p".to_vec()));
         assert!(encode("user\nname", b"test").is_err());
         assert!(encode("user", b"").is_err());
         assert!(encode("user", b"bad\npassword").is_err());
@@ -92,7 +93,7 @@ mod tests {
 
     #[test]
     fn reject_truncation_bad_length_and_invalid_text() {
-        for payload in [&[][..], &[0, 0, 1, 2], &[0, 65, 1, 2], &[0, 1, 255, 1], &[0, 1, b'u', 255]] {
+        for payload in [&[][..], &[0, 0, 0], &[0, 65, 1, 2], &[0, 1, 255, 1], &[0, 1, b'u', 255]] {
             assert!(decode(payload).is_err());
         }
         assert!(decode(&vec![0; 1024]).is_err());
