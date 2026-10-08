@@ -5,13 +5,17 @@
 This version removes View camera entry points and rejects camera sessions natively while
 retaining screen/control and voice. Camera FFI signatures remain for compatibility, but deny
 camera requests before endpoint parsing/registration; no bridge regeneration required here.
-Windows frontend release and Flutter65/65 pass. Current native regression/final release and
-physical acceptance remain separate gates. build-private-helper.ps1 defaults to1.3.3+78;
+Windows frontend release and Flutter65/65 pass. Native camera3/3 and updater4/4 (feature enabled)
+pass; final native release and physical acceptance remain separate gates.
+build-private-helper.ps1 defaults to1.3.3+78;
 package-private-helper.ps1 stages a new1.3.3 folder and matched source archive, preserving1.3.2.
 Use -PolicyTest for updater-feature and camera/session-constructor tests. Normal release omits
 software-update. Source archive must include src/camera_access.rs and patched common source.
 Android dependency preparation uses scoped SDK36/NDKr28c/Temurin17, with no system PATH change.
 Its native/APK build is not yet verified; do not reuse upstream native libraries as a new build.
+Candidate Gradle alone pins NDK28.2.13676358. Scoped cargo-ndk3.1.2 matches upstream CI.
+Windows-host libsodium-sys0.2.7 requires a separately cross-built Android archive via
+SODIUM_LIB_DIR, not its bundled Windows library; build scripts explicitly gate this prerequisite.
 
 ## Private1.3.2+77 checkpoint:2026-10-08
 
