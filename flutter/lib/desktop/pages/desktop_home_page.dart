@@ -2710,11 +2710,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           children: [
             Column(
               children: [
-                SingleChildScrollView(
+                Expanded(child: SingleChildScrollView(
                   controller: _leftPaneScrollController,
                   child: Column(key: _childKey, children: children),
-                ),
-                Expanded(child: Container()),
+                )),
               ],
             ),
             if (isOutgoingOnly)
