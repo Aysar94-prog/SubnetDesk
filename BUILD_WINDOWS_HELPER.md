@@ -1,5 +1,34 @@
 # Local Windows helper build checkpoint
 
+## Private1.3.5/build83:2026-10-09
+
+Current source85b9941/807f718 + patched commonb56ada4. Historical commands/state
+below describe earlier versions and must not override this section or current status.
+Regenerate ignored FRB1.80.1 outputs for mainSetUnattendedAccess before rebuilding.
+Windows requires FULL native rebuild, not FrontendOnly:
+`build-private-helper.ps1 -BuildName 1.3.5 -BuildNumber 83` (native release features
+flutter,hwcodec,vram; no software-update). Flutter build windows --release --no-pub
+--build-name 1.3.5 --build-number 83; explicit version is1.3.5+83.
+
+Verification: -AccessTest12 PASS; fresh native test executable password_only_contract_tests3,
+android_credentials4, private_build3, camera_access3, lan_protocol6 PASS. -ProtocolTest4
+and -CommonPasswordTest1 PASS; Flutter101 PASS; analyzer no errors/60 legacy warning/info.
+Do not run overlapping Windows scripts while one owns the scoped S: mapping. Android
+build uses separate physical tool/target paths. Keep .private/signing material out of archives.
+
+Code now mounts on actual normal main sidebar as well as incoming-only home. Native
+interactive listener initializes/rotates code, not UI polling. Settings > General >
+Unattended access is password-only; Connection approval separately enables manual requests.
+Password-only wire3 needs positive encrypted version1 capability boolean4; no hidden
+account/old-peer fallback. Existing explicit legacy method0 profile support is retained.
+No OS service/prelogin/firewall/security expansion. Original service remains Stopped/Auto.
+Temporary codes unavailable while receiver stopped/locked/noninteractive; manual opt-in
+resets off on restart. Device/UI/paired acceptance is distinct from automated tests.
+
+Stage/package with package-ring79-helper.ps1 -BuildName 1.3.5 -BuildNumber 83, then -Archives
+after clean local commits. Include patched submodules/generated bridge and license/notices;
+never substitute build82 binaries or claim historical192.168.1.61 was remotely updated.
+
 ## Incoming ringtone build79:2026-10-08
 
 Windows frontend/runner-only repair. Backend1.3.3 and Android APK unchanged.

@@ -1,5 +1,42 @@
 # SubnetDesk Windows helper status
 
+## Build83 full-build/staging checkpoint:2026-10-09
+
+Final Windows native4m58s and Flutter74.2s PASS; post-build Flutter101/101 PASS.
+First Flutter attempt failed on VS18 child Git PATH; verified physical Git cmd path
+added to builder process only, full retry reused rebuilt native(Cargo1.59s), no app
+source/global environment/security change. New staged portable runner1.3.5+83:
+EXE EC2FCCC030B3B19ABBE55DBA403D1C0230FE3DCBB9EB3FB86B88822508A9E792;
+DLL 1CE28159973C4F1A4B419B55DF286725E2FF6CA0DD57F60E05375B84CFB7F592
+matches final native output. Original app/service untouched. Corresponding archives next.
+
+Old82 mainPID25660 remains running/listening; no established session. Its settings/auth
+dialog remains open. Human close/security/Firewall action needed before switching to83;
+Windows83 actual main code visibility not yet accepted. Android2083 already installed/
+foreground and UI/Keystore synthetic verification passed; paired acceptance still open.
+
+## Build83 verified-source / Android-runtime checkpoint:2026-10-09
+
+Production85b9941/807f718/commonb56ada4. Final Windows native tests compiled15m12s
+after final stop-service guard: access/CM12, password-only encrypted loopback3, Android
+payload4, updater3, camera3, protocol6, additive encrypted commonwire4 and passwordhash1
+PASS (36 selected checks). Flutter101/101 PASS, analyzer no errors/60 legacy warning-info.
+Full Windows1.3.5+83 native+Flutter build running, binary/runtime not delivered yet.
+Fresh native-runner-cmake83 /W4 /WX build and CTest2/2 PASS: production argument
+trimming17cases and ringtone WAV format. Audible incoming ringtone acceptance still open.
+
+Android full native4m14s/APK351.7s PASS; staged helper1.3.5/code2083 with preserved
+signer43e19ba2...57c52/no-camera/16KB/exact-native PASS, APK1536BB6E...92811B9C.
+Approved install-r and foreground Helper MainActivity confirmed; original2075/microphone
+grant preserved. Actual home/password-only/English three-method UI inspected; no request
+or authentication submitted. Fresh Java same-signer minimum3byte instrumentation PASS
+against release2083 Keystore, only synthetic entries. Not paired native-JNI acceptance.
+
+Windows old82 remains running and its authentication/settings dialog needs human close;
+no computer-use security/auth dialog automation. Windows Firewall/local password/manual
+settings and paired code/password/manual/chat/ring acceptance remain human-controlled.
+Historical planning/pending notes below are superseded for completed checks only.
+
 ## Home/password-only correction83:2026-10-09, execution approved
 
 Source implementation under verification, NOT a delivered/accepted83 yet. Actual normal

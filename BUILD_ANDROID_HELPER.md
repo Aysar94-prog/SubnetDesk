@@ -1,5 +1,36 @@
 # Private Android helper build on Windows
 
+## Private1.3.5/build83:2026-10-09 current checkpoint
+
+Historical notes below are older build78 evidence, not current pending/acceptance state.
+Source85b9941/807f718 and patched commonb56ada4; FRB1.80.1 regenerated for new settings API.
+Build full native+APK with build-android-private-helper.ps1 -KeepNativeCache
+-BuildName 1.3.5 -BuildNumber 83. Do not use ApkOnly after native/protocol/storage changes.
+verify-stage-android-private-helper.ps1 -BuildName 1.3.5 -BuildNumber 83 must verify helper
+com.zibochen.subnetdesk.helper1.3.5/code2083, arm64/no-camera, preserved signer/16KB ZIP
+alignment and exact strip reproduction of the newly built native library.
+
+Native4m14s/APK351.7s PASS; staged APK1536BB6E32C876B6BBE3B334C0C6CB63928F75098C9DED30CD2A6D7A92811B9C.
+Approved helper-only install-r succeeded; original1.3.0/code2075 and microphone grant
+unchanged. Actual release Helper MainActivity home shows one Password field/no Username,
+English Password / saved password, Temporary code and Manual approval. Code selection
+renders six-digit field; manual selection renders acceptance explanation/no password;
+password mode restored without submitting any real authentication/request.
+
+Remembered password is verified-fingerprint bound, encrypted by Android Keystore and
+stored only after successful login. Empty username minimum payload3bytes is supported;
+old encrypted account payloads remain readable and migrate after successful normal login.
+Fresh Java framework-only instrumentation (2m4s build, same preserved signer) PASS against
+actual release2083 for minimum password-only payload: save/load/random nonce/fingerprint
+binding swap/tamper/path rejection/forget. Only synthetic entries created and cleaned.
+This is not actual native-JNI paired saved-password/restart/forget/trust/new-IP acceptance.
+
+Keep preserved helper signing key private; never use LAN Messenger's key or replace the
+official app. No Android receiver parity inferred. Source package imports matching
+Windows83 common/generated bridge plus pinned Android codec/host patch and excludes
+.private/keystores/key.properties/native binaries. Original app/service/data preserved;
+physical voice/ring/chat/buzzer and three real access-method sessions remain human tests.
+
 2026-10-08. Approved side-by-side candidate workflow; build support only.
 Windows1.3.3+78 binary/source12a8dac archives remain frozen and are not replaced.
 Native Android release now PASS2m02s: rebuilt ARM64 library22,912,088 bytes,
