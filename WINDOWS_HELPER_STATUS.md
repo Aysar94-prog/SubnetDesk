@@ -1,5 +1,10 @@
 # SubnetDesk Windows helper status
 
+Packaging checkpoint: local source commit2aa0dc7 supplied in helper-v1.3.1 source ZIP with
+pinned hbb_common/WindowInjection;1180 entries and private-material gate pass. Windows binary
+ZIP complete; hashes in outputs/SubnetDesk-helper-cm/SHA256SUMS.txt. No push. Runtime/session
+acceptance still pending user reconnect; this documentation update does not alter app binaries.
+
 ## Current authorized repair/build/runtime: 2026-10-08 09:48 Asia/Jerusalem
 
 Windows native runner trims only trailing whitespace via production command_line.h and safely
@@ -17,7 +22,7 @@ Original installed service Stopped/Auto, files/path untouched. Manual new --cm P
 existing6s idle close. This is NOT visible dock/session acceptance. Manual CM no longer present;
 user asked to reconnect Android for automatic CM launch and actual panel/chat/fold acceptance.
 Logs: checks/runner-fix-build.log and runtime-1.3.1-{main,cm}.{stdout,stderr}.txt.
-Old1.3.0 bundle/archives preserved; new binary/source packaging in progress.
+Old1.3.0 bundle/archives preserved; new binary/source archives complete, see packaging checkpoint.
 Older observations below are historical; earlier user dock acceptance FAILED.
 
 ## Superseding diagnosis: 2026-10-08, live dock acceptance failed
