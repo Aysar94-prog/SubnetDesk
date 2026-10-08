@@ -82,6 +82,7 @@ pub struct Remote<T: InvokeUiSession> {
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
     sent_close_reason: bool,
+    chat_attention_cooldown: crate::chat_attention::Cooldown,
 }
 
 #[derive(Default)]
@@ -91,6 +92,7 @@ struct ParsedPeerInfo {
     idd_impl: String,
     support_view_camera: bool,
     support_terminal: bool,
+    support_chat_attention: bool,
 }
 
 impl ParsedPeerInfo {
@@ -131,6 +133,7 @@ impl<T: InvokeUiSession> Remote<T> {
             chroma: Default::default(),
             last_record_state: false,
             sent_close_reason: false,
+            chat_attention_cooldown: Default::default(),
         }
     }
 
@@ -551,6 +554,26 @@ impl<T: InvokeUiSession> Remote<T> {
 
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
         match data {
+            Data::RequestChatAttention => {
+                let now = std::time::Instant::now();
+                if self.is_connected && self.peer_info.support_chat_attention
+                    && self.chat_attention_cooldown.ready(now) {
+                    let mut misc = Misc::new();
+                    misc.set_chat_attention(ChatAttention {
+                        version: crate::chat_attention::VERSION,
+                        ..Default::default()
+                    });
+                    let mut message = Message::new();
+                    message.set_misc(misc);
+                    match peer.send(&message).await {
+                        Ok(()) => self.chat_attention_cooldown.record(now),
+                        Err(error) => {
+                            log::warn!("Failed to send chat attention: {error}");
+                            self.handler.msgbox("error", "Buzzer", "Failed", "");
+                        }
+                    }
+                }
+            }
             Data::Close => {
                 self.send_close_reason(peer, "").await;
                 return false;
@@ -2050,6 +2073,10 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(platform_additions) =
             serde_json::from_str::<HashMap<String, serde_json::Value>>(&pi.platform_additions)
         {
+            self.peer_info.support_chat_attention = platform_additions
+                .get(crate::chat_attention::CAPABILITY)
+                .and_then(|value| value.as_u64())
+                == Some(crate::chat_attention::VERSION as u64);
             self.peer_info.is_installed = platform_additions
                 .get("is_installed")
                 .map(|v| v.as_bool())

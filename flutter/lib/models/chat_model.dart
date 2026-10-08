@@ -70,6 +70,29 @@ class ChatModel with ChangeNotifier {
   TextEditingController textController = TextEditingController();
   RxInt mobileUnreadSum = 0.obs;
   MessageKey? latestReceivedKey;
+  Timer? _buzzerTimer;
+  bool buzzerCoolingDown = false;
+
+  bool get buzzerSupported => currentKey.isOut && parent.target != null &&
+      currentKey.peerId == parent.target!.id &&
+      parent.target!.ffiModel.pi.platformAdditions['chat_attention_version'] == 1;
+
+  Future<void> sendBuzzer() async {
+    if (!buzzerSupported || buzzerCoolingDown) return;
+    buzzerCoolingDown = true;
+    notifyListeners();
+    _buzzerTimer?.cancel();
+    _buzzerTimer = Timer(const Duration(seconds: 5), () {
+      buzzerCoolingDown = false;
+      notifyListeners();
+    });
+    try {
+      await bind.sessionRequestChatAttention(sessionId: sessionId);
+    } catch (error) {
+      debugPrint('Failed to request chat attention: $error');
+      showToast(translate('Failed'));
+    }
+  }
 
   Offset chatWindowPosition = Offset(20, 80);
 
@@ -80,6 +103,7 @@ class ChatModel with ChangeNotifier {
 
   @override
   void dispose() {
+    _buzzerTimer?.cancel();
     textController.dispose();
     super.dispose();
   }

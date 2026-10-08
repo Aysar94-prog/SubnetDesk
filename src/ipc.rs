@@ -318,6 +318,7 @@ pub enum Data {
     ChatMessage {
         text: String,
     },
+    ChatAttention,
     SystemInfo(Option<String>),
     ClickTime(i64),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

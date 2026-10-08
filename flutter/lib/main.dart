@@ -304,7 +304,14 @@ Future<void> resizeWindowsCmPanel() async {
   );
 }
 
-showCmWindow({bool isStartup = false, bool restore = false}) async {
+showCmWindow({bool isStartup = false, bool restore = false, bool focus = true}) async {
+  if (isWindows && !isStartup && !focus && _isCmReadyToShow) {
+    // The pinned window_manager Windows plugin ignores inactive and focuses on show.
+    // Use our own HWND channel instead, including a non-activating DPI-aware resize.
+    await const MethodChannel('subnetdesk/window')
+        .invokeMethod<void>('showAttentionDock');
+    return;
+  }
   if (isStartup) {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
       size: isWindows ? kWindowsCmPanelSize : kConnectionManagerWindowSizeClosedChat,
@@ -331,8 +338,8 @@ showCmWindow({bool isStartup = false, bool restore = false}) async {
     if (await windowManager.getOpacity() != 1) {
       await windowManager.setOpacity(1);
       if (isWindows) {
-        await windowManager.show();
-        await windowManager.restore();
+        await windowManager.show(inactive: !focus);
+        if (focus) await windowManager.restore();
       } else {
         await windowManager.focus();
         await windowManager.minimize(); //needed
@@ -345,13 +352,13 @@ showCmWindow({bool isStartup = false, bool restore = false}) async {
           Alignment.topRight,
         );
       }
-      windowOnTop(null);
+      if (focus) windowOnTop(null);
     } else if (isWindows && restore) {
       // Restore for a new incoming session, never for the periodic state poll.
-      await windowManager.show();
-      await windowManager.restore();
+      await windowManager.show(inactive: !focus);
+      if (focus) await windowManager.restore();
       await resizeWindowsCmPanel();
-      await windowManager.focus();
+      if (focus) await windowManager.focus();
     }
   }
 }

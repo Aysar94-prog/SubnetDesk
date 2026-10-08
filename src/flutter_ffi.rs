@@ -689,6 +689,12 @@ pub fn session_input_string(session_id: SessionID, value: String) {
 }
 
 // chat_client_mode
+pub fn session_request_chat_attention(session_id: SessionID) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.request_chat_attention();
+    }
+}
+
 pub fn session_send_chat(session_id: SessionID, text: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.send_chat(text);
@@ -1049,6 +1055,9 @@ pub fn main_get_version() -> String {
 }
 
 pub fn main_get_software_update_state() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_STATE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1062,6 +1071,9 @@ pub fn main_get_software_update_state() -> String {
 }
 
 pub fn main_check_software_update() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_MESSAGE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1078,6 +1090,9 @@ pub fn main_check_software_update() -> String {
 }
 
 pub fn main_download_software_update() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_MESSAGE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1094,6 +1109,9 @@ pub fn main_download_software_update() -> String {
 }
 
 pub fn main_install_software_update() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_MESSAGE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1110,6 +1128,7 @@ pub fn main_install_software_update() -> String {
 }
 
 pub fn main_set_software_update_preferences(auto_check: bool, auto_download: bool) {
+    if !crate::private_build::software_updates_enabled() { return; }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))

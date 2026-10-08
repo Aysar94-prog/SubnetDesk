@@ -21,6 +21,8 @@ mod lan_identity;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod lan_mdns;
 mod lan_protocol;
+mod chat_attention;
+mod private_build;
 mod lan_server;
 #[cfg(all(
     feature = "flutter",

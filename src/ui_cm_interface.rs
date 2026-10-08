@@ -187,6 +187,8 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
 
     fn new_message(&self, id: i32, text: String);
 
+    fn chat_attention(&self, _id: i32) {}
+
     fn change_theme(&self, dark: String);
 
     fn change_language(&self);
@@ -500,6 +502,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
                                 }
+                                Data::ChatAttention => {
+                                    self.cm.chat_attention(self.conn_id);
+                                }
                                 Data::FS(mut fs) => {
                                     if let ipc::FS::WriteBlock { id, file_num, data: _, compressed } = fs {
                                         if let Ok(bytes) = self.stream.next_raw().await {
@@ -812,6 +817,9 @@ pub async fn start_listen<T: InvokeUiCM>(
             }
             Some(Data::ChatMessage { text }) => {
                 cm.new_message(current_id, text);
+            }
+            Some(Data::ChatAttention) => {
+                cm.chat_attention(current_id);
             }
             Some(Data::FS(fs)) => {
                 // Android doesn't need CM-side file reading (no need_validate_file_read_access)

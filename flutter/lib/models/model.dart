@@ -389,6 +389,8 @@ class FfiModel with ChangeNotifier {
           int.parse(evt['id'] as String),
           evt['text'] ?? '',
         );
+      } else if (name == 'chat_attention') {
+        await parent.target?.serverModel.onChatAttention(evt);
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {

@@ -346,6 +346,7 @@ pub struct Connection {
     peer_argb: u32,
     session_last_recv_time: Option<Arc<Mutex<Instant>>>,
     chat_unanswered: bool,
+    chat_attention_cooldown: crate::chat_attention::Cooldown,
     file_transferred: bool,
     #[cfg(windows)]
     portable: PortableState,
@@ -509,6 +510,7 @@ impl Connection {
             peer_argb: 0u32,
             session_last_recv_time: None,
             chat_unanswered: false,
+            chat_attention_cooldown: Default::default(),
             file_transferred: false,
             #[cfg(windows)]
             portable: Default::default(),
@@ -1312,6 +1314,12 @@ impl Connection {
         }
         #[cfg(target_os = "windows")]
         {
+            #[cfg(feature = "flutter")]
+            if self.file_transfer.is_none() && !self.view_camera && !self.terminal
+                && self.port_forward_socket.is_none() {
+                platform_additions.insert(crate::chat_attention::CAPABILITY.into(),
+                    json!(crate::chat_attention::VERSION));
+            }
             platform_additions.insert(
                 "is_installed".into(),
                 json!(crate::platform::is_installed()),
@@ -2664,6 +2672,24 @@ impl Connection {
                         self.send_to_cm(ipc::Data::ChatMessage { text: c.text });
                         self.chat_unanswered = true;
                         self.update_auto_disconnect_timer();
+                    }
+                    Some(misc::Union::ChatAttention(attention)) => {
+                        #[cfg(all(target_os = "windows", feature = "flutter"))]
+                        {
+                            use hbb_common::protobuf::Message as _;
+                            static ALERTS: std::sync::OnceLock<std::sync::Mutex<crate::chat_attention::AlertWindow>>
+                                = std::sync::OnceLock::new();
+                            let now = std::time::Instant::now();
+                            if self.authed_conn_type() == Some(AuthConnType::Remote)
+                                && crate::chat_attention::valid_request(attention.version, attention.compute_size())
+                                && self.chat_attention_cooldown.ready(now)
+                                && ALERTS.get_or_init(Default::default).lock().unwrap().accept(now) {
+                                self.chat_attention_cooldown.record(now);
+                                self.send_to_cm(ipc::Data::ChatAttention);
+                            }
+                        }
+                        #[cfg(not(all(target_os = "windows", feature = "flutter")))]
+                        let _ = attention;
                     }
                     Some(misc::Union::Option(o)) => {
                         if self.authed_conn_type() == Some(AuthConnType::Remote) {

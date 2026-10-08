@@ -15,6 +15,8 @@ import '../desktop/pages/server_page.dart' as desktop;
 import '../desktop/widgets/tabbar_widget.dart';
 import '../mobile/pages/server_page.dart';
 import 'model.dart';
+import 'chat_attention_state.dart';
+import 'incoming_voice_ring.dart';
 
 const kLoginDialogTag = "LOGIN";
 
@@ -28,6 +30,8 @@ class ServerModel with ChangeNotifier {
   bool _showElevation = false;
   bool hideCm = false;
   bool windowsCmCollapsed = false;
+  final chatAttention = ChatAttentionState();
+  final voiceRing = IncomingVoiceRing();
   int _zeroClientLengthCounter = 0;
 
   final tabController = DesktopTabController(tabType: DesktopTabType.cm);
@@ -59,6 +63,8 @@ class ServerModel with ChangeNotifier {
   WeakReference<FFI> parent;
 
   ServerModel(this.parent) {
+    chatAttention.addListener(notifyListeners);
+    voiceRing.addListener(notifyListeners);
     timerCallback() async {
       if (desktopType == DesktopType.cm) {
         final res = await bind.cmCheckClientsLength(length: _clients.length);
@@ -487,6 +493,8 @@ class ServerModel with ChangeNotifier {
   void onClientRemove(Map<String, dynamic> evt) {
     try {
       final id = int.parse(evt['id'] as String);
+      chatAttention.removeSession(id);
+      voiceRing.update(id, incoming: false);
       final close = (evt['close'] as String) == 'true';
       if (_clients.any((c) => c.id == id)) {
         final index = _clients.indexWhere((client) => client.id == id);
@@ -531,11 +539,45 @@ class ServerModel with ChangeNotifier {
     }
   }
 
+  Future<void> onChatAttention(Map<String, dynamic> evt) async {
+    if (!isWindows || desktopType != DesktopType.cm) return;
+    final id = int.tryParse(evt['id']?.toString() ?? '');
+    final client = _clients.firstWhereOrNull((c) => c.id == id);
+    if (client == null || client.type_() != ClientType.remote ||
+        !chatAttention.receive(client.id, authorized: client.authorized,
+            connected: !client.disconnected)) return;
+    jumpTo(client.id);
+    windowsCmCollapsed = false;
+    parent.target?.chatModel.changeCurrentKey(MessageKey(client.peerId, client.id));
+    await parent.target?.chatModel.showChatPage(MessageKey(client.peerId, client.id));
+    notifyListeners();
+    // Showing an attention request must not focus its chat input or steal typing.
+    try {
+      await showCmWindow(restore: true, focus: false);
+    } catch (e) {
+      debugPrint('Failed to show the chat attention dock: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    chatAttention.removeListener(notifyListeners);
+    chatAttention.dispose();
+    voiceRing.removeListener(notifyListeners);
+    voiceRing.dispose();
+    super.dispose();
+  }
+
   void updateVoiceCallState(Map<String, dynamic> evt) {
     try {
       final client = Client.fromJson(jsonDecode(evt["client"]));
       final index = _clients.indexWhere((element) => element.id == client.id);
       if (index != -1) {
+        if (isWindows && desktopType == DesktopType.cm) {
+          voiceRing.update(client.id, incoming: client.incomingVoiceCall &&
+              !client.inVoiceCall && _clients[index].authorized &&
+              !_clients[index].disconnected);
+        }
         _clients[index].inVoiceCall = client.inVoiceCall;
         _clients[index].incomingVoiceCall = client.incomingVoiceCall;
         if (client.incomingVoiceCall) {

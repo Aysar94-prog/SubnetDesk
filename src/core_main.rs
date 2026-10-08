@@ -243,6 +243,10 @@ pub fn core_main() -> Option<Vec<String>> {
                 }
                 return None;
             } else if args[0] == "--update" {
+                if !crate::private_build::software_updates_enabled() {
+                    log::warn!("{}", crate::private_build::UPDATE_DISABLED_MESSAGE);
+                    return None;
+                }
                 if config::is_disable_installation() {
                     return None;
                 }

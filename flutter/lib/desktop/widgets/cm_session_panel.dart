@@ -18,6 +18,11 @@ class CmSessionPanel extends StatelessWidget {
     required this.onShowChat,
     required this.onShowControls,
     this.unreadCount = 0,
+    this.attention = false,
+    this.soundMuted = false,
+    this.onToggleSound,
+    this.voiceRingMuted = false,
+    this.onToggleVoiceRing,
   });
 
   final String title;
@@ -33,6 +38,11 @@ class CmSessionPanel extends StatelessWidget {
   final VoidCallback onShowChat;
   final VoidCallback onShowControls;
   final int unreadCount;
+  final bool attention;
+  final bool soundMuted;
+  final VoidCallback? onToggleSound;
+  final bool voiceRingMuted;
+  final VoidCallback? onToggleVoiceRing;
 
   @override
   Widget build(BuildContext context) {
@@ -41,7 +51,7 @@ class CmSessionPanel extends StatelessWidget {
         SizedBox(
           height: 42,
           child: Material(
-            color: const Color(0xff1d3557),
+            color: attention ? const Color(0xffad5c00) : const Color(0xff1d3557),
             child: Row(
               children: [
                 const Padding(
@@ -78,6 +88,17 @@ class CmSessionPanel extends StatelessWidget {
                       ),
                     ),
                   ),
+                if (attention)
+                  const Icon(Icons.notifications_active, color: Colors.white,
+                    size: 18, key: ValueKey('cm-buzzer-attention')),
+                if (onToggleSound != null)
+                  IconButton(
+                    key: const ValueKey('cm-buzzer-mute'),
+                    tooltip: soundMuted ? 'Unmute buzzer' : 'Mute buzzer',
+                    onPressed: onToggleSound,
+                    icon: Icon(soundMuted ? Icons.notifications_off :
+                        Icons.notifications_none, color: Colors.white, size: 18),
+                  ),
                 IconButton(
                   key: const ValueKey('cm-fold'),
                   tooltip: foldLabel,
@@ -87,6 +108,14 @@ class CmSessionPanel extends StatelessWidget {
                     color: Colors.white,
                   ),
                 ),
+                if (onToggleVoiceRing != null)
+                  IconButton(
+                    key: const ValueKey('cm-voice-ring-mute'),
+                    tooltip: voiceRingMuted ? 'Unmute call ringtone' : 'Mute call ringtone',
+                    onPressed: onToggleVoiceRing,
+                    icon: Icon(voiceRingMuted ? Icons.volume_off : Icons.phone_in_talk,
+                      color: Colors.white, size: 18),
+                  ),
               ],
             ),
           ),

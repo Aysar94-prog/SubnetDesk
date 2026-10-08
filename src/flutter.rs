@@ -1617,6 +1617,10 @@ pub mod connection_manager {
             );
         }
 
+        fn chat_attention(&self, id: i32) {
+            self.push_event("chat_attention", &[("id", &id.to_string())]);
+        }
+
         fn change_theme(&self, dark: String) {
             self.push_event("theme", &[("dark", &dark)]);
         }

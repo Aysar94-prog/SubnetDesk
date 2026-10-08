@@ -16,6 +16,7 @@
 
 #include <optional>
 #include <memory>
+#include <algorithm>
 
 #include "win32_desktop.h"
 
@@ -40,6 +41,39 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  attention_channel_ = std::make_unique<flutter::MethodChannel<>>(
+      flutter_controller_->engine()->messenger(), "subnetdesk/window",
+      &flutter::StandardMethodCodec::GetInstance());
+  attention_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<>& call,
+             std::unique_ptr<flutter::MethodResult<>> result) {
+        if (call.method_name() != "showAttentionDock") {
+          result->NotImplemented();
+          return;
+        }
+        const HWND window = GetHandle();
+        MONITORINFO monitor = {};
+        monitor.cbSize = sizeof(monitor);
+        if (!GetMonitorInfo(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor)) {
+          result->Error("monitor", "Cannot locate the attention dock work area");
+          return;
+        }
+        const UINT dpi = GetDpiForWindow(window);
+        const int width = (std::min)(MulDiv(360, dpi ? dpi : 96, 96),
+                                    static_cast<int>(monitor.rcWork.right - monitor.rcWork.left));
+        const int height = (std::min)(MulDiv(600, dpi ? dpi : 96, 96),
+                                     static_cast<int>(monitor.rcWork.bottom - monitor.rcWork.top));
+        // Never call SetForegroundWindow or an activating restore for a buzzer.
+        ShowWindow(window, SW_SHOWNOACTIVATE);
+        if (!SetWindowPos(window, HWND_TOPMOST, monitor.rcWork.right - width,
+                          monitor.rcWork.bottom - height, width, height,
+                          SWP_NOACTIVATE | SWP_SHOWWINDOW)) {
+          result->Error("window", "Cannot show the attention dock");
+          return;
+        }
+        result->Success();
+      });
 
   flutter::MethodChannel<> channel(
     flutter_controller_->engine()->messenger(),
@@ -96,6 +130,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  attention_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

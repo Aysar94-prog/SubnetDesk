@@ -1,5 +1,29 @@
 # SubnetDesk Windows helper status
 
+## Private helper approved work checkpoint:2026-10-08
+
+Supersedes older waiting-for-start and microphone-not-granted statements below. User approved
+microphone grant, side-by-side Android candidate, all access-mode/ring/buzzer implementation,
+and permanent updater shutdown explicitly. Phone mic granted/AppOps foreground; user reports
+voice works and recorder startup success logged10:29:29. Windows ring was missing in source.
+
+Source now includes typed authenticated/rate-limited Android->Windows ChatAttention protocol,
+visible non-activating bottom-right dock attention, independent buzzer mute, and a bounded
+incoming voice alert (every3s/max30s) with separate mute/transition cleanup. Full Flutter65/65
+pass; buzzer pure Rust5/5 pass and first no-updater native release build pass. Later native
+installer guards/final frontend build, archives and physical acceptance remain pending.
+Immutable private policy denies every updater API, scheduler/preference enablement and Windows
+legacy update CLI/installers; About controls/events removed. Private builds omit updater feature.
+Tests deliberately enabling that feature are running. Source version1.3.2/Flutter1.3.2+77;
+running1.3.1 is unchanged and has not inherited these changes.
+
+Three access modes and Android encrypted remembered credentials are approved but NOT implemented.
+Scoped Android SDK36/NDKr28c installed outside original app/source; native/APK candidate pending.
+Original Android package/data and LAN Messenger signing key untouched. No stored chat/buzz
+history added, but existing in-memory chat across reconnect still needs explicit cleanup work.
+Original Windows service remains Stopped/Auto/unmodified; no installed-release replacement.
+No claim of paired buzzer/ring, updater runtime acceptance, secure new login methods or integration.
+
 ## Voice diagnosis and new buzzer plan: 2026-10-08
 
 Read-only connected-phone inspection confirms installed Android1.3.0/code2075 RECORD_AUDIO

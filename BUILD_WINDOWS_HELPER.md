@@ -1,5 +1,31 @@
 # Local Windows helper build checkpoint
 
+## Private1.3.2+77 checkpoint:2026-10-08
+
+User approved permanent updater shutdown, chat buzzer and Windows incoming voice ring.
+Private release command omits software-update:
+`cargo build --locked --features flutter,hwcodec,vram --lib --release`.
+An immutable policy still blocks scheduler/preferences/check/download/install when that
+feature is accidentally compiled. Windows legacy --update/install paths are blocked too.
+Flutter About no longer registers update events or creates updater controls.
+Full Flutter65/65 pass; final native policy tests/build/package/runtime gates are separate.
+Script: outputs/SubnetDesk-helper-cm/checks/build-private-helper.ps1; `-PolicyTest` deliberately
+compiles software-update and exercises its public operations without performing updates.
+Side-by-side Android package switch is `-PsubnetdeskHelperCandidate=true`, debug-signed
+and clearly labelled SubnetDesk Helper; original signer/app/data are not touched.
+Android native/APK build and credential/access-mode implementation remain pending.
+
+Bridge generation is required for the new request API. Use FRB1.80.1 with RUST_LOG=info:
+`flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs
+--dart-output flutter/lib/generated_bridge.dart
+--c-output flutter/macos/Runner/bridge_generated.h --llvm-path <tools>/llvm
+--skip-add-mod-to-lib --no-build-runner --skip-deps-check`.
+Generated bridge files are ignored in Git; corresponding-source packaging includes the
+matching generated outputs explicitly. hbb_common now contains the local optional
+ChatAttention event patch; its original pin alone no longer reproduces this build.
+The upstream handshake/password authorization contract is unchanged by the buzzer.
+Historical commands/evidence below describe previous1.3.1 candidates, not current policy.
+
 ## Current runner repair: 2026-10-08
 
 User authorized implementation after the first candidate failed live incoming dock acceptance.

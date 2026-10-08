@@ -115,6 +115,7 @@ lazy_static::lazy_static! {
 static START_SCHEDULER: Once = Once::new();
 
 pub fn start_scheduler() {
+    if !crate::private_build::software_updates_enabled() { return; }
     START_SCHEDULER.call_once(|| {
         std::thread::spawn(|| {
             std::thread::sleep(INITIAL_CHECK_DELAY);
@@ -129,6 +130,9 @@ pub fn start_scheduler() {
 }
 
 pub fn state_json() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_STATE.to_owned();
+    }
     match STATE.lock() {
         Ok(state) => serde_json::to_string(&state.public).unwrap_or_default(),
         Err(e) => {
@@ -139,6 +143,7 @@ pub fn state_json() -> String {
 }
 
 pub fn set_preferences(auto_check: bool, auto_download: bool) {
+    if !crate::private_build::software_updates_enabled() { return; }
     let auto_check = auto_check || auto_download;
     Config::set_option(
         OPTION_AUTO_CHECK.to_owned(),
@@ -156,6 +161,9 @@ pub fn set_preferences(auto_check: bool, auto_download: bool) {
 }
 
 pub fn check(manual: bool) -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     begin_operation(UpdatePhase::Checking, "")?;
     std::thread::spawn(move || {
         if let Err(e) = check_inner(manual) {
@@ -166,6 +174,9 @@ pub fn check(manual: bool) -> ResultType<()> {
 }
 
 pub fn download() -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     let artifact = {
         let mut state = STATE.lock().map_err(|e| anyhow!(e.to_string()))?;
         if state.busy {
@@ -191,6 +202,9 @@ pub fn download() -> ResultType<()> {
 }
 
 pub fn install() -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     if has_active_connections() {
         let mut state = STATE.lock().map_err(|e| anyhow!(e.to_string()))?;
         state.public.state = UpdatePhase::Deferred;

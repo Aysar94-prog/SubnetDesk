@@ -2866,6 +2866,7 @@ pub trait Interface: Send + Clone + 'static + Sized {
 /// Data used by the client interface.
 #[derive(Clone)]
 pub enum Data {
+    RequestChatAttention,
     Close,
     RejectLanDevice,
     SubmitLanCredentials,

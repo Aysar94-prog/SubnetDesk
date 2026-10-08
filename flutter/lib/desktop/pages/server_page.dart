@@ -338,7 +338,13 @@ class ConnectionManagerState extends State<ConnectionManager>
             ? 'Transfer file' : 'Chat'),
         controlsLabel: translate('Permissions'),
         foldLabel: translate('Collapse toolbar'),
-        unreadCount: unread,
+          unreadCount: unread,
+          attention: serverModel.chatAttention.attentionSessionId == client?.id &&
+              client != null,
+          soundMuted: serverModel.chatAttention.muted,
+          onToggleSound: serverModel.chatAttention.toggleMuted,
+          voiceRingMuted: serverModel.voiceRing.muted,
+          onToggleVoiceRing: serverModel.voiceRing.toggleMuted,
         sessionPicker: serverModel.clients.length < 2
             ? const SizedBox.shrink()
             : Padding(

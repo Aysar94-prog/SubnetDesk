@@ -105,6 +105,10 @@ pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) 
 
 #[inline]
 pub fn update_me(_path: String) {
+    if !crate::private_build::software_updates_enabled() {
+        log::warn!("{}", crate::private_build::UPDATE_DISABLED_MESSAGE);
+        return;
+    }
     goto_install();
 }
 
