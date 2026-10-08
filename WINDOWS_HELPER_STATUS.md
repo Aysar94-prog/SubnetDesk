@@ -1,5 +1,18 @@
 # SubnetDesk Windows helper status
 
+## Build83 final packaging / human-switch checkpoint:2026-10-09
+
+Both binary/source archives complete, corresponding snapshot2787bf3(commonb56ada4,
+production85b9941/807f718), private gates1223/1354 entries PASS. Windows ZIP9DE936FA...
+739AE7E/source2A1E23E2...8EAC6DB4; Android APK1536BB6E...92811B9C/sourceB5426A75...
+019E07C8. Full hashes/release83 notes/acceptance checklist in outputs/SubnetDesk-helper-cm.
+Current record may be a later docs-only commit; binaries/source archives remain frozen2787bf3.
+Windows build/tests/stage PASS, Android2083 installed and actual English UI/Keystore synthetic
+PASS. Old Windows82/PID25660/listener21118/no session and settings/auth dialog still open;
+human must close it/handle new Firewall prompt. Do not automate security/auth/permissions or
+claim83 Windows main code was visually accepted. Paired password/code/manual/chat/ring/
+saved-password JNI acceptance remains open. No original-app/service/signing/data changes.
+
 ## Build83 full-build/staging checkpoint:2026-10-09
 
 Final Windows native4m58s and Flutter74.2s PASS; post-build Flutter101/101 PASS.
