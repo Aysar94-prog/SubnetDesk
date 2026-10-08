@@ -6,10 +6,20 @@ Native Android release now PASS2m02s: rebuilt ARM64 library22,912,088 bytes,
 SHA2560656543E040A24A09B796974F7CA13AABF7CD53A8135EEC855EC26BE6BEEE1EC;
 JNI copy matches, LOAD alignment0x4000 and JNI_OnLoad/Java_ffi exports verified.
 115 compiler warnings are recorded, not compared with an Android baseline.
-APK/manifest/signature/install/device gates are still pending. The profile's
+APK release PASS1164.2s; verified/staged1.3.3/code2078, helper identity/label,
+arm64-only, no CAMERA permission, v2 signature and16KB ZIP alignment. AGP strip
+reproduced from rebuilt input; APK library SHA256
+B0E892CDC90F86BBB5D0B3A37963AD02E27D5A0B1A4761F65C39AFB81C4CDD36 matches.
+APK SHA256 A36585E60E9ADB5341B87FD8EF51A40F2A520BDA130CEA8C486449A57782341F.
+Installed beside official1.3.0/code2075, whose update timestamp/version are unchanged.
+am start cold PASS441ms; helper PID24079 alive and scoped startup log snapshot contains
+no matching native-loader/fatal/Flutter errors. This is startup smoke only, not UI or
+paired acceptance. Microphone/notifications not yet granted to the new helper; user handling.
+Phone has4KB pages;16KB physical-device acceptance not inferred from ELF/ZIP checks.
+The profile's
 RUNPATH contains a non-resolving Windows build-tool path; no Windows shared
 libraries are required, and Android loader startup still needs device verification.
-No working Android APK/device acceptance is claimed until all gates below pass.
+Paired screen/control/voice/camera-denial/buzzer/ring/mute acceptance still pending.
 
 ## Pinned inputs and isolation
 
@@ -19,9 +29,17 @@ No working Android APK/device acceptance is claimed until all gates below pass.
   libraries plus separately built Android libsodium1.0.20/OpenSSL3.5.2.
 - Process-local environment and separate C:/Users/user/AppData/Local/SubnetDesk-build
   output roots; original Windows toolchain/junction and phone package untouched.
+  The first Gradle attempt uses the ordinary user .gradle tool cache; subsequent
+  build script runs set GRADLE_USER_HOME to the scoped gradle-user-home directory.
+  Extra SDK platforms31/34 and CMake3.22.1 were installed in the scoped SDK by Gradle.
 - Candidate Gradle property subnetdeskHelperCandidate=true selects
   com.zibochen.subnetdesk.helper, SubnetDesk Helper label and debug test signing.
   Never use LAN Messenger's key or replace the official package.
+  Flutter's arm64 split adds2000 to the base build78, so expected manifest code2078.
+  Candidate test certificate SHA25643e19ba2d0d80033f363eb733efcef4d33dd0ab0bb6b06f1115cd71e47057c52.
+  Its private key is preserved under the scoped .private directory, never archived.
+  Build script refuses future builds if the default debug signer differs from that
+  preserved copy; never silently sign an incompatible helper upgrade.
 
 ## Build-script repairs
 

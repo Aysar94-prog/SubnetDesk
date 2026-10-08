@@ -15,7 +15,9 @@ Paired screen/voice/camera-denial/ring/buzzer acceptance and Android APK remain 
 Android main native dependencies, libsodium/OpenSSL and actual Rust release now PASS.
 Build-only Windows-host/Android repairs documented in BUILD_ANDROID_HELPER.md; scoped codec
 patch/default Windows dependency unchanged. ARM64/16KB LOAD alignment/JNI exports and native
-copy SHA256 verified. APK packaging/signature/install and actual device acceptance pending.
+copy SHA256 verified. Android1.3.3/code2078 APK/identity/no-camera/signature/alignment pass;
+side-by-side install and initial startup smoke pass, original1.3.0 unchanged. Helper mic/
+notifications remain ungranted; user handling and paired physical acceptance pending.
 Windows12a8dac artifacts remain frozen and are not rebuilt/replaced by Android build support.
 
 User explicitly approved removal of SubnetDesk View camera on Windows and Android only.
