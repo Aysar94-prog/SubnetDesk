@@ -414,8 +414,6 @@ class _ConnectionPageState extends State<ConnectionPage> {
                     () => onConnect()),
                 action(Icons.folder_outlined, 'Transfer file',
                     () => onConnect(isFileTransfer: true)),
-                action(Icons.videocam_outlined, 'View camera',
-                    () => onConnect(isViewCamera: true)),
                 action(Icons.terminal_outlined, 'Terminal',
                     () => onConnect(isTerminal: true)),
               ],

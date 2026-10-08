@@ -2610,6 +2610,10 @@ connect(
   String? username,
 }) async {
   if (id == '') return;
+  if (isViewCamera) {
+    showToast('Camera access is disabled in this private build');
+    return;
+  }
   if (!isDesktop || desktopType == DesktopType.main) {
     try {
       if (Get.isRegistered<IDTextEditingController>()) {

@@ -249,6 +249,9 @@ impl Client {
         _conn_type: ConnType,
         interface: impl Interface,
     ) -> ResultType<(Stream, Vec<u8>, String)> {
+        if !crate::camera_access::allowed(_conn_type == ConnType::VIEW_CAMERA) {
+            bail!(crate::camera_access::DISABLED_MESSAGE);
+        }
         if config::is_incoming_only() {
             bail!("Incoming only mode");
         }

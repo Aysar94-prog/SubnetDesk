@@ -23,6 +23,7 @@ mod lan_mdns;
 mod lan_protocol;
 mod chat_attention;
 mod private_build;
+mod camera_access;
 mod lan_server;
 #[cfg(all(
     feature = "flutter",

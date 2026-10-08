@@ -526,12 +526,6 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     );
     v.add(
       TTextMenu(
-        child: Text(translate('View camera')),
-        onPressed: () => connectAnotherChannel(isViewCamera: true),
-      ),
-    );
-    v.add(
-      TTextMenu(
         child: Text('${translate('Terminal')} (beta)'),
         onPressed: () => connectAnotherChannel(isTerminal: true),
       ),

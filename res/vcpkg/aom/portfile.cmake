@@ -42,10 +42,18 @@ if(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm" AND VCPKG_TARGET_IS_LINUX)
   set(aom_target_cpu "-DENABLE_NEON=OFF")
 endif()
 
+set(aom_asm_compiler "")
+if(VCPKG_TARGET_IS_ANDROID AND CMAKE_HOST_WIN32)
+    # AOM otherwise selects GNU `as`, which is not provided by the Windows NDK.
+    file(TO_CMAKE_PATH "$ENV{ANDROID_NDK_HOME}" aom_ndk_root)
+    set(aom_asm_compiler "-DCMAKE_ASM_COMPILER=${aom_ndk_root}/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe")
+endif()
+
 vcpkg_cmake_configure(
     SOURCE_PATH ${SOURCE_PATH}
     OPTIONS
         ${aom_target_cpu}
+        ${aom_asm_compiler}
         -DENABLE_DOCS=OFF
         -DENABLE_EXAMPLES=OFF
         -DENABLE_TESTDATA=OFF

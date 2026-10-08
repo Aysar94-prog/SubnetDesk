@@ -1,5 +1,20 @@
 # SubnetDesk Windows helper status
 
+## Camera removal checkpoint:2026-10-08
+
+User explicitly approved removal of SubnetDesk View camera on Windows and Android only.
+Mobile/peer/desktop toolbar entry points removed; shared connect and native session/client
+routes reject camera. Encrypted incoming login/scope guards deny old camera requests and
+advertised support_view_camera is false. Remote screen/control and voice code retained;
+LAN Messenger video is not modified. Source1.3.3/Flutter1.3.3+78 identifies this candidate.
+Windows frontend release and Flutter65/65 pass; native current-version camera/update tests,
+final native release and candidate/source archives pending. Physical old-peer camera denial,
+screen/voice regression and new buzzer/ring acceptance not completed; old1.3.1 not switched.
+Android native dependency build is in progress in scoped user SDK/NDK/output directories.
+Narrow Android-on-Windows AOM assembler and FFmpeg argument delimiter fixes preserve the
+Windows build path. No new APK or original-package modification. Access modes/Keystore and
+chat-memory cleanup remain approved but not implemented. Previous checkpoint is historical.
+
 ## Private helper approved work checkpoint:2026-10-08
 
 Supersedes older waiting-for-start and microphone-not-granted statements below. User approved

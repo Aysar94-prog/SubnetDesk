@@ -768,14 +768,6 @@ abstract class BasePeerCard extends StatelessWidget {
     );
   }
 
-  @protected
-  MenuEntryBase<String> _viewCameraAction(BuildContext context) {
-    return _connectCommonAction(
-      context,
-      translate('View camera'),
-      isViewCamera: true,
-    );
-  }
 
   @protected
   MenuEntryBase<String> _terminalAction(BuildContext context) {
@@ -1068,7 +1060,6 @@ class RecentPeerCard extends BasePeerCard {
     final List<MenuEntryBase<String>> menuItems = [
       _connectAction(context),
       _transferFileAction(context),
-      _viewCameraAction(context),
       _terminalAction(context),
     ];
     menuItems.addAll(await _lanIdentityActions(context));
@@ -1125,7 +1116,6 @@ class FavoritePeerCard extends BasePeerCard {
     final List<MenuEntryBase<String>> menuItems = [
       _connectAction(context),
       _transferFileAction(context),
-      _viewCameraAction(context),
       _terminalAction(context),
     ];
     menuItems.addAll(await _lanIdentityActions(context));
@@ -1229,7 +1219,6 @@ class DiscoveredPeerCard extends BasePeerCard {
     final List<MenuEntryBase<String>> menuItems = [
       _connectAction(context),
       _transferFileAction(context),
-      _viewCameraAction(context),
       _terminalAction(context),
     ];
     menuItems.addAll(await _lanIdentityActions(context));

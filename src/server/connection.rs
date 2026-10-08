@@ -1360,7 +1360,7 @@ impl Connection {
 
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         {
-            platform_additions.insert("support_view_camera".into(), json!(true));
+            platform_additions.insert("support_view_camera".into(), json!(crate::camera_access::allowed(true)));
         }
 
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -1817,6 +1817,10 @@ impl Connection {
                 self.file_transfer = Some((ft.dir.clone(), ft.show_hidden));
             }
             Some(login_request::Union::ViewCamera(_)) => {
+                if !crate::camera_access::allowed(true) {
+                    self.send_login_error(crate::camera_access::DISABLED_MESSAGE).await;
+                    return false;
+                }
                 self.view_camera = true;
             }
             Some(login_request::Union::Terminal(terminal)) => {
@@ -1851,6 +1855,12 @@ impl Connection {
             self.send_login_error("LAN login protocol required").await;
             return false;
         };
+        if !crate::camera_access::allowed(matches!(
+            lr.union.as_ref(), Some(login_request::Union::ViewCamera(_))
+        )) {
+            self.send_login_error(crate::camera_access::DISABLED_MESSAGE).await;
+            return false;
+        }
         let is_web_client = self.web_client;
         if is_web_client && lr.union.is_some() {
             self.send_login_error("Web sessions only support remote desktop access")

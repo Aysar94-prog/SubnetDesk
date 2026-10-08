@@ -1331,6 +1331,9 @@ pub fn session_add_existed(
     displays: Vec<i32>,
     is_view_camera: bool,
 ) -> ResultType<()> {
+    if !crate::camera_access::allowed(is_view_camera) {
+        bail!(crate::camera_access::DISABLED_MESSAGE);
+    }
     let conn_type = if is_view_camera {
         ConnType::VIEW_CAMERA
     } else {
@@ -1358,6 +1361,10 @@ pub fn session_add(
     is_terminal: bool,
     mut password: String,
 ) -> ResultType<FlutterSession> {
+    if !crate::camera_access::allowed(is_view_camera) {
+        zeroize::Zeroize::zeroize(&mut password);
+        bail!(crate::camera_access::DISABLED_MESSAGE);
+    }
     let endpoint = hbb_common::lan::Endpoint::parse(id)?;
     let id = endpoint.authority().to_owned();
     let conn_type = if is_file_transfer {
