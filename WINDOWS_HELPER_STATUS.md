@@ -1,9 +1,21 @@
 # SubnetDesk Windows helper status
 
+## Latest physical acceptance: 2026-10-08
+
+User confirmed "ok now this is good" after reconnecting phone: initial incoming dock visibility
+accepted for local candidate1.3.1+76. Live Android .51 -> .12:21118 belongs to main PID4052;
+automatic child CM PID12188 runs candidate --cm and has native window handle656146. This is
+actual incoming-session evidence, not the earlier manually launched no-client smoke.
+Fold/drafts/unread, bidirectional chat, audible Voice, DPI/multiple sessions and installed-service/
+prelogin/reboot behavior still need separate physical acceptance. Old service Stopped/Auto and
+installed files untouched. No binary changes/repackaging; existing archive hashes unchanged.
+Android remember-password still plan-only; no LAN Messenger integration or parity change.
+
 Packaging checkpoint: local source commit2aa0dc7 supplied in helper-v1.3.1 source ZIP with
 pinned hbb_common/WindowInjection;1180 entries and private-material gate pass. Windows binary
 ZIP complete; hashes in outputs/SubnetDesk-helper-cm/SHA256SUMS.txt. No push. Runtime/session
-acceptance still pending user reconnect; this documentation update does not alter app binaries.
+initial incoming visibility now accepted; other acceptance gates remain pending. Documentation
+updates do not alter app binaries; code in the supplied source archive still matches the build.
 
 ## Current authorized repair/build/runtime: 2026-10-08 09:48 Asia/Jerusalem
 
