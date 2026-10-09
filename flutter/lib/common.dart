@@ -37,6 +37,7 @@ import 'mobile/pages/view_camera_page.dart';
 import 'mobile/pages/terminal_page.dart';
 import 'desktop/pages/remote_page.dart' as desktop_remote;
 import 'desktop/widgets/windows_lan_access_dialog.dart';
+import 'desktop/widgets/windows_file_transfer_access.dart';
 import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
@@ -778,7 +779,7 @@ Future<void> windowOnTop(int? id) async {
   }
 }
 
-typedef DialogBuilder = CustomAlertDialog Function(
+typedef DialogBuilder = Widget Function(
   StateSetter setState,
   void Function([dynamic]) close,
   BuildContext context,
@@ -2594,6 +2595,16 @@ connectMainDesktop(
   }
 }
 
+Future<void> connectWindowsFileTransfer(BuildContext context, String id) async {
+  final stableContext = Navigator.of(context, rootNavigator: true).context;
+  await requestWindowsFileTransferAccess(stableContext, id,
+    translateText: translate, connect: (selection) async {
+      if (!stableContext.mounted) return;
+      await connect(stableContext, selection.endpoint, isFileTransfer: true,
+        password: selection.payload, lanAccessSelected: true);
+    });
+}
+
 /// Connect to a peer with [id].
 /// If [isFileTransfer], starts a session only for file transfer.
 /// If [isViewCamera], starts a session only for view camera.
@@ -2622,6 +2633,10 @@ connect(
       !lanAccessSelected &&
       (password == null || password.isEmpty) &&
       !isTerminal && !isTcpTunneling && !isRDP) {
+    if (isFileTransfer) {
+      await connectWindowsFileTransfer(context, id);
+      return;
+    }
     final selection = await showDialog<WindowsLanAccessSelection>(
       context: context,
       builder: (_) => WindowsLanAccessDialog(endpoint: id, translateText: translate));

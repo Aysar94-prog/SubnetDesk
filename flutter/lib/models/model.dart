@@ -39,6 +39,8 @@ import 'package:vector_math/vector_math.dart' show Vector2;
 import '../common.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
+import '../desktop/widgets/windows_lan_access_dialog.dart';
+import '../desktop/widgets/windows_file_transfer_access.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
 import 'package:flutter_hbb/utils/scale.dart';
@@ -1003,10 +1005,31 @@ class FfiModel with ChangeNotifier {
       dialogManager.dismissAll();
       dialogManager.showLoading(translate('Waiting for receiver approval (up to 60 seconds)'), onCancel: closeConnection);
     } else if (type == 'lan-login-required') {
+      if (isWindows && parent.target?.connType == ConnType.fileTransfer) {
+        dialogManager.dismissAll();
+        dialogManager.show((setState, close, context) => WindowsLanAccessDialog(
+          endpoint: peerId, title: 'File transfer access', allowSavedPassword: false,
+          translateText: translate,
+          onCancel: () { close(); closeConnection(id: peerId); },
+          onSubmit: (selection) async {
+            final error = await submitWindowsFileAccessPayload(selection.payload,
+              passwordLogin: (password, remember) => bind.sessionLoginLan(
+                sessionId: sessionId, username: '', password: password, remember: remember),
+              optionalLogin: (method, code) => bind.sessionLoginOptionalFileAccess(
+                sessionId: sessionId, accessMethod: method, temporaryCode: code));
+            if (error.isEmpty) {
+              close();
+              dialogManager.showLoading(translate('Logging in...'),
+                onCancel: () => closeConnection(id: peerId));
+            }
+            return error;
+          }));
+        return;
+      }
       enterLanLoginDialog(
         sessionId,
         dialogManager,
-        'Enter the access username and password configured on the remote device.',
+        'Enter the unattended access password configured on the remote device.',
       );
     } else if (type == 're-input-password') {
       wrongPasswordDialog(sessionId, dialogManager, type, title, text);

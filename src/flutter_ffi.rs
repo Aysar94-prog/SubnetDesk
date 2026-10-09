@@ -274,6 +274,16 @@ pub fn session_login_lan(
     SyncReturn(result.err().map(|err| err.to_string()).unwrap_or_default())
 }
 
+pub fn session_login_optional_file_access(
+    session_id: SessionID, access_method: u32, temporary_code: String,
+) -> SyncReturn<String> {
+    let code = zeroize::Zeroizing::new(temporary_code);
+    let result = sessions::get_session_by_session_id(&session_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("Session is no longer available"))
+        .and_then(|session| session.submit_optional_file_access(access_method, code.to_string()));
+    SyncReturn(result.err().map(|err| err.to_string()).unwrap_or_default())
+}
+
 pub fn session_login_lan_identity(
     session_id: SessionID,
     identity_id: String,

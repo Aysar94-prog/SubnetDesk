@@ -64,6 +64,7 @@ class FileManagerPage extends StatefulWidget {
   final SimpleWrapper<State<FileManagerPage>?> _lastState = SimpleWrapper(null);
 
   FFI get ffi => (_lastState.value! as _FileManagerPageState)._ffi;
+  bool get isReady => _lastState.value?.mounted == true;
 
   @override
   State<StatefulWidget> createState() {

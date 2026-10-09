@@ -15,10 +15,18 @@ class WindowsLanAccessDialog extends StatefulWidget {
     required this.endpoint,
     this.editEndpoint = false,
     required this.translateText,
+    this.title = 'Connect',
+    this.allowSavedPassword = true,
+    this.onSubmit,
+    this.onCancel,
   });
   final String endpoint;
   final bool editEndpoint;
   final String Function(String) translateText;
+  final String title;
+  final bool allowSavedPassword;
+  final Future<String> Function(WindowsLanAccessSelection)? onSubmit;
+  final VoidCallback? onCancel;
   @override
   State<WindowsLanAccessDialog> createState() => _WindowsLanAccessDialogState();
 }
@@ -30,6 +38,7 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
   int _method = 0;
   bool _remember = false;
   String _error = '';
+  bool _busy = false;
   String t(String text) => widget.translateText(text);
   @override
   void initState() {
@@ -44,7 +53,8 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
     _error = '';
   }
 
-  void _submit() {
+  Future<void> _submit() async {
+    if (_busy) return;
     final endpoint = _endpoint.text.trim();
     if (endpoint.isEmpty) {
       setState(() => _error = 'Enter the receiver IP address or hostname');
@@ -53,6 +63,13 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
     final code = _code.text.trim();
     if (_method == 1 && !RegExp(r'^[0-9]{6}$').hasMatch(code)) {
       setState(() => _error = 'Enter a 6-digit temporary code');
+      return;
+    }
+    if (_method == 0 && _password.text.isEmpty && !widget.allowSavedPassword) {
+      setState(
+        () => _error =
+            'Enter the receiver password or choose another access method',
+      );
       return;
     }
     final payload = _method != 0
@@ -70,7 +87,24 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
             'remember': _remember,
           });
     _clearCredentials();
-    Navigator.of(context).pop(WindowsLanAccessSelection(endpoint, payload));
+    final selection = WindowsLanAccessSelection(endpoint, payload);
+    if (widget.onSubmit == null) {
+      Navigator.of(context).pop(selection);
+      return;
+    }
+    setState(() => _busy = true);
+    String error;
+    try {
+      error = await widget.onSubmit!(selection);
+    } catch (_) {
+      error = 'Unable to submit file transfer access. Please retry.';
+    }
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _error = error;
+      });
+    }
   }
 
   @override
@@ -85,7 +119,7 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(t('Connect')),
+    title: Text(t(widget.title)),
     content: SizedBox(
       width: 440,
       child: SingleChildScrollView(
@@ -97,6 +131,7 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
               TextField(
                 key: const ValueKey('windows-lan-endpoint'),
                 controller: _endpoint,
+                enabled: !_busy,
                 autocorrect: false,
                 enableSuggestions: false,
                 decoration: InputDecoration(
@@ -124,23 +159,28 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
                 DropdownMenuItem(value: 1, child: Text(t('Temporary code'))),
                 DropdownMenuItem(value: 2, child: Text(t('Manual approval'))),
               ],
-              onChanged: (method) => setState(() {
-                _clearCredentials();
-                _method = method ?? 0;
-              }),
+              onChanged: _busy
+                  ? null
+                  : (method) => setState(() {
+                      _clearCredentials();
+                      _method = method ?? 0;
+                    }),
             ),
             const SizedBox(height: 12),
             if (_method == 0) ...[
               TextField(
                 key: const ValueKey('windows-lan-password'),
                 controller: _password,
+                enabled: !_busy,
                 obscureText: true,
                 autocorrect: false,
                 enableSuggestions: false,
                 decoration: InputDecoration(
                   labelText: t('Password'),
                   helperText: t(
-                    'Leave blank to use the saved password for this device',
+                    widget.allowSavedPassword
+                        ? 'Leave blank to use the saved password for this device'
+                        : 'Enter the unattended access password configured on the receiver',
                   ),
                 ),
                 onSubmitted: (_) => _submit(),
@@ -150,13 +190,16 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
                 dense: true,
                 title: Text(t('Remember password')),
                 value: _remember,
-                onChanged: (value) => setState(() => _remember = value == true),
+                onChanged: _busy
+                    ? null
+                    : (value) => setState(() => _remember = value == true),
               ),
             ],
             if (_method == 1)
               TextField(
                 key: const ValueKey('windows-lan-code'),
                 controller: _code,
+                enabled: !_busy,
                 keyboardType: TextInputType.number,
                 maxLength: 6,
                 autocorrect: false,
@@ -185,15 +228,21 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
     actions: [
       TextButton(
         key: const ValueKey('windows-lan-cancel'),
-        onPressed: () {
-          _clearCredentials();
-          Navigator.of(context).pop();
-        },
+        onPressed: _busy
+            ? null
+            : () {
+                _clearCredentials();
+                if (widget.onCancel != null) {
+                  widget.onCancel!();
+                } else {
+                  Navigator.of(context).pop();
+                }
+              },
         child: Text(t('Cancel')),
       ),
       ElevatedButton(
         key: const ValueKey('windows-lan-connect'),
-        onPressed: _submit,
+        onPressed: _busy ? null : _submit,
         child: Text(t('Connect')),
       ),
     ],

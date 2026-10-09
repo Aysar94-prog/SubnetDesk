@@ -239,6 +239,30 @@ impl<T: InvokeUiSession> Session<T> {
         Ok(())
     }
 
+    pub fn submit_optional_file_access(&self, method: u32, code: String) -> hbb_common::ResultType<()> {
+        let code = zeroize::Zeroizing::new(code);
+        {
+            let login = self.lc.read().unwrap();
+            crate::file_transfer_access::validate_optional_retry(
+                login.conn_type == ConnType::FILE_TRANSFER, login.peer_info.is_some(), method, &code)
+                .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
+        }
+        let sender = self.sender.read().unwrap().as_ref().cloned()
+            .ok_or_else(|| hbb_common::anyhow::anyhow!("Connection is no longer available"))?;
+        self.lc.write().unwrap().lan_access_username.clear();
+        *self.lan_identity_request.lock().unwrap() = None;
+        *self.lan_credential.lock().unwrap() = Some(LanSessionCredential {
+            access_method: method, temporary_code: code.to_string(),
+            username: String::new(), password: Vec::new(), remember: false,
+            identity_id: String::new(), bind_identity_on_success: false,
+        });
+        if sender.send(Data::SubmitLanCredentials).is_err() {
+            *self.lan_credential.lock().unwrap() = None;
+            hbb_common::anyhow::bail!("Connection is no longer available");
+        }
+        Ok(())
+    }
+
     pub fn submit_lan_identity(
         &self,
         identity_id: String,

@@ -9,6 +9,7 @@ import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/pages/file_manager_page.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/desktop/widgets/windows_file_transfer_access.dart';
 import 'package:get/get.dart';
 
 import '../../models/platform_model.dart';
@@ -70,6 +71,27 @@ class _FileManagerTabPageState extends State<FileManagerTabPage> {
         final args = jsonDecode(call.arguments);
         final id = args['id'];
         windowOnTop(windowId());
+        final existing = tabController.widget(id);
+        if (isWindows && existing is FileManagerPage) {
+          tabController.jumpToByKey(id);
+          // add() otherwise discards the newly selected payload for this key.
+          // Never reauthenticate/replace an active file channel or interrupt jobs.
+          if (!existing.isReady) return;
+          final ffi = existing.ffi;
+          if (ffi.ffiModel.pi.version.isEmpty && args['password'] != null) {
+            final error = await submitWindowsFileAccessPayload(args['password'],
+              passwordLogin: (password, remember) => bind.sessionLoginLan(
+                sessionId: ffi.sessionId, username: '', password: password, remember: remember),
+              optionalLogin: (method, code) => bind.sessionLoginOptionalFileAccess(
+                sessionId: ffi.sessionId, accessMethod: method, temporaryCode: code));
+            if (error.isEmpty) {
+              ffi.dialogManager.dismissAll();
+              ffi.dialogManager.showLoading(translate('Logging in...'),
+                onCancel: () => tabController.closeBy(id));
+            } else { showToast(error); }
+          }
+          return;
+        }
         tabController.add(TabInfo(
             key: id,
             label: id,

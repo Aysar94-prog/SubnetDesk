@@ -24,6 +24,9 @@ mod android_credentials;
 mod lan_mdns;
 mod lan_protocol;
 mod lan_access_policy;
+mod file_transfer_access;
+#[cfg(all(test, feature = "flutter"))]
+mod file_transfer_access_session_tests;
 mod lan_access;
 mod chat_attention;
 mod private_build;

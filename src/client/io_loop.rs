@@ -584,6 +584,17 @@ impl<T: InvokeUiSession> Remote<T> {
                     .await;
             }
             Data::SubmitLanCredentials => {
+                if let Some(optional) = self.handler.lan_credential()
+                    .filter(|credential| credential.access_method != hbb_common::lan::ACCESS_PASSWORD) {
+                    // Authentication may finish between UI submission and queue
+                    // delivery. Never reauthenticate an active file channel.
+                    if let Err(error) = crate::file_transfer_access::validate_optional_retry(
+                        self.handler.is_file_transfer(), self.is_connected,
+                        optional.access_method, &optional.temporary_code) {
+                        self.handler.msgbox("error", "File transfer", error, "");
+                        return true;
+                    }
+                }
                 self.handler.send_initial_lan_login(peer).await;
             }
             #[cfg(all(target_os = "windows", not(feature = "flutter")))]

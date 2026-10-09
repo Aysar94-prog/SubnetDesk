@@ -10,7 +10,6 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
-import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -507,6 +506,11 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     bool isTcpTunneling = false,
     bool isTerminal = false,
   }) {
+    if (isWindows && isFileTransfer) {
+      // File-only access is selected independently of the control session.
+      unawaited(connectWindowsFileTransfer(context, id));
+      return;
+    }
     connect(
       context,
       id,

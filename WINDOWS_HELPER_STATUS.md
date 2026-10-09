@@ -1,5 +1,33 @@
 # SubnetDesk Windows helper status
 
+## Session File Transfer87 / Administrator MSI:2026-10-09 (in progress)
+
+User explicitly authorized fix/version bump and confirmed Administrator during MSI
+installation, plus Desktop shortcut. Windows public1.3.8/logical87; Android exact85
+retained (no Android APK/re-sign/wire change). Previously installed86 verified read-only
+at LocalAppData\Programs\SubnetDeskHelper, running1.3.7+86; no runtime switch here.
+Toolbar uses a stable root picker, new file window receives method payload, and an
+existing pending file tab applies explicit selection rather than discarding duplicate
+TabInfo. Password-required retry now offers all three English methods, no username;
+Cancel closes only the file session, not the control page. New additive optional-file
+bridge retries only a pending file channel; checked sender plus preauth/IO-queue guard
+reject active or non-file channels. No control-session grant or credential inheritance.
+Generated bridge rebuilt with existing1.80.1 generator; no protocol or common changes.
+26 targeted Flutter/route tests and full136 PASS, two actual-DLL smokes skipped until
+fresh release DLL; widget/test analyzer clean, routing60 old info/no errors or warnings.
+Pure file policy6/access policy15 and fresh runner CTest3 PASS. Root native13 new plus
+50 existing root/config/wire regressions PASS; final native/UI build, actual DLL version/new ABI smoke,
+MSI ICE/metadata/hash gates and source packaging are NOT complete yet.
+Machine MSI authoring uses private independent UpgradeCode, ProgramFiles64Folder,
+Administrator installation and advertised Desktop/Start shortcuts tied to EXE keypath.
+New per-machine identity avoids unsupported per-user->machine major upgrade. Old-user
+HKCU installer marker blocks fresh install with instruction to manually uninstall only
+old private Helper first; settings preserved, no auto-uninstall/kill/UAC approval.
+Marker detection is current installation user's HKCU, not all Windows profiles.
+No app elevation manifest, service/firewall/access grants/security/original-product
+changes. Unsigned; VC++ x64 runtime prerequisite retained. Human migration/UAC/shortcut,
+three-method file entry, Accept/Deny/timeout/cancel and live transfer acceptance pending.
+
 ## Windows sender correction86:2026-10-09
 
 Execution explicitly authorized. Add and ordinary discovered/recent/favorite Connect
