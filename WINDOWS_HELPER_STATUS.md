@@ -1,6 +1,6 @@
 # SubnetDesk Windows helper status
 
-## Session File Transfer87 / Administrator MSI:2026-10-09 (in progress)
+## Session File Transfer87 / Administrator MSI:2026-10-09 (built; device pending)
 
 User explicitly authorized fix/version bump and confirmed Administrator during MSI
 installation, plus Desktop shortcut. Windows public1.3.8/logical87; Android exact85
@@ -13,11 +13,20 @@ Cancel closes only the file session, not the control page. New additive optional
 bridge retries only a pending file channel; checked sender plus preauth/IO-queue guard
 reject active or non-file channels. No control-session grant or credential inheritance.
 Generated bridge rebuilt with existing1.80.1 generator; no protocol or common changes.
-26 targeted Flutter/route tests and full136 PASS, two actual-DLL smokes skipped until
-fresh release DLL; widget/test analyzer clean, routing60 old info/no errors or warnings.
+26 targeted Flutter/route tests and full136 PASS without native smoke; full138 with
+actual rebuilt DLL PASS, version1.3.8 and new missing-session ABI fail-closed verified.
+Widget/test/smoke analyzer clean, routing60 old info/no errors or warnings.
 Pure file policy6/access policy15 and fresh runner CTest3 PASS. Root native13 new plus
-50 existing root/config/wire regressions PASS; final native/UI build, actual DLL version/new ABI smoke,
-MSI ICE/metadata/hash gates and source packaging are NOT complete yet.
+50 existing root/config/wire regressions PASS. Full Windows native6m26s/UI121.1s,
+EXE1.3.8+87 hash8FB8C1BC...7D9466C2, nativeB80444AD...A6DD8C72 rebuilt/staged exactly.
+First actual-DLL smoke failure was test-only duplicate FRB binding construction;
+shared singleton fixture corrected, full138 plus isolated2 rerun PASS; no app change.
+MSI6A47388089FA7FF6F5B9FCFAC16A78EB5334C57452B89B36CA406AA58E473F70
+readonly English/x64/ALLUSERS1/elevated-summary/ProgramFiles/common shortcuts/old-user
+launch gate, actual EXE shortcut keypaths and all125 extracted file hashes PASS.
+Explicit ICE zero errors/zero warnings; seven inherited neutral font binder notices.
+Validator now saves exit/diagnostic count even when successful ICE output is empty.
+Productioneef9c45/common29462e6; source archive/checksums follow clean status commit.
 Machine MSI authoring uses private independent UpgradeCode, ProgramFiles64Folder,
 Administrator installation and advertised Desktop/Start shortcuts tied to EXE keypath.
 New per-machine identity avoids unsupported per-user->machine major upgrade. Old-user

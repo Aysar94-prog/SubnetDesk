@@ -9,7 +9,8 @@ if (Test-Path -LiteralPath $LogPath) { throw 'Preserve existing validation log.'
 # Some CLI versions emit ICE errors with exit code zero; inspect both.
 $taskValidation = & $WixPath msi validate $MsiPath 2>&1
 $taskExitCode = $LASTEXITCODE
-$taskValidation | Set-Content -LiteralPath $LogPath -Encoding utf8
+# A successful machine package can emit no diagnostics: still create evidence.
+Set-Content -LiteralPath $LogPath -Value @("ExitCode=$taskExitCode", "DiagnosticCount=$(@($taskValidation).Count)", $taskValidation) -Encoding utf8
 if ($taskExitCode -ne 0 -or ($taskValidation -match 'error WIX|error ICE')) {
     throw 'Windows Installer ICE validation failed.'
 }
