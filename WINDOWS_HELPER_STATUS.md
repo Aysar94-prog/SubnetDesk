@@ -1,5 +1,25 @@
 # SubnetDesk Windows helper status
 
+## Final85 artifacts verified:2026-10-09
+
+Both private1.3.7/logical85 built and staged, Android versionCode2085 retains upgrade
+compatibility. Sourcec88c34f/common29462e6, MSI authoringf4d27e4 plus documented runtime
+prerequisite.50 selected native/config/encrypted-wire/hash regressions, Flutter110 pre-
+and post-build, standalone policy15 and fresh runner CTest3 PASS. Windows native release
+5m26s/UI104.6s, Android native7m06s/APK565.6s. EXE6D6F7FB0...2259C794/DLL4FA47528...
+808AF958 exact rebuilt native. APK46C43D1B...CDC7737/nativeE6B9C856...6F5D449A; helper
+signer43e19ba2...57c52/no-camera/16KB/English AOT wait key and oldArabic-absence PASS.
+Private MSI8AE809C2...0E03CB0: English/x64/limited-per-user/private identity, readonly
+tables and all125 extracted payload hashes PASS. Explicit ICE validates zero errors,
+only expected per-user-only ICE91 warnings; seven neutral unregistered font-asset binder
+language warnings documented. Initial prototype ICE64 cleanup omission corrected before
+final package, only empty uninstall folders/no wildcard deletion. Windows MSI unsigned.
+WindowInjection inherits VC++ x64 runtime dependency; present on target laptop, separate
+clean-machine prerequisite, not bundled/system-installed by MSI. No MSI/APK install or
+runtime/security/original app/service/mic modifications this turn; real paired manual,
+restart/code reuse, save/chat and audible buzz/voice acceptance still pending. Corresponding
+source archives/checksums are the final packaging follow-up, not feature acceptance.
+
 ## Manual-default85 execution:2026-10-09
 
 Explicit start plus final matching MSI/APK authorized. Productionc88c34f/common29462e6,

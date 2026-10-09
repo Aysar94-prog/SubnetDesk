@@ -27,3 +27,9 @@ portable running helper. Normal Windows Installer in-use-file prompts remain.
 
 Windows signing certificate is not supplied: MSI is unsigned. Android continues
 to use the existing private helper signer. Do not include signing keys in archives.
+
+Runtime prerequisite: the inherited WindowInjection.dll imports MSVCP140.dll,
+VCRUNTIME140.dll and VCRUNTIME140_1.dll. Microsoft Visual C++ x64 runtime must already
+be installed for that component; this per-user MSI does not run a system redistributable
+installer. The target laptop has those runtime DLLs. Other machines must be checked
+separately; compilation/extraction is not a clean-machine installation test.
