@@ -9,6 +9,8 @@ $ErrorActionPreference = 'Stop'
 if (Test-Path -LiteralPath $ExtractPath) { throw 'Preserve existing extraction directory.' }
 $taskInstaller = New-Object -ComObject WindowsInstaller.Installer
 $taskDatabase = $taskInstaller.OpenDatabase((Resolve-Path -LiteralPath $MsiPath).Path, 0)
+$taskSummary = $taskDatabase.SummaryInformation(0)
+if ($taskSummary.Property(7) -ne 'x64;1033' -or ([int]$taskSummary.Property(15) -band 8) -eq 0) { throw 'Expected x64 English limited-privilege MSI.' }
 function Query([string]$sql, [int]$columns) {
     $taskView = $taskDatabase.OpenView($sql)
     [void]$taskView.Execute()
@@ -24,6 +26,9 @@ $taskProps = @{}
 foreach ($taskRow in @(Query 'SELECT `Property`, `Value` FROM `Property`' 2)) { $taskProps[$taskRow[0]] = $taskRow[1] }
 if ($taskProps['ProductVersion'] -ne $ReleaseVersion -or $taskProps['HELPER_BUILD'] -ne "$ReleaseBuild" -or $taskProps['ProductLanguage'] -ne '1033' -or $taskProps['ProductName'] -ne 'SubnetDesk Helper') { throw 'MSI release/English identity mismatch.' }
 if ($taskProps['UpgradeCode'] -ne '{76B63726-899A-49A7-95DF-52EF79D7C8C2}' -or $taskProps.ContainsKey('ALLUSERS')) { throw 'MSI private/per-user identity mismatch.' }
+$taskDirectories = @{}
+foreach ($taskRow in @(Query 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $taskDirectories[$taskRow[0]] = @($taskRow[1], ($taskRow[2] -split '\|')[-1]) }
+if ($taskDirectories['INSTALLFOLDER'][0] -ne 'HelperPrograms' -or $taskDirectories['INSTALLFOLDER'][1] -ne 'SubnetDeskHelper' -or $taskDirectories['HelperPrograms'][0] -ne 'LocalAppDataFolder') { throw 'Unexpected install directory.' }
 $taskTables = @(Query 'SELECT `Name` FROM `_Tables`' 1 | ForEach-Object { $_[0] })
 foreach ($taskForbidden in @('ServiceInstall','ServiceControl','Environment','MoveFiles','RemoveIniFile','IniFile','SelfReg','RemoveRegistry')) {
     if ($taskTables -contains $taskForbidden -and @(Query ('SELECT * FROM `' + $taskForbidden + '`') 1).Count) { throw "Unexpected installer mutation table: $taskForbidden" }
@@ -53,6 +58,7 @@ New-Item -ItemType Directory -Path $ExtractPath | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'MSI embedded payload extraction failed.' }
 [xml]$taskPayload = Get-Content -LiteralPath $PayloadXml -Raw
 $taskExpected = @($taskPayload.SelectNodes('//*[local-name()="File"]'))
+if (@(Query 'SELECT `File` FROM `File`' 1).Count -ne $taskExpected.Count) { throw 'MSI file table differs from generated source.' }
 $taskActual = @(Get-ChildItem "$ExtractPath\payload" -Recurse -File)
 if ($taskActual.Count -ne $taskExpected.Count) { throw 'MSI payload file count mismatch.' }
 foreach ($taskFile in $taskExpected) {
