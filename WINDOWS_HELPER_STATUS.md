@@ -1,5 +1,24 @@
 # SubnetDesk Windows helper status
 
+## Build83 externally launched / reusable-code and buzzer plan:2026-10-09
+
+Read-only process/file/native hash confirms mainPID23120 runs exact Windows1.3.5+83
+portable candidate, owns21118(no established session at check), DLL1CE28159...CFB7F592.
+Old82-switch blocker is resolved by user/external launch, not automated auth/security UI.
+User reports visual buzzer works but apparently no laptop sound. Current ChatAttentionState
+uses SystemSound.alert; pinned Flutter Windows engine calls MessageBeep(MB_OK) and reports
+Success without checking result. Default sound assignment/file exists, audio services running;
+exact mixer/endpoint/mute cause unproved. No sound/settings mutations during planning.
+
+User explicitly chose SAME reusable temporary code until two-hour expiry or main-app
+restart. Current83 remains120-second single-use; new source/build NOT implemented yet.
+Canonical plan D:/LAN-Messenger/source/PLAN-SUBNETDESK-CODE-BUZZER.md has dependencies/
+per-task status/acceptance/tests, awaits explicit execution start. Proposed Windows-only
+changes separate lifetime from120-second rate protection, retain volatile unexpired code
+on unavailable/locked receiver while denying/hiding access, use dedicated bounded buzzer
+tone with mute/error/voice-priority arbitration. Android2083 sender unchanged; review wire
+without automatically rebuilding/adding receiver parity. Frozen83 archives2787bf3 preserved.
+
 ## Build83 final packaging / human-switch checkpoint:2026-10-09
 
 Both binary/source archives complete, corresponding snapshot2787bf3(commonb56ada4,
