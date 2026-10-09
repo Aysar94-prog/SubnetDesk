@@ -1,5 +1,18 @@
 # SubnetDesk Windows helper status
 
+## Manual-default85 execution:2026-10-09
+
+Explicit start plus final matching MSI/APK authorized. Productionc88c34f/common29462e6,
+private1.3.7/build85 (Android2085). Windows missing manual preference defaults ON; saves
+explicit ON/OFF through checked Config2 store, invalid fails closed/English error. No
+pending acceptance/code/nonce persistence; availability and local Accept gates unchanged.
+Flutter110, standalone policy15 and fresh CTest3 PASS; full native/Windows/Android builds
+running. Independent per-user English Helper MSI source res/private-helper-msi; prototype
+84 compiles/readonly table/isolation/all125 extracted payload hashes PASS. Sole UI custom
+action prints license on user click, not install execution. Final85 MSI/APK/source/version/
+signer gates pending; no MSI/APK installed/runtime/security changed this turn. MSI unsigned
+(no Windows signing certificate). Actual paired/manual/restart/audible acceptance open.
+
 ## Manual-default request planned / build84 reconciliation:2026-10-09
 
 User chose manual approval ON by default and remembered ON/OFF after restart. New plan

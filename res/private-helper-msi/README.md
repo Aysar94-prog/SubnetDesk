@@ -10,7 +10,9 @@ is generated from all runtime/license files, with deterministic component IDs an
 HKCU key paths. Work/output directories must not already exist.
 
 Installs to LocalAppData\Programs\SubnetDeskHelper and adds a Start menu shortcut.
-Uses an independent UpgradeCode, not the upstream product. No service, firewall,
+Uses an independent UpgradeCode, not the upstream product. The only custom action
+is WiX's user-clicked license Print button; it is absent from the install execution
+sequence. No service, firewall,
 process termination, driver registration, autorun, updater, or app-launch action.
 Uninstall removes owned installer files/markers/shortcut, not application config.
 Close a running helper yourself before upgrading. This MSI does not replace a

@@ -10,7 +10,6 @@
     <Property Id="HELPER_BUILD" Value="$(var.ReleaseBuild)" />
     <Property Id="ARPCOMMENTS" Value="Private helper $(var.ReleaseVersion), build $(var.ReleaseBuild). Updates disabled." />
     <Property Id="ARPHELPLINK" Value="https://github.com/zibo-chen/SubnetDesk" />
-    <Property Id="ARPNOMODIFY" Value="1" />
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="HelperPrograms" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="SubnetDeskHelper" />

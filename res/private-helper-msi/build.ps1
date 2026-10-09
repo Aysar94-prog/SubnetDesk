@@ -21,6 +21,11 @@ function StableId([string]$path) {
     finally { $taskSha.Dispose() }
     'P' + ([BitConverter]::ToString($taskBytes).Replace('-','').Substring(0,32))
 }
+function StableGuid([string]$path) {
+    $taskHex = (StableId ('SubnetDeskPrivateHelper:component:' + $path)).Substring(1).ToLowerInvariant()
+    $taskHex = $taskHex.Substring(0,12) + '5' + $taskHex.Substring(13,3) + '8' + $taskHex.Substring(17)
+    ([guid]$taskHex).ToString()
+}
 $taskXml = [Text.StringBuilder]::new()
 [void]$taskXml.AppendLine('<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"><Fragment>')
 $taskDirectories = @{ '' = 'INSTALLFOLDER' }
@@ -43,7 +48,7 @@ foreach ($taskFile in $taskFiles) {
     $taskId = StableId "file:$taskRelative"
     # HKCU key paths are required for a per-user component. Each path has a
     # stable identifier; no user configuration or OS-wide registry is modified.
-    [void]$taskXml.AppendLine('<DirectoryRef Id="' + $taskDirectories[$taskParent] + '"><Component Id="C' + $taskId + '" Guid="*">')
+    [void]$taskXml.AppendLine('<DirectoryRef Id="' + $taskDirectories[$taskParent] + '"><Component Id="C' + $taskId + '" Guid="' + (StableGuid $taskRelative) + '">')
     [void]$taskXml.AppendLine('<File Id="F' + $taskId + '" Source="' + (XmlText $taskFile.FullName) + '" Name="' + (XmlText $taskFile.Name) + '" />')
     [void]$taskXml.AppendLine('<RegistryValue Root="HKCU" Key="Software\SubnetDeskPrivate\HelperInstaller\Files" Name="' + $taskId + '" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>')
 }
