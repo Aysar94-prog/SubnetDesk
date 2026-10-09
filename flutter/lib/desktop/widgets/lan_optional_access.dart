@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import '../../common.dart';
 import '../../models/platform_model.dart';
 
-/// Local, volatile receiver controls. No code is persisted by Flutter.
+/// Receiver-owned controls. Only the manual preference persists, never the code.
 class LanOptionalAccess extends StatefulWidget {
   const LanOptionalAccess({super.key, this.readState, this.setMethods, this.generateCode,
     this.showSettings = false, this.translateText});
@@ -60,6 +60,7 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
     final codeEnabled = _state['code_enabled'] == true;
     final manualEnabled = _state['manual_enabled'] == true;
     final code = _state['code']?.toString() ?? '';
+    final error = _error.isNotEmpty ? _error : (_state['manual_preference_error']?.toString() ?? '');
     return Padding(padding: const EdgeInsets.all(10), child: Column(
       crossAxisAlignment: CrossAxisAlignment.start, children: [
         if (!widget.showSettings) ...[
@@ -79,13 +80,13 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
         ],
         if (widget.showSettings) ...[
         Text(t('Manual approval')),
-        Text(t('Requires local acceptance. Disabled when the app restarts.'), style: const TextStyle(fontSize: 11)),
+        Text(t('Enabled by default. Your choice is saved. Every request requires local acceptance.'), style: const TextStyle(fontSize: 11)),
         CheckboxListTile(dense: true, contentPadding: EdgeInsets.zero,
           title: Text(t('Enable manual approval')), value: manualEnabled,
           onChanged: _busy || (!available && !manualEnabled) ? null : (value) => _change(() =>
-            _set(true, value == true))),
+            _set(codeEnabled, value == true))),
         ],
-        if (_error.isNotEmpty) Text(t(_error), style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        if (error.isNotEmpty) Text(t(error), style: TextStyle(color: Theme.of(context).colorScheme.error)),
       ]));
   }
 }

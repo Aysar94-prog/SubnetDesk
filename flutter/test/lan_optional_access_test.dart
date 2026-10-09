@@ -23,11 +23,43 @@ void main() {
   });
   testWidgets('manual opt-in does not disable automatic code access', (tester) async {
     final changes = <List<bool>>[];
-    await show(tester, {'available': true}, (code, manual) async {
+    await show(tester, {'available': true, 'code_enabled': true}, (code, manual) async {
       changes.add([code, manual]); return '';
     }, settings: true);
     await tester.tap(find.byType(CheckboxListTile).first); await tester.pump();
     expect(changes, [[true, true]]);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets('default on checkbox and English persisted-choice explanation', (tester) async {
+    await show(tester, {'available': true, 'code_enabled': true, 'manual_enabled': true},
+      (_, __) async => '', settings: true);
+    expect(tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value, true);
+    expect(find.text('Enabled by default. Your choice is saved. Every request requires local acceptance.'), findsOneWidget);
+    expect(find.textContaining('Disabled when the app restarts'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets('saved on can be disabled while receiver unavailable without enabling code', (tester) async {
+    final changes = <List<bool>>[];
+    await show(tester, {'available': false, 'code_enabled': false, 'manual_enabled': true},
+      (code, manual) async { changes.add([code, manual]); return ''; }, settings: true);
+    await tester.tap(find.byType(CheckboxListTile)); await tester.pump();
+    expect(changes, [[false, false]]);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets('failed save stays off and shows English error', (tester) async {
+    await show(tester, {'available': true, 'code_enabled': true, 'manual_enabled': false},
+      (_, __) async => 'Unable to save manual approval. Please retry.', settings: true);
+    await tester.tap(find.byType(CheckboxListTile)); await tester.pump();
+    expect(tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value, false);
+    expect(find.text('Unable to save manual approval. Please retry.'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets('invalid persisted preference error is visible', (tester) async {
+    const error = 'Invalid saved manual approval preference. Save your choice again.';
+    await show(tester, {'available': true, 'code_enabled': true, 'manual_enabled': false,
+      'manual_preference_error': error}, (_, __) async => '', settings: true);
+    expect(find.text(error), findsOneWidget);
     await tester.pumpWidget(const SizedBox());
   });
   testWidgets('temporary code fits a compact scrolling receiver pane', (tester) async {

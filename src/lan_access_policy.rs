@@ -70,6 +70,31 @@ impl AccessPolicy {
         policy.code_enabled = true;
         policy
     }
+    pub(crate) fn receiver_defaults(manual: bool) -> Self {
+        let mut policy = Self::automatic_codes();
+        policy.manual_enabled = manual;
+        policy
+    }
+
+    /// Serialize saving and policy changes under the receiver mutex. Saving OFF
+    /// failures still cancel pending grants, but must report that OFF is unsaved.
+    pub(crate) fn configure_saved(
+        &mut self,
+        code: bool,
+        manual: bool,
+        available: bool,
+        persist: impl FnOnce(bool) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        if !available && ((code && !self.code_enabled) || (manual && !self.manual_enabled)) {
+            return Err("Optional access requires this unlocked Windows app to own the LAN listener");
+        }
+        if let Err(error) = persist(manual) {
+            if !manual { self.configure(self.code_enabled, false); }
+            return Err(error);
+        }
+        self.configure(code, manual);
+        Ok(())
+    }
     pub(crate) fn suspend(&mut self) {
         // Availability gates hide/deny access, but do not rotate an unexpired code.
         self.pending.clear();
@@ -261,6 +286,58 @@ mod tests {
         let mut policy = AccessPolicy::default();
         policy.configure(true, true);
         policy
+    }
+    #[test]
+    fn receiver_saved_defaults_allow_requests_but_never_replay_acceptance() {
+        let now = Instant::now();
+        let mut policy = AccessPolicy::receiver_defaults(true);
+        assert_eq!(policy.capabilities(), (true, true));
+        policy.request_manual(1, [1; 32], "ip", now).unwrap();
+        assert!(policy.manual_pending(1, now));
+        let mut restarted = AccessPolicy::receiver_defaults(true);
+        assert_eq!(restarted.decide_manual(1, &[1; 32], true, now), Err(Rejection::Missing));
+        assert!(restarted.visible_code(now).is_none());
+        let mut disabled = AccessPolicy::receiver_defaults(false);
+        assert_eq!(disabled.request_manual(1, [1; 32], "ip", now), Err(Rejection::Disabled));
+    }
+    #[test]
+    fn saved_toggle_cancels_pending_without_rotating_code_or_resetting_guesses() {
+        let now = Instant::now();
+        let mut policy = AccessPolicy::receiver_defaults(true);
+        policy.issue_code(*b"123456", now).unwrap();
+        assert_eq!(policy.consume_code(now, |_| false), Err(Rejection::Wrong));
+        policy.request_manual(1, [1; 32], "ip", now).unwrap();
+        let mut saved = true;
+        policy.configure_saved(true, false, true, |value| { saved = value; Ok(()) }).unwrap();
+        assert!(!saved);
+        assert!(!policy.manual_pending(1, now));
+        assert_eq!(policy.decide_manual(1, &[1; 32], true, now), Err(Rejection::Disabled));
+        assert_eq!(policy.visible_code(now).unwrap().1, 7200);
+        assert_eq!(policy.code.as_ref().unwrap().attempts, 4);
+        assert_eq!(AccessPolicy::receiver_defaults(saved).capabilities(), (true, false));
+    }
+    #[test]
+    fn unavailable_receiver_can_disable_but_not_enable_methods() {
+        let mut policy = AccessPolicy::receiver_defaults(true);
+        policy.configure_saved(true, false, false, |_| Ok(())).unwrap();
+        let mut writes = 0;
+        assert!(policy.configure_saved(true, true, false, |_| { writes += 1; Ok(()) }).is_err());
+        assert_eq!(writes, 0);
+        assert_eq!(policy.capabilities(), (true, false));
+        policy.configure_saved(false, false, false, |_| Ok(())).unwrap();
+        assert!(policy.configure_saved(true, false, false, |_| Ok(())).is_err());
+    }
+    #[test]
+    fn save_failure_never_enables_and_failed_disable_is_fail_closed_for_this_run() {
+        let now = Instant::now();
+        let mut policy = AccessPolicy::receiver_defaults(false);
+        assert!(policy.configure_saved(true, true, true, |_| Err("Unsaved")).is_err());
+        assert_eq!(policy.capabilities(), (true, false));
+        policy.configure_saved(true, true, true, |_| Ok(())).unwrap();
+        policy.request_manual(1, [1; 32], "ip", now).unwrap();
+        assert!(policy.configure_saved(true, false, true, |_| Err("Unsaved OFF")).is_err());
+        assert_eq!(policy.capabilities(), (true, false));
+        assert!(!policy.manual_pending(1, now));
     }
     #[test]
     fn automatic_rotation_never_resets_guess_budget() {

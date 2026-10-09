@@ -4,7 +4,20 @@ use crate::lan_access_policy::{AccessPolicy, Rejection};
 use hbb_common::sodiumoxide;
 use std::{sync::Mutex, time::Instant};
 
-lazy_static::lazy_static! { static ref POLICY: Mutex<AccessPolicy> = Mutex::new(AccessPolicy::automatic_codes()); }
+fn initial_policy() -> AccessPolicy {
+    #[cfg(windows)]
+    {
+        let manual = hbb_common::config::Config::lan_manual_approval_enabled().unwrap_or_else(|error| {
+            hbb_common::log::warn!("Manual approval disabled: {error}");
+            false
+        });
+        AccessPolicy::receiver_defaults(manual)
+    }
+    #[cfg(not(windows))]
+    { AccessPolicy::automatic_codes() }
+}
+
+lazy_static::lazy_static! { static ref POLICY: Mutex<AccessPolicy> = Mutex::new(initial_policy()); }
 
 fn issue_random_code(policy: &mut AccessPolicy, now: Instant) -> Result<(), &'static str> {
     if sodiumoxide::init().is_err() { return Err("Secure randomness is unavailable"); }
@@ -56,6 +69,11 @@ pub(crate) fn capabilities() -> (bool, bool) {
 
 pub(crate) fn state_json() -> String {
     let available = available();
+    #[cfg(windows)]
+    let preference_error = hbb_common::config::Config::lan_manual_approval_enabled()
+        .err().map(|_| "Invalid saved manual approval preference. Save your choice again.").unwrap_or_default();
+    #[cfg(not(windows))]
+    let preference_error = "";
     let policy = POLICY.lock().unwrap();
     let (code_enabled, manual_enabled) = policy.capabilities();
     let code = if available {
@@ -66,15 +84,21 @@ pub(crate) fn state_json() -> String {
     serde_json::json!({"available": available, "code_enabled": code_enabled,
         "manual_enabled": manual_enabled, "code": code.map(|(value, _)| String::from_utf8_lossy(value).into_owned()).unwrap_or_default(),
         "expires_seconds": code.map(|(_, seconds)| seconds).unwrap_or(0),
-        "retry_seconds": policy.retry_seconds(Instant::now())}).to_string()
+        "retry_seconds": policy.retry_seconds(Instant::now()),
+        "manual_preference_error": preference_error}).to_string()
 }
 
 pub(crate) fn configure(code: bool, manual: bool) -> Result<(), &'static str> {
-    if (code || manual) && !available() {
-        return Err("Optional access requires this unlocked Windows app to own the LAN listener");
-    }
-    POLICY.lock().unwrap().configure(code, manual);
-    Ok(())
+    let available = available();
+    POLICY.lock().unwrap().configure_saved(code, manual, available, |enabled| {
+        #[cfg(windows)]
+        { hbb_common::config::Config::set_lan_manual_approval_enabled(enabled).map_err(|_| {
+            if enabled { "Unable to save manual approval. Please retry." }
+            else { "Unable to save manual approval. Disabled for this run only; please retry." }
+        }) }
+        #[cfg(not(windows))]
+        { let _ = enabled; Ok(()) }
+    })
 }
 
 pub(crate) fn regenerate_code() -> Result<(), &'static str> {
