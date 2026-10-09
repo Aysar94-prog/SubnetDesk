@@ -1,5 +1,25 @@
 # SubnetDesk Windows helper status
 
+## Manual-default request planned / build84 reconciliation:2026-10-09
+
+User chose manual approval ON by default and remembered ON/OFF after restart. New plan
+D:/LAN-Messenger/source/PLAN-SUBNETDESK-MANUAL-DEFAULT.md is planning-only, awaits explicit
+execution start; no app/config/build change in this planning turn. Current84 manual
+remains volatile/default OFF. Proposed Windows1.3.7/build85, Android2084 unchanged; no
+wire/receiver-parity expansion, ON is request eligibility only, never auto-accept.
+
+Build84 actually completed: source9a9337b/commonb56ada4; selected native/wire/hash43,
+runner CTest3, full Windows native5m15s/UI107.6s/post-build Flutter106 PASS.19m14s native
+test compile. Repeated vcvars imports inflated process PATH; isolated builders/fresh
+release retry fixed it, no global env change. Exact staged EXE05D4A9F4...9C9E9E4 and
+DLL9A758176...75F74F; file1.3.6+84. User Esc stopped computer use before automated
+replacement; later read-only metadata now sees user/external84 mainPID4420/exact path.
+Android2084 native6m27s/APK506.2s/stage/install-r PASS, original2075/signing/mic preserved;
+actual release Keystore synthetic/English home/method/manual explanation PASS. Compiled
+84 AOT contains English wait key and no old Arabic wait (83 contains old Arabic key).
+No actual pending-request/code-reuse/physical buzzer/voice acceptance; source/binary ZIP
+archives/final output records incomplete. Older in-progress records below superseded.
+
 ## Code/buzzer/English build84 execution:2026-10-09
 
 User explicitly started execution and identified forced Arabic manual-approval wait
