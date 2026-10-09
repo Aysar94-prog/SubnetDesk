@@ -1001,7 +1001,7 @@ class FfiModel with ChangeNotifier {
 
     if (type == 'lan-access-pending') {
       dialogManager.dismissAll();
-      dialogManager.showLoading('بانتظار موافقة المستقبل (حتى 60 ثانية)', onCancel: closeConnection);
+      dialogManager.showLoading(translate('Waiting for receiver approval (up to 60 seconds)'), onCancel: closeConnection);
     } else if (type == 'lan-login-required') {
       enterLanLoginDialog(
         sessionId,

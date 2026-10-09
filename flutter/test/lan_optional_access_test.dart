@@ -32,11 +32,14 @@ void main() {
   });
   testWidgets('temporary code fits a compact scrolling receiver pane', (tester) async {
     await show(tester, {'available': true, 'code_enabled': true, 'code': '012345',
-      'expires_seconds': 119}, (_, __) async => '', generate: () async => '');
+      'expires_seconds': 7199}, (_, __) async => '', generate: () async => '');
     expect(find.byKey(const ValueKey('lan-temporary-code')), findsOneWidget);
     expect(tester.takeException(), isNull);
     expect(find.byType(CheckboxListTile), findsNothing);
     expect(find.text('Temporary code'), findsOneWidget);
+    expect(find.text('Expires in 1:59:59'), findsOneWidget);
+    expect(find.text('6 digits · 2 hours · reusable until restart or expiry'), findsOneWidget);
+    expect(find.textContaining('single use'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
   testWidgets('home code reading never enables access or generates from polling', (tester) async {

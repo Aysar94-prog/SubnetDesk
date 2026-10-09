@@ -338,7 +338,7 @@ class ConnectionManagerState extends State<ConnectionManager>
             block: block, mask: mask);
       return CmSessionPanel(
         title: client == null ? 'SubnetDesk' :
-            '${client.name} · ${pending ? "بانتظار الموافقة" : translate(client.disconnected ? "Disconnected" : "Connected")}',
+            '${client.name} · ${pending ? translate("Waiting for approval") : translate(client.disconnected ? "Disconnected" : "Connected")}',
         collapsed: serverModel.windowsCmCollapsed,
         showChat: chatModel.isShowCMSidePage,
         chatLabel: translate(client?.type_() == ClientType.file
@@ -353,6 +353,7 @@ class ConnectionManagerState extends State<ConnectionManager>
           voiceRingMuted: serverModel.voiceRing.muted,
           onToggleVoiceRing: pending ? null : serverModel.voiceRing.toggleMuted,
           voiceRingError: serverModel.voiceRing.playbackError,
+          buzzerError: serverModel.chatAttention.playbackError,
         sessionPicker: serverModel.clients.length < 2
             ? const SizedBox.shrink()
             : Padding(

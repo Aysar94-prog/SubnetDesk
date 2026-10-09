@@ -68,12 +68,13 @@ class _LanOptionalAccessState extends State<LanOptionalAccess> {
         if (available && codeEnabled) ...[
           if (code.isNotEmpty) SelectableText(code,
             key: const ValueKey('lan-temporary-code'), style: const TextStyle(fontSize: 26, letterSpacing: 3)),
-          if (code.isNotEmpty) Text('${_state['expires_seconds']} ${t('seconds')}', style: const TextStyle(fontSize: 11)),
+          if (code.isNotEmpty) Text('${t('Expires in')} ${Duration(seconds: (_state['expires_seconds'] as num? ?? 0).toInt()).toString().split('.').first}',
+            key: const ValueKey('lan-code-expiry'), style: const TextStyle(fontSize: 11)),
           if (code.isEmpty) Text(t((_state['retry_seconds'] as num? ?? 0) > 0
             ? 'Too many attempts. Please wait before using a new code.' : 'Preparing a new temporary code...')),
           OutlinedButton(onPressed: _busy ? null : () => _change(_generate),
             child: Text(t('New code'))),
-          Text(t('6 digits · 2 minutes · single use'), style: const TextStyle(fontSize: 11)),
+          Text(t('6 digits · 2 hours · reusable until restart or expiry'), style: const TextStyle(fontSize: 11)),
         ],
         ],
         if (widget.showSettings) ...[

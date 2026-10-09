@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/buzzer_button.dart';
@@ -87,14 +88,15 @@ void main() {
       expect(state.receive(1, authorized: true, connected: true), true);
       await tester.pump();
       expect(state.attentionSessionId, 1);
+      expect(state.playbackError, 'Buzzer playback failed. Check the audio output.');
       expect(tester.takeException(), null);
       await tester.pump(const Duration(seconds: 6));
     },
   );
-  testWidgets('default player requests desktop system alert', (tester) async {
+  testWidgets('default player requests native app tone and owned stop', (tester) async {
     final calls = <MethodCall>[];
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-      SystemChannels.platform,
+      const MethodChannel('subnetdesk/audio'),
       (call) async {
         calls.add(call);
         return null;
@@ -102,7 +104,7 @@ void main() {
     );
     addTearDown(
       () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
+        const MethodChannel('subnetdesk/audio'),
         null,
       ),
     );
@@ -110,8 +112,48 @@ void main() {
     addTearDown(state.dispose);
     state.receive(1, authorized: true, connected: true);
     await tester.pump();
-    expect(calls.single.method, 'SystemSound.play');
-    expect(calls.single.arguments, 'SystemSoundType.alert');
+    expect(calls.single.method, 'playChatBuzzer');
+    state.toggleMuted();
+    await tester.pump();
+    expect(calls.last.method, 'stopChatBuzzer');
+    await tester.pump(const Duration(seconds: 6));
+  });
+  testWidgets('mute removal and disposal stop only requested output', (tester) async {
+    var stops = 0;
+    final state = ChatAttentionState(playSound: () async {}, stopSound: () async { stops++; });
+    state.receive(1, authorized: true, connected: true);
+    state.removeSession(1);
+    await tester.pump();
+    expect(stops, 1);
+    state.dispose();
+    await tester.pump();
+    expect(stops, 1);
+  });
+  testWidgets('late playback failure after disposal cannot notify', (tester) async {
+    final pending = Completer<void>();
+    final state = ChatAttentionState(playSound: () => pending.future);
+    state.receive(1, authorized: true, connected: true);
+    state.dispose();
+    pending.completeError(PlatformException(code: 'late'));
+    await tester.pump();
+    expect(tester.takeException(), null);
+    expect(state.playbackError, null);
+  });
+  testWidgets('stop failures are visible and next successful playback clears error', (tester) async {
+    var now = 0;
+    final state = ChatAttentionState(now: () => now, playSound: () async {},
+      stopSound: () async { throw PlatformException(code: 'stop'); });
+    addTearDown(state.dispose);
+    state.receive(1, authorized: true, connected: true);
+    await tester.pump();
+    state.toggleMuted();
+    await tester.pump();
+    expect(state.playbackError, isNotNull);
+    state.toggleMuted();
+    now = 5000;
+    state.receive(1, authorized: true, connected: true);
+    await tester.pump();
+    expect(state.playbackError, null);
     await tester.pump(const Duration(seconds: 6));
   });
   testWidgets('buzzer button disables unsupported receivers and cooldown', (
@@ -162,6 +204,7 @@ void main() {
                 foldLabel: 'Fold',
                 attention: true,
                 soundMuted: true,
+                buzzerError: 'Buzzer playback failed. Check the audio output.',
                 onToggleSound: () {
                   toggles++;
                 },
@@ -177,6 +220,7 @@ void main() {
         ),
       );
       expect(find.byKey(const ValueKey('cm-buzzer-attention')), findsOneWidget);
+      expect(find.byKey(const ValueKey('cm-buzzer-error')), findsOneWidget);
       expect(focus.hasFocus, false);
       await tester.tap(find.byKey(const ValueKey('cm-buzzer-mute')));
       expect(toggles, 1);

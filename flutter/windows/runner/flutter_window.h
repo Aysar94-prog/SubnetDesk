@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "win32_window.h"
+#include "alert_audio_owner.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -31,7 +32,7 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<flutter::MethodChannel<>> attention_channel_;
   std::unique_ptr<flutter::MethodChannel<>> voice_audio_channel_;
-  bool voice_audio_started_ = false;
+  AlertAudioOwner alert_audio_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

@@ -21,6 +21,7 @@
 
 #include "win32_desktop.h"
 #include "voice_ring_wave.h"
+#include "chat_buzzer_wave.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -50,22 +51,28 @@ bool FlutterWindow::OnCreate() {
   voice_audio_channel_->SetMethodCallHandler(
       [this](const flutter::MethodCall<>& call,
              std::unique_ptr<flutter::MethodResult<>> result) {
-        if (call.method_name() == "playVoiceRing") {
-          const auto& wave = VoiceRingWave();
+        if (call.method_name() == "playVoiceRing" || call.method_name() == "playChatBuzzer") {
+          const bool voice = call.method_name() == "playVoiceRing";
+          const auto tone = voice ? AlertAudioOwner::Tone::Voice : AlertAudioOwner::Tone::Buzzer;
+          const auto& wave = voice ? VoiceRingWave() : ChatBuzzerWave();
           // No SND_SYSTEM: use this app's audio session and respect its volume.
-          if (!PlaySoundW(reinterpret_cast<LPCWSTR>(wave.data()), nullptr,
-                          SND_MEMORY | SND_ASYNC | SND_NODEFAULT)) {
-            result->Error("audio-playback", "Windows could not start the ringtone");
+          const auto playback = alert_audio_.Start(tone, [&wave] {
+            return PlaySoundW(reinterpret_cast<LPCWSTR>(wave.data()), nullptr,
+                              SND_MEMORY | SND_ASYNC | SND_NODEFAULT) != FALSE;
+          });
+          if (playback == AlertAudioOwner::Playback::Failed) {
+            result->Error("audio-playback", "Windows could not start the alert sound");
             return;
           }
-          voice_audio_started_ = true;
-          result->Success();
-        } else if (call.method_name() == "stopVoiceRing") {
-          if (voice_audio_started_ && !PlaySoundW(nullptr, nullptr, 0)) {
-            result->Error("audio-stop", "Windows could not stop the ringtone");
+          if (voice) result->Success();
+          else result->Success(flutter::EncodableValue(playback == AlertAudioOwner::Playback::Started));
+        } else if (call.method_name() == "stopVoiceRing" || call.method_name() == "stopChatBuzzer") {
+          const auto tone = call.method_name() == "stopVoiceRing" ?
+              AlertAudioOwner::Tone::Voice : AlertAudioOwner::Tone::Buzzer;
+          if (!alert_audio_.StopOwned(tone, [] { return PlaySoundW(nullptr, nullptr, 0) != FALSE; })) {
+            result->Error("audio-stop", "Windows could not stop the alert sound");
             return;
           }
-          voice_audio_started_ = false;
           result->Success();
         } else {
           result->NotImplemented();
@@ -160,7 +167,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
-  if (voice_audio_started_) PlaySoundW(nullptr, nullptr, 0);
+  alert_audio_.StopAll([] { return PlaySoundW(nullptr, nullptr, 0) != FALSE; });
   voice_audio_channel_.reset();
   attention_channel_.reset();
   if (flutter_controller_) {

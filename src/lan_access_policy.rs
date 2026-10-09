@@ -5,8 +5,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) const CODE_TTL: Duration = Duration::from_secs(120);
+pub(crate) const CODE_TTL: Duration = Duration::from_secs(2 * 60 * 60);
 pub(crate) const MANUAL_TTL: Duration = Duration::from_secs(60);
+const FAILURE_WINDOW: Duration = Duration::from_secs(120);
+const CODE_COOLDOWN: Duration = Duration::from_secs(120);
 const CODE_ATTEMPTS: u8 = 5;
 const MAX_PENDING: usize = 8;
 const MAX_PENDING_PER_SOURCE: usize = 2;
@@ -69,7 +71,7 @@ impl AccessPolicy {
         policy
     }
     pub(crate) fn suspend(&mut self) {
-        self.code = None;
+        // Availability gates hide/deny access, but do not rotate an unexpired code.
         self.pending.clear();
     }
     pub(crate) fn retry_seconds(&self, now: Instant) -> u64 {
@@ -156,24 +158,21 @@ impl AccessPolicy {
             return Err(Rejection::Expired);
         }
         if verify(&code.value) {
-            self.code = None;
+            // Reusable until the original deadline; success never resets attempts.
             return Ok(());
         }
         code.attempts -= 1;
         if self.failure_window.map(|until| now >= until).unwrap_or(true) {
             self.failed_codes = 0;
-            self.failure_window = Some(now + CODE_TTL);
+            self.failure_window = Some(now + FAILURE_WINDOW);
         }
         self.failed_codes = self.failed_codes.saturating_add(1);
-        if self.failed_codes >= CODE_ATTEMPTS {
-            self.blocked_until = Some(now + CODE_TTL);
+        if self.failed_codes >= CODE_ATTEMPTS || code.attempts == 0 {
+            self.blocked_until = Some(now + CODE_COOLDOWN);
             self.failed_codes = 0;
-            self.failure_window = Some(now + CODE_TTL);
+            self.failure_window = Some(now + FAILURE_WINDOW);
             self.code = None;
             return Err(Rejection::Wrong);
-        }
-        if code.attempts == 0 {
-            self.code = None;
         }
         Err(Rejection::Wrong)
     }
@@ -279,21 +278,23 @@ mod tests {
         policy.configure(false, false);
         policy.configure(true, false);
         assert_eq!(policy.consume_code(now, |_| true), Err(Rejection::Throttled));
-        assert!(policy.needs_code(now + CODE_TTL));
-        policy.issue_code(*b"654321", now + CODE_TTL).unwrap();
-        assert_eq!(policy.consume_code(now + CODE_TTL, |_| true), Ok(()));
-        assert!(policy.needs_code(now + CODE_TTL));
+        assert!(policy.needs_code(now + CODE_COOLDOWN));
+        policy.issue_code(*b"654321", now + CODE_COOLDOWN).unwrap();
+        assert_eq!(policy.consume_code(now + CODE_COOLDOWN, |_| true), Ok(()));
+        assert!(!policy.needs_code(now + CODE_COOLDOWN));
         assert!(policy.is_previous_code(b"654321"));
     }
     #[test]
-    fn suspend_revokes_code_and_pending_without_changing_manual_choice() {
+    fn suspend_preserves_code_deadline_but_cancels_pending_manual_requests() {
         let mut policy = enabled();
         let now = Instant::now();
         policy.issue_code(*b"123456", now).unwrap();
         policy.request_manual(1, [1; 32], "ip", now).unwrap();
         policy.suspend();
         assert_eq!(policy.capabilities(), (true, true));
-        assert!(policy.visible_code(now).is_none());
+        assert_eq!(policy.visible_code(now).unwrap().0, b"123456");
+        assert_eq!(policy.visible_code(now).unwrap().1, 7200);
+        assert!(policy.visible_code(now + CODE_TTL).is_none());
         assert!(!policy.manual_pending(1, now));
     }
     #[test]
@@ -308,7 +309,7 @@ mod tests {
         );
     }
     #[test]
-    fn code_is_single_use_and_regeneration_revokes_previous() {
+    fn code_is_reusable_and_manual_regeneration_revokes_previous() {
         let mut policy = enabled();
         let now = Instant::now();
         policy.issue_code(*b"123456", now).unwrap();
@@ -318,7 +319,7 @@ mod tests {
             Err(Rejection::Wrong)
         );
         assert_eq!(policy.consume_code(now, |code| code == b"654321"), Ok(()));
-        assert_eq!(policy.consume_code(now, |_| true), Err(Rejection::Missing));
+        assert_eq!(policy.consume_code(now, |code| code == b"654321"), Ok(()));
     }
     #[test]
     fn exact_expiry_and_five_failed_attempts_invalidate_code() {
@@ -412,7 +413,7 @@ mod tests {
             .is_ok());
     }
     #[test]
-    fn mutex_serializes_code_consumption_under_concurrent_attempts() {
+    fn concurrent_valid_connections_reuse_code_without_extending_deadline() {
         let now = Instant::now();
         let mut policy = enabled();
         policy.issue_code(*b"123456", now).unwrap();
@@ -433,7 +434,38 @@ mod tests {
             jobs.into_iter()
                 .map(|job| job.join().unwrap() as usize)
                 .sum::<usize>(),
-            1
+            8
         );
+        assert_eq!(policy.lock().unwrap().visible_code(now).unwrap().1, 7200);
+    }
+
+    #[test]
+    fn successful_reuse_keeps_two_hour_deadline_and_remaining_attempts() {
+        let now = Instant::now();
+        let mut policy = enabled();
+        policy.issue_code(*b"123456", now).unwrap();
+        assert_eq!(policy.consume_code(now, |_| false), Err(Rejection::Wrong));
+        assert_eq!(policy.consume_code(now + Duration::from_secs(300), |_| true), Ok(()));
+        assert_eq!(policy.visible_code(now + Duration::from_secs(300)).unwrap().1, 6900);
+        assert_eq!(policy.code.as_ref().unwrap().attempts, 4);
+        for _ in 0..4 {
+            assert_eq!(policy.consume_code(now + Duration::from_secs(301), |_| false), Err(Rejection::Wrong));
+        }
+        assert!(policy.visible_code(now).is_none());
+        assert!(!policy.needs_code(now + Duration::from_secs(301)));
+        assert!(policy.needs_code(now + Duration::from_secs(301) + CODE_COOLDOWN));
+        // Five per-code guesses also impose the short cooldown across windows.
+    }
+
+    #[test]
+    fn restart_has_no_old_code_and_manual_timeout_stays_one_minute() {
+        assert_eq!(CODE_TTL.as_secs(), 7200);
+        assert_eq!(MANUAL_TTL.as_secs(), 60);
+        assert_eq!(CODE_COOLDOWN.as_secs(), 120);
+        let now = Instant::now();
+        let mut restarted = AccessPolicy::automatic_codes();
+        assert!(restarted.visible_code(now).is_none());
+        assert_eq!(restarted.consume_code(now, |_| true), Err(Rejection::Missing));
+        assert!(restarted.needs_code(now));
     }
 }
