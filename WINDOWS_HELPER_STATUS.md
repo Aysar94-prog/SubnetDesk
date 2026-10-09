@@ -1,5 +1,23 @@
 # SubnetDesk Windows helper status
 
+## Windows sender correction86:2026-10-09
+
+Execution explicitly authorized. Add and ordinary discovered/recent/favorite Connect
+now show English password/saved password, six-digit temporary code or manual approval.
+Password mode keeps the native saved-password path for blank input; optional methods
+send only lan_version/access_method/temporary_code, no password/account/remember data.
+Changing method or endpoint clears entered fields; invalid endpoint/code blocks dispatch.
+Explicit legacy-account payloads and advanced terminal/RDP/tunnel routes remain unchanged.
+13 rendered widget/routing source-guard tests PASS, new widget/test analyzer clean.
+Modified routing files analyze with no errors; existing warnings/info remain. Native85
+parser/encrypted optional sender reviewed for Windows compatibility; no Rust/wire/ABI change.
+Public release1.3.7/build86 Windows frontend build running against exact verified85 DLL
+4FA475280BEE3A4F6A666E0DFCC5B2E6262383A41A70DA24BEEC4E22808AF958. Android85 retained
+unchanged, not rebuilt or re-signed. MSI enables same-public-version upgrade85->86;
+Windows Installer cannot gate logical-build rollback within1.3.7, do not reinstall85
+over86. Full regression/build/MSI extraction/source gates pending. No install/live two-PC
+acceptance or runtime/security/original-app changes; paired acceptance remains pending.
+
 ## Final85 artifacts verified:2026-10-09
 
 Both private1.3.7/logical85 built and staged, Android versionCode2085 retains upgrade

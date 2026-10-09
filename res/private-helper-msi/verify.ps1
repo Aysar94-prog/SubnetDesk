@@ -26,6 +26,12 @@ $taskProps = @{}
 foreach ($taskRow in @(Query 'SELECT `Property`, `Value` FROM `Property`' 2)) { $taskProps[$taskRow[0]] = $taskRow[1] }
 if ($taskProps['ProductVersion'] -ne $ReleaseVersion -or $taskProps['HELPER_BUILD'] -ne "$ReleaseBuild" -or $taskProps['ProductLanguage'] -ne '1033' -or $taskProps['ProductName'] -ne 'SubnetDesk Helper') { throw 'MSI release/English identity mismatch.' }
 if ($taskProps['UpgradeCode'] -ne '{76B63726-899A-49A7-95DF-52EF79D7C8C2}' -or $taskProps.ContainsKey('ALLUSERS')) { throw 'MSI private/per-user identity mismatch.' }
+if ($ReleaseBuild -ge 86) {
+    $taskSameVersionRows = @(Query 'SELECT `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`' 3 | Where-Object {
+        $_[0] -eq $ReleaseVersion -and $_[2] -eq 'WIX_UPGRADE_DETECTED' -and ([int]$_[1] -band 512) -ne 0
+    })
+    if ($taskSameVersionRows.Count -ne 1) { throw 'Expected same-public-version private upgrade detection.' }
+}
 $taskDirectories = @{}
 foreach ($taskRow in @(Query 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $taskDirectories[$taskRow[0]] = @($taskRow[1], ($taskRow[2] -split '\|')[-1]) }
 if ($taskDirectories['INSTALLFOLDER'][0] -ne 'HelperPrograms' -or $taskDirectories['INSTALLFOLDER'][1] -ne 'SubnetDeskHelper' -or $taskDirectories['HelperPrograms'][0] -ne 'LocalAppDataFolder') { throw 'Unexpected install directory.' }

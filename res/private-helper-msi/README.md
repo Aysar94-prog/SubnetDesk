@@ -25,6 +25,12 @@ Uninstall removes owned installer files/markers/shortcut, not application config
 Close a running helper yourself before upgrading. This MSI does not replace a
 portable running helper. Normal Windows Installer in-use-file prompts remain.
 
+Same-public-version upgrades are enabled so 1.3.7/build85 can upgrade to build86.
+Windows Installer compares only the public three-part ProductVersion, not
+HELPER_BUILD. Consequently it cannot prevent rollback between private builds of
+the same public version: do not reinstall build85 over build86. Higher public
+versions retain the normal major-upgrade downgrade gate.
+
 Windows signing certificate is not supplied: MSI is unsigned. Android continues
 to use the existing private helper signer. Do not include signing keys in archives.
 

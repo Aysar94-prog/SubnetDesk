@@ -36,6 +36,7 @@ import 'mobile/pages/remote_page.dart';
 import 'mobile/pages/view_camera_page.dart';
 import 'mobile/pages/terminal_page.dart';
 import 'desktop/pages/remote_page.dart' as desktop_remote;
+import 'desktop/widgets/windows_lan_access_dialog.dart';
 import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
@@ -2608,11 +2609,24 @@ connect(
   bool isRDP = false,
   String? password,
   String? username,
+  bool lanAccessSelected = false,
 }) async {
   if (id == '') return;
   if (isViewCamera) {
     showToast('Camera access is disabled in this private build');
     return;
+  }
+  // Covers discovered/recent/favorite cards, not only the Add dialog. Explicit
+  // legacy account payloads keep their existing path; Android is unchanged.
+  if (isWindows &&
+      !lanAccessSelected &&
+      (password == null || password.isEmpty) &&
+      !isTerminal && !isTcpTunneling && !isRDP) {
+    final selection = await showDialog<WindowsLanAccessSelection>(
+      context: context,
+      builder: (_) => WindowsLanAccessDialog(endpoint: id, translateText: translate));
+    if (selection == null || !context.mounted) return;
+    password = selection.payload;
   }
   if (!isDesktop || desktopType == DesktopType.main) {
     try {

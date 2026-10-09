@@ -19,6 +19,7 @@ import '../../common/widgets/peer_tab_page.dart';
 import '../../models/favorite_group_model.dart';
 import '../../models/platform_model.dart';
 import '../lan_identity_manager.dart';
+import '../widgets/windows_lan_access_dialog.dart';
 
 class OnlineStatusWidget extends StatefulWidget {
   const OnlineStatusWidget({Key? key, this.onSvcStatusChanged})
@@ -546,6 +547,15 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
   }
 
   Future<void> _showAddDeviceDialog(BuildContext context) async {
+    if (isWindows) {
+      final selection = await showDialog<WindowsLanAccessSelection>(context: context,
+        builder: (_) => WindowsLanAccessDialog(endpoint: _idController.id,
+          editEndpoint: true, translateText: translate));
+      if (selection == null || !context.mounted) return;
+      await connect(context, selection.endpoint, password: selection.payload,
+        lanAccessSelected: true);
+      return;
+    }
     _reloadLanIdentities();
     var selectedIdentityId = lanIdentityManualValue;
     var bindIdentity = true;

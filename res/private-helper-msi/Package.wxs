@@ -5,7 +5,7 @@
            Version="$(var.ReleaseVersion)" Language="1033" Scope="perUser"
            UpgradeCode="76b63726-899a-49a7-95df-52ef79d7c8c2" InstallerVersion="500">
     <MajorUpgrade DowngradeErrorMessage="A newer SubnetDesk Helper is already installed."
-                  Schedule="afterInstallInitialize" />
+                  Schedule="afterInstallInitialize" AllowSameVersionUpgrades="yes" />
     <Launch Condition="NOT ALLUSERS" Message="SubnetDesk Helper installs for the current user only." />
     <Launch Condition="VersionNT64" Message="SubnetDesk Helper requires 64-bit Windows." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
