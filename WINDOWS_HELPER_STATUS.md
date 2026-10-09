@@ -1,5 +1,23 @@
 # SubnetDesk Windows helper status
 
+## Code/buzzer/English build84 execution:2026-10-09
+
+User explicitly started execution and identified forced Arabic manual-approval wait
+message. Production9a9337b/commonb56ada4 now implements reusable7200s code, unchanged
+deadline/attempts on success, separate120s guessing window/cooldown. Five guesses revoke
+and cool down even across windows; New code remains deliberate override. Lock/stop gates
+still deny/hide access but suspend retains unexpired main-process code and clears manual
+pending; wall lifetime continues. Main restart discards code; CM restart does not.
+Dedicated0.6s native app PCM buzzer replaces Windows Default Beep; errors visible,
+voice-priority/owned stop prevents buzzer mute/disposal from interrupting call ringing.
+Visual/mute/session/rate/nonactivating dock behavior retained. Two forced Arabic UI
+messages replaced by English translation keys; Flutter UI-wide source guard added.
+No user-chat/name/locale/security/credential changes, no wire/receiver-parity expansion.
+Early Flutter106, standalone policy11 and fresh runner CTest3 PASS. Both full private
+1.3.6/build84 builds in progress, not delivered/installed/accepted. Old83 home observed
+with120s/single-use/listener21118/no established session; no original/service mutation.
+Physical buzzer, real request wording and paired session acceptance remain pending.
+
 ## Build83 externally launched / reusable-code and buzzer plan:2026-10-09
 
 Read-only process/file/native hash confirms mainPID23120 runs exact Windows1.3.5+83
