@@ -72,10 +72,5 @@ $taskLicense = $taskLicense.Replace('\','\\').Replace('{','\{').Replace('}','\}'
 & $WixPath build "$PSScriptRoot\Package.wxs" "$WorkPath\Payload.wxs" -arch x64 -culture en-us -ext $UiExtensionPath -d "ReleaseVersion=$ReleaseVersion" -d "ReleaseBuild=$ReleaseBuild" -d "LicenseRtf=$WorkPath\License.rtf" -out $OutputPath -intermediatefolder "$WorkPath\obj" -pdbtype none
 if ($LASTEXITCODE -ne 0) { throw 'Private MSI compilation/validation failed.' }
 # Explicit Windows Installer ICE validation is separate from WiX compilation.
-# Some CLI versions emit ICE errors without a failing exit code: inspect both.
-$taskValidation = & $WixPath msi validate $OutputPath 2>&1
-$taskValidation | Set-Content -LiteralPath "$WorkPath\ice-validation.log" -Encoding utf8
-if ($LASTEXITCODE -ne 0 -or ($taskValidation -match 'error WIX|error ICE')) { throw 'Windows Installer ICE validation failed.' }
-if ($taskValidation -match 'warning WIX(?!1076: ICE91:)') { throw 'Unexpected MSI validation warning.' }
-# ICE91 documents intentional per-user-only files, not a dual-scope install.
+& "$PSScriptRoot\validate.ps1" -MsiPath $OutputPath -WixPath $WixPath -LogPath "$WorkPath\ice-validation.log" -ReleaseVersion $ReleaseVersion -ReleaseBuild $ReleaseBuild
 Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256

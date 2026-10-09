@@ -12,8 +12,11 @@ HKCU key paths. Work/output directories must not already exist.
 Compilation is followed by explicit Windows Installer ICE validation; check diagnostic
 text as well as exit code. Empty installation directories get uninstall cleanup entries
 (no recursive/wildcard file deletion). Neutral font asset language metadata does not
-register fonts with Windows. Only ICE91's intentional per-user-only warning is accepted;
-all errors and other ICE warnings fail the build. Readonly verification extracts every
+register fonts with Windows. ICE91's intentional per-user-only warning is accepted;
+build86 additionally permits only the exact ICE61 equal-public-version diagnostic
+and verifies the inclusive Upgrade table flag. All errors and other ICE warnings fail.
+validate.ps1 can validate an existing MSI without rebuilding or installing it.
+Readonly verification extracts every
 MSI payload file using 7-Zip and compares hashes with the version-checked staged bundle.
 
 Installs to LocalAppData\Programs\SubnetDeskHelper and adds a Start menu shortcut.
@@ -30,6 +33,7 @@ Windows Installer compares only the public three-part ProductVersion, not
 HELPER_BUILD. Consequently it cannot prevent rollback between private builds of
 the same public version: do not reinstall build85 over build86. Higher public
 versions retain the normal major-upgrade downgrade gate.
+See https://docs.firegiant.com/wix/schema/wxs/majorupgrade/ (AllowSameVersionUpgrades).
 
 Windows signing certificate is not supplied: MSI is unsigned. Android continues
 to use the existing private helper signer. Do not include signing keys in archives.
