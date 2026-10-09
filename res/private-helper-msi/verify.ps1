@@ -30,7 +30,7 @@ $taskDirectories = @{}
 foreach ($taskRow in @(Query 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $taskDirectories[$taskRow[0]] = @($taskRow[1], ($taskRow[2] -split '\|')[-1]) }
 if ($taskDirectories['INSTALLFOLDER'][0] -ne 'HelperPrograms' -or $taskDirectories['INSTALLFOLDER'][1] -ne 'SubnetDeskHelper' -or $taskDirectories['HelperPrograms'][0] -ne 'LocalAppDataFolder') { throw 'Unexpected install directory.' }
 $taskTables = @(Query 'SELECT `Name` FROM `_Tables`' 1 | ForEach-Object { $_[0] })
-foreach ($taskForbidden in @('ServiceInstall','ServiceControl','Environment','MoveFiles','RemoveIniFile','IniFile','SelfReg','RemoveRegistry')) {
+foreach ($taskForbidden in @('ServiceInstall','ServiceControl','Environment','MoveFiles','RemoveIniFile','IniFile','SelfReg','RemoveRegistry','Font','Class','ProgId','Extension','MIME','TypeLib','ODBCDriver','ODBCDataSource')) {
     if ($taskTables -contains $taskForbidden -and @(Query ('SELECT * FROM `' + $taskForbidden + '`') 1).Count) { throw "Unexpected installer mutation table: $taskForbidden" }
 }
 if ($taskTables -contains 'CustomAction') {

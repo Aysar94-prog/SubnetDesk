@@ -30,6 +30,7 @@ $taskXml = [Text.StringBuilder]::new()
 [void]$taskXml.AppendLine('<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"><Fragment>')
 $taskDirectories = @{ '' = 'INSTALLFOLDER' }
 $taskFiles = @(Get-ChildItem -LiteralPath $taskBundle -Recurse -File | Sort-Object FullName)
+$taskInstaller = New-Object -ComObject WindowsInstaller.Installer
 foreach ($taskFile in $taskFiles) {
     $taskRelative = $taskFile.FullName.Substring($taskBundle.Length+1)
     if ($taskRelative -match '(?i)(^|\\)(\.private|\.git|signing)(\\|$)|\.(pfx|jks|keystore|pdb)$') { throw 'Private/debug material in MSI input.' }
@@ -49,10 +50,16 @@ foreach ($taskFile in $taskFiles) {
     # HKCU key paths are required for a per-user component. Each path has a
     # stable identifier; no user configuration or OS-wide registry is modified.
     [void]$taskXml.AppendLine('<DirectoryRef Id="' + $taskDirectories[$taskParent] + '"><Component Id="C' + $taskId + '" Guid="' + (StableGuid $taskRelative) + '">')
-    [void]$taskXml.AppendLine('<File Id="F' + $taskId + '" Source="' + (XmlText $taskFile.FullName) + '" Name="' + (XmlText $taskFile.Name) + '" />')
+    $taskLanguage = if ($taskInstaller.FileVersion($taskFile.FullName, $false) -and -not $taskInstaller.FileVersion($taskFile.FullName, $true)) { ' DefaultLanguage="0"' } else { '' }
+    [void]$taskXml.AppendLine('<File Id="F' + $taskId + '" Source="' + (XmlText $taskFile.FullName) + '" Name="' + (XmlText $taskFile.Name) + '"' + $taskLanguage + ' />')
     [void]$taskXml.AppendLine('<RegistryValue Root="HKCU" Key="Software\SubnetDeskPrivate\HelperInstaller\Files" Name="' + $taskId + '" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>')
 }
-[void]$taskXml.AppendLine('<ComponentGroup Id="HelperPayload">')
+[void]$taskXml.AppendLine('<DirectoryRef Id="INSTALLFOLDER"><Component Id="HelperFolders" Guid="' + (StableGuid ':folders') + '">')
+foreach ($taskDirectory in @($taskDirectories.Values) + @('HelperPrograms')) {
+    [void]$taskXml.AppendLine('<RemoveFolder Id="R' + $taskDirectory + '" Directory="' + $taskDirectory + '" On="uninstall" />')
+}
+[void]$taskXml.AppendLine('<RegistryValue Root="HKCU" Key="Software\SubnetDeskPrivate\HelperInstaller" Name="Folders" Type="integer" Value="1" KeyPath="yes" /></Component></DirectoryRef>')
+[void]$taskXml.AppendLine('<ComponentGroup Id="HelperPayload"><ComponentRef Id="HelperFolders" />')
 foreach ($taskFile in $taskFiles) {
     [void]$taskXml.AppendLine('<ComponentRef Id="C' + (StableId ('file:' + $taskFile.FullName.Substring($taskBundle.Length+1))) + '" />')
 }
@@ -64,4 +71,11 @@ $taskLicense = $taskLicense.Replace('\','\\').Replace('{','\{').Replace('}','\}'
 [IO.File]::WriteAllText("$WorkPath\License.rtf", '{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}}\f0\fs16 ' + $taskLicense + '}', [Text.Encoding]::ASCII)
 & $WixPath build "$PSScriptRoot\Package.wxs" "$WorkPath\Payload.wxs" -arch x64 -culture en-us -ext $UiExtensionPath -d "ReleaseVersion=$ReleaseVersion" -d "ReleaseBuild=$ReleaseBuild" -d "LicenseRtf=$WorkPath\License.rtf" -out $OutputPath -intermediatefolder "$WorkPath\obj" -pdbtype none
 if ($LASTEXITCODE -ne 0) { throw 'Private MSI compilation/validation failed.' }
+# Explicit Windows Installer ICE validation is separate from WiX compilation.
+# Some CLI versions emit ICE errors without a failing exit code: inspect both.
+$taskValidation = & $WixPath msi validate $OutputPath 2>&1
+$taskValidation | Set-Content -LiteralPath "$WorkPath\ice-validation.log" -Encoding utf8
+if ($LASTEXITCODE -ne 0 -or ($taskValidation -match 'error WIX|error ICE')) { throw 'Windows Installer ICE validation failed.' }
+if ($taskValidation -match 'warning WIX(?!1076: ICE91:)') { throw 'Unexpected MSI validation warning.' }
+# ICE91 documents intentional per-user-only files, not a dual-scope install.
 Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256

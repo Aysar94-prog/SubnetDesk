@@ -9,6 +9,13 @@ UiExtensionPath. The source license is rendered into a generated RTF. Payload XM
 is generated from all runtime/license files, with deterministic component IDs and
 HKCU key paths. Work/output directories must not already exist.
 
+Compilation is followed by explicit Windows Installer ICE validation; check diagnostic
+text as well as exit code. Empty installation directories get uninstall cleanup entries
+(no recursive/wildcard file deletion). Neutral font asset language metadata does not
+register fonts with Windows. Only ICE91's intentional per-user-only warning is accepted;
+all errors and other ICE warnings fail the build. Readonly verification extracts every
+MSI payload file using 7-Zip and compares hashes with the version-checked staged bundle.
+
 Installs to LocalAppData\Programs\SubnetDeskHelper and adds a Start menu shortcut.
 Uses an independent UpgradeCode, not the upstream product. The only custom action
 is WiX's user-clicked license Print button; it is absent from the install execution
