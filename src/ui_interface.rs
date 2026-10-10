@@ -657,10 +657,16 @@ pub fn peer_exists(id: &str) -> bool {
 
 #[inline]
 pub fn get_lan_peers() -> Vec<HashMap<&'static str, String>> {
+    let now_ms = hbb_common::get_time();
     config::LanPeers::load()
         .peers
         .iter()
         .map(|peer| {
+            let reachability = match peer.reachability(now_ms) {
+                config::LanReachability::Online => "online",
+                config::LanReachability::Unknown => "unknown",
+                config::LanReachability::Offline => "offline",
+            };
             HashMap::<&str, String>::from_iter([
                 (
                     "id",
@@ -674,6 +680,11 @@ pub fn get_lan_peers() -> Vec<HashMap<&'static str, String>> {
                 ("hostname", peer.hostname.clone()),
                 ("platform", peer.platform.clone()),
                 ("fingerprint", peer.fingerprint.clone()),
+                // Discovery-derived tri-state reachability and timestamps,
+                // distinct from the legacy boolean `online` projection.
+                ("reachability", reachability.to_owned()),
+                ("last_seen_at", peer.last_seen_at.to_string()),
+                ("last_known_endpoint", peer.endpoint.clone()),
             ])
         })
         .collect()

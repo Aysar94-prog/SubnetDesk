@@ -27,6 +27,10 @@ struct FavoritePeerSource {
 struct FavoriteTrayEntry {
     endpoint: String,
     label: String,
+    /// The device's verified fingerprint, if this favorite has one (empty
+    /// for a legacy, unmatched favorite). Used to launch via
+    /// `--connect-saved` instead of a literal `--connect <endpoint>`.
+    fingerprint: String,
 }
 
 fn sanitize_menu_text(value: &str) -> String {
@@ -56,6 +60,7 @@ fn sanitize_menu_text(value: &str) -> String {
 fn favorite_tray_entries(
     favorites: Vec<String>,
     sources: Vec<FavoritePeerSource>,
+    fingerprints: &HashMap<String, String>,
 ) -> Vec<FavoriteTrayEntry> {
     let sources = sources
         .into_iter()
@@ -85,7 +90,12 @@ fn favorite_tray_entries(
             } else {
                 format!("{display_name} - {safe_endpoint}")
             };
-            Some(FavoriteTrayEntry { endpoint, label })
+            let fingerprint = fingerprints.get(&endpoint).cloned().unwrap_or_default();
+            Some(FavoriteTrayEntry {
+                endpoint,
+                label,
+                fingerprint,
+            })
         })
         .collect()
 }
@@ -116,7 +126,8 @@ fn load_favorite_tray_entries() -> Vec<FavoriteTrayEntry> {
             hostname: peer.hostname,
         })
         .collect();
-    favorite_tray_entries(favorites, sources)
+    let fingerprints = LocalConfig::load_favorite_fingerprints();
+    favorite_tray_entries(favorites, sources, &fingerprints)
 }
 
 fn service_action_translation_key(service_enabled: bool) -> &'static str {
@@ -138,9 +149,19 @@ fn set_service_enabled(enabled: bool) {
     crate::ipc::set_option("stop-service", if enabled { "" } else { "Y" });
 }
 
-fn connect_favorite(endpoint: &str) {
-    if let Err(err) = crate::run_me(vec!["--connect", endpoint]) {
-        log::error!("Failed to connect to favorite peer {endpoint}: {err}");
+fn connect_favorite(entry: &FavoriteTrayEntry) {
+    // A verified fingerprint launches via `--connect-saved`, which re-resolves
+    // the device's current endpoint and hard-fails on a fingerprint mismatch
+    // instead of silently connecting to whatever now occupies the old IP. A
+    // legacy, unmatched favorite (no fingerprint yet) falls back to the
+    // literal endpoint, preserving its existing manual-connect behavior.
+    let result = if entry.fingerprint.is_empty() {
+        crate::run_me(vec!["--connect", &entry.endpoint])
+    } else {
+        crate::run_me(vec!["--connect-saved", &entry.fingerprint])
+    };
+    if let Err(err) = result {
+        log::error!("Failed to connect to favorite peer {}: {err}", entry.endpoint);
     }
 }
 
@@ -177,7 +198,7 @@ fn update_service_menu_item(item: &tray_icon::menu::IconMenuItem, service_enable
 #[derive(Default)]
 struct FavoriteMenuState {
     entries: Option<Vec<FavoriteTrayEntry>>,
-    items: Vec<(tray_icon::menu::IconMenuItem, Option<String>)>,
+    items: Vec<(tray_icon::menu::IconMenuItem, Option<FavoriteTrayEntry>)>,
 }
 
 impl FavoriteMenuState {
@@ -210,16 +231,16 @@ impl FavoriteMenuState {
                     log::error!("Failed to append favorite tray item: {err}");
                     continue;
                 }
-                self.items.push((item, Some(entry.endpoint.clone())));
+                self.items.push((item, Some(entry.clone())));
             }
         }
         self.entries = Some(entries);
     }
 
-    fn endpoint_for_event(&self, event: &tray_icon::menu::MenuEvent) -> Option<&str> {
-        self.items.iter().find_map(|(item, endpoint)| {
+    fn target_for_event(&self, event: &tray_icon::menu::MenuEvent) -> Option<&FavoriteTrayEntry> {
+        self.items.iter().find_map(|(item, entry)| {
             if event.id == item.id() {
-                endpoint.as_deref()
+                entry.as_ref()
             } else {
                 None
             }
@@ -462,8 +483,8 @@ fn make_tray(show_icon: bool) -> hbb_common::ResultType<()> {
                     }
                 }
             }
-            if let Some(endpoint) = favorite_menu_state.endpoint_for_event(&event) {
-                connect_favorite(endpoint);
+            if let Some(entry) = favorite_menu_state.target_for_event(&event) {
+                connect_favorite(entry);
             }
         }
 
@@ -616,7 +637,7 @@ mod tests {
             },
         ];
 
-        let entries = favorite_tray_entries(favorites, sources);
+        let entries = favorite_tray_entries(favorites, sources, &HashMap::new());
 
         assert_eq!(
             entries,
@@ -624,10 +645,12 @@ mod tests {
                 FavoriteTrayEntry {
                     endpoint: "192.168.1.12:21118".to_owned(),
                     label: "Meeting Room - 192.168.1.12:21118".to_owned(),
+                    fingerprint: String::new(),
                 },
                 FavoriteTrayEntry {
                     endpoint: "192.168.1.11:21118".to_owned(),
                     label: "Design Desk - 192.168.1.11:21118".to_owned(),
+                    fingerprint: String::new(),
                 },
             ]
         );
@@ -646,7 +669,7 @@ mod tests {
             alias: String::new(),
         }];
 
-        let entries = favorite_tray_entries(favorites, sources);
+        let entries = favorite_tray_entries(favorites, sources, &HashMap::new());
 
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].label, "Lab && Mac - 10.0.0.1:21118");
@@ -682,9 +705,26 @@ mod tests {
             },
         ];
 
-        let entries = favorite_tray_entries(vec![endpoint], sources);
+        let entries = favorite_tray_entries(vec![endpoint], sources, &HashMap::new());
 
         assert_eq!(entries[0].label, "Current Mac - 10.0.0.8:21118");
+    }
+
+    #[test]
+    fn favorite_entries_carry_a_verified_fingerprint_when_known() {
+        let endpoint = "10.0.0.9:21118".to_owned();
+        let fingerprint = "a".repeat(64);
+        let fingerprints = HashMap::from([(endpoint.clone(), fingerprint.clone())]);
+
+        let entries = favorite_tray_entries(vec![endpoint.clone()], vec![], &fingerprints);
+
+        assert_eq!(entries[0].fingerprint, fingerprint);
+
+        // An endpoint absent from the fingerprint map (a legacy, unmatched
+        // favorite) must fall back to an empty fingerprint, not panic or
+        // guess one.
+        let entries = favorite_tray_entries(vec![endpoint], vec![], &HashMap::new());
+        assert!(entries[0].fingerprint.is_empty());
     }
 
     #[cfg(target_os = "macos")]

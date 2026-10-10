@@ -47,7 +47,8 @@ pub fn core_main() -> Option<Vec<String>> {
     let mut _is_flutter_invoke_new_connection = false;
     let mut no_server = false;
     let mut arg_exe = Default::default();
-    for arg in std::env::args() {
+    let mut args_iter = std::env::args();
+    while let Some(arg) = args_iter.next() {
         if i == 0 {
             arg_exe = arg;
         } else if i > 0 {
@@ -73,6 +74,31 @@ pub fn core_main() -> Option<Vec<String>> {
                 _is_quick_support = true;
             } else if arg == "--no-server" {
                 no_server = true;
+            } else if arg == "--connect-saved" {
+                // Resolve the saved device's current best-known endpoint here,
+                // in Rust, from its verified fingerprint, then continue as an
+                // ordinary `--connect <endpoint>` invocation — this reuses the
+                // existing saved-device fingerprint verification in
+                // `Client::start` without needing a separate code path all
+                // the way down. An unrecognized or malformed fingerprint is
+                // rejected outright rather than ever being treated as a
+                // literal endpoint.
+                let fingerprint = args_iter.next();
+                match fingerprint.as_deref().and_then(crate::lan::resolve_saved_endpoint) {
+                    Some(endpoint) => {
+                        #[cfg(feature = "flutter")]
+                        {
+                            _is_flutter_invoke_new_connection = true;
+                        }
+                        args.push("--connect".to_owned());
+                        args.push(endpoint);
+                    }
+                    None => {
+                        log::error!(
+                            "Rejected --connect-saved: unknown or invalid device fingerprint"
+                        );
+                    }
+                }
             } else {
                 args.push(arg);
             }
@@ -617,6 +643,25 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
             | "--terminal" | "--rdp" => {
                 authority = Some((&arg.to_string()[2..]).to_owned());
                 id = args.next();
+            }
+            "--connect-saved" => {
+                // Same resolve-then-relay-as-`--connect` approach as the
+                // single-process path in `core_main`: an already-running
+                // process also must verify the fingerprint and resolve it to
+                // an endpoint itself, never forward an unresolved fingerprint
+                // through the URI relay as if it were an endpoint.
+                let fingerprint = args.next();
+                match fingerprint.as_deref().and_then(crate::lan::resolve_saved_endpoint) {
+                    Some(endpoint) => {
+                        authority = Some("connect".to_owned());
+                        id = Some(endpoint);
+                    }
+                    None => {
+                        log::error!(
+                            "Rejected --connect-saved: unknown or invalid device fingerprint"
+                        );
+                    }
+                }
             }
             _ => {}
         }

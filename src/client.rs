@@ -269,7 +269,7 @@ impl Client {
         peer: &str,
         _conn_type: ConnType,
         interface: impl Interface,
-    ) -> ResultType<(Stream, Vec<u8>, String)> {
+    ) -> ResultType<(Stream, Vec<u8>, String, Option<String>)> {
         if !crate::camera_access::allowed(_conn_type == ConnType::VIEW_CAMERA) {
             bail!(crate::camera_access::DISABLED_MESSAGE);
         }
@@ -289,7 +289,8 @@ impl Client {
         let requested = hbb_common::lan::Endpoint::parse(peer)?
             .authority()
             .to_owned();
-        let (expected_fingerprint, mut candidates) = crate::lan::connection_candidates(&requested);
+        let (intent, expected_fingerprint, mut candidates) =
+            crate::lan::connection_candidates(&requested);
         let mut discovery = expected_fingerprint.as_ref().map(|_| {
             tokio::spawn(async {
                 if let Err(err) = crate::lan::discover_async().await {
@@ -332,14 +333,29 @@ impl Client {
                         continue;
                     }
                 };
+                let mut verified_fingerprint = None;
                 if let Some(expected) = expected_fingerprint.as_ref() {
-                    if !identity.fingerprint.eq_ignore_ascii_case(expected) {
+                    let matches = identity.fingerprint.eq_ignore_ascii_case(expected);
+                    if !matches {
                         log::warn!(
-                            "LAN endpoint {} presented fingerprint {}, expected {}; requesting user confirmation",
+                            "LAN endpoint {} presented fingerprint {}, expected {}",
                             endpoint,
                             identity.fingerprint,
                             expected
                         );
+                        if intent == crate::lan::ConnectionIntent::SavedDevice {
+                            // A saved device's identity is proven only by a prior
+                            // verified connection. A mismatch here means the
+                            // endpoint is occupied by a different device (e.g. an
+                            // IP reassignment); never trust or log into it, and
+                            // never surface a re-trust prompt for it.
+                            errors.push(format!(
+                                "{endpoint}: fingerprint mismatch for saved device"
+                            ));
+                            continue;
+                        }
+                    } else if intent == crate::lan::ConnectionIntent::SavedDevice {
+                        verified_fingerprint = Some(identity.fingerprint.clone());
                     }
                 }
 
@@ -351,14 +367,19 @@ impl Client {
                     endpoint,
                     identity.fingerprint
                 );
-                return Ok((stream, identity.device_public_key, connected_endpoint));
+                return Ok((
+                    stream,
+                    identity.device_public_key,
+                    connected_endpoint,
+                    verified_fingerprint,
+                ));
             }
 
             if let Some(discovery) = discovery.take() {
                 if let Err(err) = discovery.await {
                     log::debug!("LAN discovery fallback task failed: {err}");
                 }
-                let (_, refreshed) = crate::lan::connection_candidates(&requested);
+                let (_, _, refreshed) = crate::lan::connection_candidates(&requested);
                 candidates = refreshed;
                 if candidates
                     .iter()
@@ -1938,22 +1959,17 @@ impl LoginConfigHandler {
         };
         if connected_endpoint != self.id && !self.lan_fingerprint.is_empty() {
             self.config.store(&connected_endpoint);
-            let mut changed = false;
-            let mut seen = HashSet::new();
-            let favorites = LocalConfig::get_fav()
-                .into_iter()
-                .filter_map(|favorite| {
-                    let favorite = if favorite == self.id {
-                        changed = true;
-                        connected_endpoint.clone()
-                    } else {
-                        favorite
-                    };
-                    seen.insert(favorite.clone()).then_some(favorite)
-                })
-                .collect::<Vec<_>>();
-            if changed {
-                LocalConfig::set_fav(favorites);
+            // Atomically update any favorite matching this verified device's
+            // fingerprint to its new endpoint under the cross-process
+            // favorites lock. This replaces the old unlocked
+            // get_fav()/set_fav() endpoint-string rewrite, which raced with
+            // concurrent edits from another process and matched by the old
+            // connection string rather than the device's verified identity.
+            if let Err(err) = LocalConfig::update_favorite_endpoint_for_fingerprint(
+                &self.lan_fingerprint,
+                &connected_endpoint,
+            ) {
+                log::error!("Failed to update favorite endpoint for verified device: {err}");
             }
             LocalConfig::set_remote_id(&connected_endpoint);
         }
@@ -3071,6 +3087,7 @@ pub async fn confirm_lan_device(
     receiver: &mut UnboundedReceiver<Data>,
     endpoint: &str,
     device_public_key: &[u8],
+    verified_fingerprint: Option<&str>,
 ) -> bool {
     let endpoint = match hbb_common::lan::Endpoint::parse(endpoint) {
         Ok(value) => value,
@@ -3083,6 +3100,19 @@ pub async fn confirm_lan_device(
     let trusted = Config::get_trusted_lan_fingerprint(endpoint.authority());
     if trusted.as_deref() == Some(fingerprint.as_str()) {
         return true;
+    }
+    // `Client::start` already verified this fingerprint against the saved
+    // device's prior, verified identity before returning. Record trust
+    // without prompting; a saved-device mismatch never reaches this point,
+    // since `Client::start` rejects that candidate outright.
+    if let Some(verified) = verified_fingerprint {
+        if verified.eq_ignore_ascii_case(&fingerprint) {
+            if let Err(err) = Config::trust_lan_fingerprint(endpoint.authority(), &fingerprint) {
+                log::error!("Failed to save verified LAN device fingerprint: {err}");
+                return false;
+            }
+            return true;
+        }
     }
     if trusted.is_none() && Config::is_trusted_lan_fingerprint(&fingerprint) {
         if let Err(err) = Config::trust_lan_fingerprint(endpoint.authority(), &fingerprint) {

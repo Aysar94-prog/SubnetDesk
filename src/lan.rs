@@ -10,7 +10,10 @@ use hbb_common::{
     rendezvous_proto::*,
     tokio::{
         self,
-        sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        sync::{
+            broadcast,
+            mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        },
     },
     ResultType,
 };
@@ -18,7 +21,11 @@ use hbb_common::{
 use std::{
     collections::{BTreeSet, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket},
-    time::Instant,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex as StdMutex, OnceLock,
+    },
+    time::{Duration, Instant},
 };
 
 const LAN_DISCOVERY_PORT: u16 = 21_119;
@@ -162,29 +169,156 @@ pub(super) fn start_listening() -> ResultType<()> {
     }
 }
 
-pub(crate) async fn discover_async() -> ResultType<()> {
+/// The normal collection window never ends before this, even if no pongs
+/// arrive at all, so a quiet LAN still gets a fair chance to respond.
+const DISCOVERY_MIN_COLLECTION: Duration = Duration::from_secs(3);
+/// After the minimum window, collection ends once this long passes with no
+/// *valid* pong (pings and malformed/nonmatching packets don't reset this).
+const DISCOVERY_QUIET_PERIOD: Duration = Duration::from_millis(500);
+/// Collection always stops here, even if valid pongs keep arriving, so
+/// continuous LAN traffic can't turn every scan into a timeout. A scan that
+/// stops for this reason is reported as successful-with-limited-coverage
+/// rather than failed, since the data collected so far is still usable.
+const DISCOVERY_HARD_CAP: Duration = Duration::from_secs(6);
+/// Overall budget for one scan, including collection plus worker join,
+/// reconciliation, and the checked commit to disk. The gap between this and
+/// `DISCOVERY_HARD_CAP` is reserved for that cleanup.
+const DISCOVERY_OVERALL_BUDGET: Duration = Duration::from_secs(8);
+
+/// Outcome of one discovery scan, shared with every caller that joined it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiscoveryOutcome {
+    Success,
+    /// Collection was cut off (hard cap, or a transport didn't start) before
+    /// every enabled transport completed its normal window. Positive
+    /// observations collected so far are still committed and usable; a
+    /// limited scan must never be allowed to apply negative evidence.
+    LimitedCoverage,
+    /// The overall budget elapsed before the scan could reconcile and commit.
+    /// No result was published for this scan.
+    Timeout,
+    /// No discovery transport could even start.
+    TransportFailure,
+}
+
+/// Monotonically increasing scan identifier, used so the cross-process
+/// `_lan_peers` merge can tell an older, still-in-flight scan's result apart
+/// from the newest one and refuse to let it apply negative evidence.
+static SCAN_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Holds the in-flight scan's result channel, if any, so concurrent callers
+/// in this process join one scan instead of each starting their own. `None`
+/// when no scan is running.
+fn discovery_coordinator() -> &'static StdMutex<Option<broadcast::Sender<DiscoveryOutcome>>> {
+    static COORDINATOR: OnceLock<StdMutex<Option<broadcast::Sender<DiscoveryOutcome>>>> =
+        OnceLock::new();
+    COORDINATOR.get_or_init(|| StdMutex::new(None))
+}
+
+/// Runs a LAN discovery scan, or joins one already running in this process.
+/// A caller may wrap this in its own timeout without affecting the scan
+/// itself or other joined callers — only this caller's own wait ends early.
+pub(crate) async fn discover_coordinated() -> DiscoveryOutcome {
+    let mut joined = None;
+    {
+        let mut coordinator = discovery_coordinator().lock().unwrap();
+        match coordinator.as_ref() {
+            Some(sender) => joined = Some(sender.subscribe()),
+            None => {
+                let (sender, _receiver) = broadcast::channel(1);
+                *coordinator = Some(sender);
+            }
+        }
+    }
+    if let Some(mut receiver) = joined {
+        return receiver.recv().await.unwrap_or(DiscoveryOutcome::TransportFailure);
+    }
+
+    let outcome = run_discovery_scan().await;
+
+    let sender = discovery_coordinator().lock().unwrap().take();
+    if let Some(sender) = sender {
+        // No other receivers is not an error: it just means nobody joined.
+        let _ = sender.send(outcome);
+    }
+    outcome
+}
+
+async fn run_discovery_scan() -> DiscoveryOutcome {
+    let scan_start = Instant::now();
+    let generation = SCAN_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let hit_hard_cap = Arc::new(AtomicBool::new(false));
+
     let (tx, rx) = unbounded_channel::<_>();
-    let mut worker_started = false;
+    let mut udp_ok = false;
+    let mut udp_handles = Vec::new();
     match send_query() {
         Ok(sockets) => {
-            spawn_wait_responses(sockets, tx.clone());
-            worker_started = true;
+            udp_handles = spawn_wait_responses(sockets, tx.clone(), scan_start, hit_hard_cap.clone());
+            udp_ok = true;
         }
         Err(err) => log::warn!("UDP LAN discovery unavailable: {err}"),
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    match crate::lan_mdns::spawn_browse(tx.clone()) {
-        Ok(()) => worker_started = true,
-        Err(err) => log::warn!("mDNS discovery unavailable: {err}"),
-    }
-    drop(tx);
-    if !worker_started {
-        bail!("No LAN discovery transport is available");
-    }
-    handle_received_peers(rx).await?;
+    let mdns_ok = match crate::lan_mdns::spawn_browse(tx.clone()) {
+        Ok(()) => true,
+        Err(err) => {
+            log::warn!("mDNS discovery unavailable: {err}");
+            false
+        }
+    };
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let mdns_ok = true; // Not an enabled transport on this platform.
 
-    log::info!("discover ping done");
-    Ok(())
+    drop(tx);
+    if !udp_ok && !mdns_ok {
+        return DiscoveryOutcome::TransportFailure;
+    }
+
+    let deadline = scan_start + DISCOVERY_OVERALL_BUDGET;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let processing = handle_received_peers(rx, generation, udp_ok, mdns_ok, hit_hard_cap.clone());
+    let processing_result = tokio::time::timeout(remaining, processing).await;
+
+    // Join the raw UDP worker threads (bounded by the hard cap, so this
+    // returns promptly) before releasing the coordinator slot, so a new scan
+    // never starts while a prior one's workers might still be writing.
+    if !udp_handles.is_empty() {
+        let _ = tokio::task::spawn_blocking(move || {
+            for handle in udp_handles {
+                let _ = handle.join();
+            }
+        })
+        .await;
+    }
+
+    match processing_result {
+        Ok(Ok(())) => {
+            if hit_hard_cap.load(Ordering::Relaxed) || !udp_ok || !mdns_ok {
+                DiscoveryOutcome::LimitedCoverage
+            } else {
+                DiscoveryOutcome::Success
+            }
+        }
+        Ok(Err(err)) => {
+            log::warn!("LAN discovery persistence failed: {err}");
+            DiscoveryOutcome::Timeout
+        }
+        Err(_) => {
+            log::warn!("LAN discovery scan exceeded its overall budget");
+            DiscoveryOutcome::Timeout
+        }
+    }
+}
+
+pub(crate) async fn discover_async() -> ResultType<()> {
+    match discover_coordinated().await {
+        DiscoveryOutcome::TransportFailure => bail!("No LAN discovery transport is available"),
+        outcome => {
+            log::info!("discover ping done: {outcome:?}");
+            Ok(())
+        }
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -192,26 +326,87 @@ pub async fn discover() -> ResultType<()> {
     discover_async().await
 }
 
-pub(crate) fn connection_candidates(endpoint: &str) -> (Option<String>, Vec<String>) {
+/// Distinguishes a connection whose expected identity comes from verified
+/// evidence (a prior successful, fingerprint-recorded connection) from one
+/// resolved only from unauthenticated LAN advertisements (UDP/mDNS discovery
+/// cache) or typed manually. Only `SavedDevice` may be trusted or logged into
+/// automatically; a fingerprint mismatch for `SavedDevice` must hard-fail
+/// rather than fall through to a trust-on-first-use/re-trust prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionIntent {
+    SavedDevice,
+    ManualEndpoint,
+}
+
+pub(crate) fn connection_candidates(
+    endpoint: &str,
+) -> (ConnectionIntent, Option<String>, Vec<String>) {
     let recent = config::LocalConfig::get_recent_lan_endpoints();
+    let favorites = config::LocalConfig::get_favorites();
     let peers = config::LanPeers::load().peers;
-    connection_candidates_from(endpoint, &recent, &peers)
+    connection_candidates_from(endpoint, &recent, &favorites, &peers)
+}
+
+/// Resolves a saved device's current best-known endpoint from its verified
+/// fingerprint, for the tray/CLI `--connect-saved` entry point. Prefers the
+/// freshest verified endpoint (a recent successful connection); falls back
+/// to the canonical favorite's last-known endpoint. Returns `None` for an
+/// unrecognized or malformed fingerprint — callers must treat that as a
+/// rejection, never fall back to treating the fingerprint as an endpoint.
+pub(crate) fn resolve_saved_endpoint(fingerprint: &str) -> Option<String> {
+    let fingerprint = fingerprint.to_ascii_lowercase();
+    if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    if let Some(endpoint) = config::LocalConfig::get_recent_lan_endpoints()
+        .into_iter()
+        .find(|recent| recent.fingerprint.eq_ignore_ascii_case(&fingerprint))
+        .map(|recent| recent.endpoint)
+    {
+        return Some(endpoint);
+    }
+    config::LocalConfig::get_favorites()
+        .into_iter()
+        .find(|favorite| favorite.fingerprint.eq_ignore_ascii_case(&fingerprint))
+        .map(|favorite| favorite.endpoint)
+        .filter(|endpoint| !endpoint.is_empty())
 }
 
 fn connection_candidates_from(
     endpoint: &str,
     recent: &[config::RecentLanEndpoint],
+    favorites: &[config::FavoriteDevice],
     peers: &[config::DiscoveryPeer],
-) -> (Option<String>, Vec<String>) {
+) -> (ConnectionIntent, Option<String>, Vec<String>) {
     let Ok(requested) = hbb_common::lan::Endpoint::parse(endpoint) else {
-        return (None, vec![endpoint.to_owned()]);
+        return (ConnectionIntent::ManualEndpoint, None, vec![endpoint.to_owned()]);
     };
     let requested = requested.authority().to_owned();
-    let mut fingerprint = recent
+    // Only a fingerprint recorded from a prior verified connection (`recent`)
+    // or a canonical favorite (itself only ever assigned from unambiguous
+    // verified evidence, see `LocalConfig::migrate_legacy_favorites_if_needed`
+    // and `update_favorite_endpoint_for_fingerprint`) proves identity. The
+    // discovery cache (`peers`) merely reflects unauthenticated UDP/mDNS
+    // advertisements and must never grant saved intent, since another device
+    // can claim the same IP or fingerprint.
+    let verified_fingerprint = recent
         .iter()
         .find(|recent| recent.endpoint == requested)
-        .map(|recent| recent.fingerprint.to_ascii_lowercase());
+        .map(|recent| recent.fingerprint.to_ascii_lowercase())
+        .or_else(|| {
+            favorites
+                .iter()
+                .find(|favorite| favorite.endpoint == requested && !favorite.fingerprint.is_empty())
+                .map(|favorite| favorite.fingerprint.to_ascii_lowercase())
+        });
 
+    let intent = if verified_fingerprint.is_some() {
+        ConnectionIntent::SavedDevice
+    } else {
+        ConnectionIntent::ManualEndpoint
+    };
+
+    let mut fingerprint = verified_fingerprint;
     if fingerprint.is_none() {
         fingerprint = peers.iter().find_map(|peer| {
             if peer.endpoint == requested {
@@ -258,7 +453,7 @@ fn connection_candidates_from(
             }
         }
     }
-    (fingerprint, candidates)
+    (intent, fingerprint, candidates)
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -408,10 +603,15 @@ fn send_query() -> ResultType<Vec<UdpSocket>> {
 
 fn wait_response(
     socket: UdpSocket,
-    timeout: Option<std::time::Duration>,
+    scan_start: Instant,
+    hit_hard_cap: Arc<AtomicBool>,
     tx: UnboundedSender<config::DiscoveryPeer>,
 ) -> ResultType<()> {
-    let mut last_recv_time = Instant::now();
+    // A valid pong resets the quiet timer; pings and malformed/nonmatching
+    // packets must not, or continuous LAN traffic could keep a scan open
+    // indefinitely. `None` means "no valid pong yet", so the quiet period is
+    // measured from `scan_start` until the first one arrives.
+    let mut last_valid_pong: Option<Instant> = None;
 
     let local_addr = socket.local_addr();
     let try_get_ip_by_peer = match local_addr.as_ref() {
@@ -420,14 +620,13 @@ fn wait_response(
     };
     let mut mac: Option<String> = None;
 
-    socket.set_read_timeout(timeout)?;
+    socket.set_read_timeout(Some(Duration::from_millis(10)))?;
     loop {
         let mut buf = [0; 2048];
         if let Ok((len, addr)) = socket.recv_from(&mut buf) {
             if let Ok(msg_in) = Message::parse_from_bytes(&buf[0..len]) {
                 match msg_in.union {
                     Some(rendezvous_message::Union::PeerDiscovery(p)) => {
-                        last_recv_time = Instant::now();
                         if p.cmd == "pong" {
                             if p.id.len() != 64
                                 || !p.id.bytes().all(|value| value.is_ascii_hexdigit())
@@ -438,6 +637,7 @@ fn wait_response(
                                 );
                                 continue;
                             }
+                            last_valid_pong = Some(Instant::now());
 
                             let misc = serde_json::from_str::<serde_json::Value>(&p.misc)
                                 .unwrap_or_default();
@@ -486,6 +686,7 @@ fn wait_response(
                                     hostname: p.hostname.clone(),
                                     platform: p.platform.clone(),
                                     online: true,
+                                    ..Default::default()
                                 }));
                             }
                         }
@@ -494,39 +695,52 @@ fn wait_response(
                 }
             }
         }
-        if last_recv_time.elapsed().as_millis() > 3_000 {
+        let elapsed = scan_start.elapsed();
+        if elapsed >= DISCOVERY_HARD_CAP {
+            hit_hard_cap.store(true, Ordering::Relaxed);
+            break;
+        }
+        let quiet_since = last_valid_pong.unwrap_or(scan_start);
+        if elapsed >= DISCOVERY_MIN_COLLECTION && quiet_since.elapsed() >= DISCOVERY_QUIET_PERIOD {
             break;
         }
     }
     Ok(())
 }
 
-fn spawn_wait_responses(sockets: Vec<UdpSocket>, tx: UnboundedSender<config::DiscoveryPeer>) {
-    for socket in sockets {
-        let tx_clone = tx.clone();
-        std::thread::spawn(move || {
-            allow_err!(wait_response(
-                socket,
-                Some(std::time::Duration::from_millis(10)),
-                tx_clone
-            ));
-        });
-    }
+fn spawn_wait_responses(
+    sockets: Vec<UdpSocket>,
+    tx: UnboundedSender<config::DiscoveryPeer>,
+    scan_start: Instant,
+    hit_hard_cap: Arc<AtomicBool>,
+) -> Vec<std::thread::JoinHandle<()>> {
+    sockets
+        .into_iter()
+        .map(|socket| {
+            let tx_clone = tx.clone();
+            let hit_hard_cap = hit_hard_cap.clone();
+            std::thread::spawn(move || {
+                allow_err!(wait_response(socket, scan_start, hit_hard_cap, tx_clone));
+            })
+        })
+        .collect()
 }
 
-async fn handle_received_peers(mut rx: UnboundedReceiver<config::DiscoveryPeer>) -> ResultType<()> {
-    let mut peers = config::LanPeers::load().peers;
-    peers.iter_mut().for_each(|peer| {
-        peer.online = false;
-    });
-
-    let mut last_write_time: Option<Instant> = None;
+async fn handle_received_peers(
+    mut rx: UnboundedReceiver<config::DiscoveryPeer>,
+    generation: u64,
+    udp_ok: bool,
+    mdns_ok: bool,
+    hit_hard_cap: Arc<AtomicBool>,
+) -> ResultType<()> {
+    let mut observed: Vec<config::DiscoveryPeer> = Vec::new();
+    let mut last_publish_time: Option<Instant> = None;
     loop {
         tokio::select! {
             data = rx.recv() => match data {
                 Some(mut peer) => {
-                    if let Some(pos) = peers.iter().position(|x| x.is_same_peer(&peer) ) {
-                        let peer1 = peers.remove(pos);
+                    if let Some(pos) = observed.iter().position(|x| x.is_same_peer(&peer)) {
+                        let peer1 = observed.remove(pos);
                         if let Ok(endpoint) = hbb_common::lan::Endpoint::parse(&peer1.endpoint) {
                             if endpoint.host().parse::<IpAddr>().is_ok() {
                                 peer.ip_mac
@@ -536,25 +750,42 @@ async fn handle_received_peers(mut rx: UnboundedReceiver<config::DiscoveryPeer>)
                         }
                         peer.ip_mac.extend(peer1.ip_mac);
                     }
-                    peers.insert(0, peer);
-                    if last_write_time.map(|t| t.elapsed().as_millis() > 300).unwrap_or(true)  {
-                        config::LanPeers::store(&peers);
-                        #[cfg(feature = "flutter")]
-                        crate::flutter_ffi::main_load_lan_peers();
-                        last_write_time = Some(Instant::now());
+                    observed.insert(0, peer);
+                    // Interim publish for UI responsiveness while the scan is
+                    // still running: always `full_coverage = false` so a
+                    // still-in-progress batch can never apply negative
+                    // evidence or an Offline transition, only add positive
+                    // observations.
+                    if last_publish_time.map(|t| t.elapsed().as_millis() > 300).unwrap_or(true) {
+                        publish_observed(&observed, generation, false);
+                        last_publish_time = Some(Instant::now());
                     }
                 }
-                None => {
-                    break
-                }
+                None => break,
             }
         }
     }
 
-    config::LanPeers::store(&peers);
-    #[cfg(feature = "flutter")]
-    crate::flutter_ffi::main_load_lan_peers();
+    // The channel closed because every transport finished (or never
+    // started); this is the authoritative, final result for this
+    // generation. It only counts as full coverage if every transport that
+    // was expected to run actually started and none of them was cut off by
+    // the hard cap — otherwise a silent device must stay Unknown, not be
+    // allowed to accumulate a miss toward Offline.
+    let full_coverage = udp_ok && mdns_ok && !hit_hard_cap.load(Ordering::Relaxed);
+    publish_observed(&observed, generation, full_coverage);
     Ok(())
+}
+
+fn publish_observed(observed: &[config::DiscoveryPeer], generation: u64, full_coverage: bool) {
+    let now_ms = hbb_common::get_time();
+    match config::LanPeers::merge_scan(generation, full_coverage, observed.to_owned(), now_ms) {
+        Ok(_) => {
+            #[cfg(feature = "flutter")]
+            crate::flutter_ffi::main_load_lan_peers();
+        }
+        Err(err) => log::error!("Failed to merge discovered LAN peers: {err}"),
+    }
 }
 
 #[cfg(test)]
@@ -596,9 +827,10 @@ mod tests {
             ..Default::default()
         }];
 
-        let (resolved_fingerprint, candidates) =
-            connection_candidates_from(&recent.endpoint, &[recent.clone()], &peers);
+        let (intent, resolved_fingerprint, candidates) =
+            connection_candidates_from(&recent.endpoint, &[recent.clone()], &[], &peers);
 
+        assert_eq!(intent, ConnectionIntent::SavedDevice);
         assert_eq!(resolved_fingerprint, Some(fingerprint));
         assert_eq!(candidates[0], "10.8.0.15:21118");
         assert!(candidates.contains(&"192.168.1.99:21118".to_owned()));
@@ -621,12 +853,60 @@ mod tests {
             ..Default::default()
         }];
 
-        let (resolved_fingerprint, candidates) =
-            connection_candidates_from("10.9.0.20:21118", &[], &peers);
+        let (intent, resolved_fingerprint, candidates) =
+            connection_candidates_from("10.9.0.20:21118", &[], &[], &peers);
 
+        assert_eq!(intent, ConnectionIntent::ManualEndpoint);
         assert_eq!(resolved_fingerprint, Some(fingerprint));
         assert_eq!(candidates[0], "10.9.0.20:21118");
         assert!(candidates.contains(&"192.168.1.20:21118".to_owned()));
+    }
+
+    #[test]
+    fn connection_candidates_mark_saved_device_only_from_verified_recent_history() {
+        let fingerprint = "c".repeat(64);
+        let recent = config::RecentLanEndpoint {
+            endpoint: "192.168.1.50:21118".to_owned(),
+            fingerprint: fingerprint.clone(),
+            ..Default::default()
+        };
+
+        let (intent, resolved_fingerprint, _candidates) =
+            connection_candidates_from(&recent.endpoint.clone(), &[recent], &[], &[]);
+
+        assert_eq!(intent, ConnectionIntent::SavedDevice);
+        assert_eq!(resolved_fingerprint, Some(fingerprint));
+    }
+
+    #[test]
+    fn connection_candidates_mark_saved_device_from_canonical_favorite_without_recent_history() {
+        let fingerprint = "d".repeat(64);
+        let favorite = config::FavoriteDevice {
+            fingerprint: fingerprint.clone(),
+            endpoint: "192.168.1.77:21118".to_owned(),
+            group_id: String::new(),
+        };
+
+        let (intent, resolved_fingerprint, _candidates) =
+            connection_candidates_from(&favorite.endpoint.clone(), &[], &[favorite], &[]);
+
+        assert_eq!(intent, ConnectionIntent::SavedDevice);
+        assert_eq!(resolved_fingerprint, Some(fingerprint));
+    }
+
+    #[test]
+    fn connection_candidates_does_not_trust_unmatched_legacy_favorite() {
+        let favorite = config::FavoriteDevice {
+            fingerprint: String::new(),
+            endpoint: "192.168.1.78:21118".to_owned(),
+            group_id: String::new(),
+        };
+
+        let (intent, resolved_fingerprint, _candidates) =
+            connection_candidates_from(&favorite.endpoint.clone(), &[], &[favorite], &[]);
+
+        assert_eq!(intent, ConnectionIntent::ManualEndpoint);
+        assert_eq!(resolved_fingerprint, None);
     }
 
     #[test]
