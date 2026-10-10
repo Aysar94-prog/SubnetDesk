@@ -1603,6 +1603,18 @@ class AccessibilityListener extends StatelessWidget {
   }
 }
 
+/// Android outgoing voice call: request the microphone at runtime, only when
+/// the user starts a voice call. Returns true when granted (or not Android).
+Future<bool> ensureAndroidVoiceCallMicrophone() async {
+  if (!isAndroid) return true;
+  if (await AndroidPermissionManager.check(kRecordAudio)) return true;
+  final granted = await AndroidPermissionManager.request(kRecordAudio);
+  if (!granted) {
+    showToast(translate('Microphone permission is required for voice calls'));
+  }
+  return granted;
+}
+
 class AndroidPermissionManager {
   static Completer<bool>? _completer;
   static Timer? _timer;
@@ -2685,13 +2697,8 @@ connect(
     }
   } else {
     if (isFileTransfer) {
-      if (isAndroid) {
-        if (!await AndroidPermissionManager.check(kManageExternalStorage)) {
-          if (!await AndroidPermissionManager.request(kManageExternalStorage)) {
-            return;
-          }
-        }
-      }
+      // Android uses the app transfer folder plus the system file picker, so
+      // outgoing file transfer needs no broad storage permission.
       if (isWeb) {
         Navigator.push(
           context,

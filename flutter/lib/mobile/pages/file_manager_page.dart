@@ -8,6 +8,7 @@ import 'package:toggle_switch/toggle_switch.dart';
 
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
+import '../android_file_bridge.dart';
 
 class FileManagerPage extends StatefulWidget {
   FileManagerPage(
@@ -191,10 +192,36 @@ class _FileManagerPageState extends State<FileManagerPage> {
                         ],
                       ),
                       value: "hidden",
-                    )
+                    ),
+                    if (isAndroid && showLocal)
+                      PopupMenuItem(
+                        enabled: currentDir.path.isNotEmpty &&
+                            currentDir.path != "/",
+                        child: Row(
+                          children: [
+                            Icon(Icons.file_upload_outlined,
+                                color: Theme.of(context).iconTheme.color),
+                            SizedBox(width: 5),
+                            Text(translate("Add files from phone"))
+                          ],
+                        ),
+                        value: "import_from_phone",
+                      ),
                   ];
                 },
-                onSelected: (v) {
+                onSelected: (v) async {
+                  if (v == "import_from_phone") {
+                    final controller = currentFileController;
+                    try {
+                      final count =
+                          await importFilesFromPhone(currentDir.path);
+                      if (count > 0) controller.refresh();
+                    } catch (e) {
+                      debugPrint("import from phone failed: $e");
+                      showToast(translate("Failed"));
+                    }
+                    return;
+                  }
                   if (v == "refresh") {
                     currentFileController.refresh();
                   } else if (v == "select") {
@@ -530,10 +557,31 @@ class _FileManagerViewState extends State<FileManagerView> {
                                   PopupMenuItem(
                                     child: Text(translate("Rename")),
                                     value: "rename",
+                                  ),
+                                if (isAndroid &&
+                                    isLocal &&
+                                    entries[index].isFile)
+                                  PopupMenuItem(
+                                    child: Text(translate("Save to phone")),
+                                    value: "save_to_phone",
                                   )
                               ];
                             },
-                            onSelected: (v) {
+                            onSelected: (v) async {
+                              if (v == "save_to_phone") {
+                                try {
+                                  final ok = await saveFileToPhone(
+                                      PathUtil.join(
+                                          controller.directory.value.path,
+                                          entries[index].name,
+                                          false));
+                                  if (ok) showToast(translate("Successful"));
+                                } catch (e) {
+                                  debugPrint("save to phone failed: $e");
+                                  showToast(translate("Failed"));
+                                }
+                                return;
+                              }
                               if (v == "delete") {
                                 final items = SelectedItems(isLocal: isLocal);
                                 items.add(entries[index]);
