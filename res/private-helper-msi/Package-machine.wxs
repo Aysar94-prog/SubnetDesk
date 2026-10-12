@@ -1,11 +1,11 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <!-- A distinct machine product: MSI cannot upgrade across installation contexts. -->
-  <Package Name="SubnetDesk Helper" Manufacturer="SubnetDesk Private Build"
+  <Package Name="SubnetDesk" Manufacturer="SubnetDesk Private Build"
            Version="$(var.ReleaseVersion)" Language="1033" Scope="perMachine"
            UpgradeCode="0351f62f-54c5-42be-b162-c4f2088e7c39" InstallerVersion="500">
     <MajorUpgrade DowngradeErrorMessage="A newer SubnetDesk Helper is already installed."
-                  Schedule="afterInstallInitialize" AllowSameVersionUpgrades="no" />
+                  Schedule="afterInstallInitialize" AllowSameVersionUpgrades="$(var.AllowSameVersionUpgrades)" />
     <Property Id="OLD_USER_HELPER" Secure="yes">
       <RegistrySearch Id="FindOldUserHelper" Root="HKCU"
                       Key="Software\SubnetDeskPrivate\HelperInstaller"
@@ -18,14 +18,16 @@
     <Property Id="HELPER_BUILD" Value="$(var.ReleaseBuild)" />
     <Property Id="ARPCOMMENTS" Value="Private helper $(var.ReleaseVersion), build $(var.ReleaseBuild). Updates disabled. Administrator installation." />
     <Property Id="ARPHELPLINK" Value="https://github.com/zibo-chen/SubnetDesk" />
+    <Icon Id="AppIcon.exe" SourceFile="$(var.AppIconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.exe" />
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="SubnetDeskHelper" />
+      <Directory Id="INSTALLFOLDER" Name="SubnetDesk" />
     </StandardDirectory>
     <StandardDirectory Id="DesktopFolder" />
     <StandardDirectory Id="ProgramMenuFolder">
-      <Directory Id="HelperMenu" Name="SubnetDesk Helper" />
+      <Directory Id="HelperMenu" Name="SubnetDesk" />
     </StandardDirectory>
-    <Feature Id="Complete" Title="SubnetDesk Helper" Level="1">
+    <Feature Id="Complete" Title="SubnetDesk" Level="1">
       <ComponentGroupRef Id="HelperPayload" />
     </Feature>
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />

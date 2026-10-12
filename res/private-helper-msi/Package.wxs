@@ -12,6 +12,8 @@
     <Property Id="HELPER_BUILD" Value="$(var.ReleaseBuild)" />
     <Property Id="ARPCOMMENTS" Value="Private helper $(var.ReleaseVersion), build $(var.ReleaseBuild). Updates disabled." />
     <Property Id="ARPHELPLINK" Value="https://github.com/zibo-chen/SubnetDesk" />
+    <Icon Id="AppIcon.exe" SourceFile="$(var.AppIconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.exe" />
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="HelperPrograms" Name="Programs">
         <Directory Id="INSTALLFOLDER" Name="SubnetDeskHelper" />
@@ -20,7 +22,7 @@
     <StandardDirectory Id="ProgramMenuFolder">
       <Directory Id="HelperMenu" Name="SubnetDesk Helper">
         <Component Id="HelperShortcut" Guid="57534d8f-7dca-4b91-8e01-bba5636e7a02">
-          <Shortcut Id="HelperStart" Name="SubnetDesk Helper" Target="[INSTALLFOLDER]SubnetDesk.exe"
+          <Shortcut Id="HelperStart" Name="SubnetDesk Helper" Icon="AppIcon.exe" Target="[INSTALLFOLDER]SubnetDesk.exe"
                     WorkingDirectory="INSTALLFOLDER" Description="Open SubnetDesk Helper" />
           <RemoveFolder Id="RemoveHelperMenu" On="uninstall" />
           <RegistryValue Root="HKCU" Key="Software\SubnetDeskPrivate\HelperInstaller"

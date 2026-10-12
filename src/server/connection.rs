@@ -104,6 +104,17 @@ fn web_permission_set_for_transport(
     web_transport.then(|| web_permission_set(profile))
 }
 
+fn manual_permission_set(mut allowed: WebPermissionSet, selected: ipc::LanApprovalPermissions) -> WebPermissionSet {
+    allowed.keyboard &= selected.keyboard;
+    allowed.clipboard &= selected.clipboard;
+    allowed.file &= selected.file;
+    allowed.restart = false;
+    allowed.recording = false;
+    allowed.block_input = false;
+    allowed.privacy_mode = false;
+    allowed
+}
+
 lazy_static::lazy_static! {
     static ref LOGIN_FAILURES: [Arc::<Mutex<HashMap<String, (i32, i32, i32)>>>; 2] = Default::default();
     static ref SESSIONS: Arc::<Mutex<HashMap<SessionKey, Session>>> = Default::default();
@@ -437,7 +448,8 @@ const MILLI1: Duration = Duration::from_millis(1);
 const SEND_TIMEOUT_VIDEO: u64 = 12_000;
 
 fn preauth_cm_command_allowed(data: &ipc::Data) -> bool {
-    matches!(data, ipc::Data::Close | ipc::Data::CmErr(_) | ipc::Data::LanApprovalDecision { .. })
+    matches!(data, ipc::Data::Close | ipc::Data::CmErr(_) | ipc::Data::LanApprovalDecision { .. }
+        | ipc::Data::LanApprovalDecisionWithPermissions { .. })
 }
 const SEND_TIMEOUT_OTHER: u64 = SEND_TIMEOUT_VIDEO * 10;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -619,7 +631,10 @@ impl Connection {
                     }
                     match data {
                         ipc::Data::LanApprovalDecision { nonce, accept } => {
-                            if !conn.handle_lan_approval(nonce, accept).await { break; }
+                            if !conn.handle_lan_approval(nonce, accept, None).await { break; }
+                        }
+                        ipc::Data::LanApprovalDecisionWithPermissions { nonce, accept, permissions } => {
+                            if !conn.handle_lan_approval(nonce, accept, Some(permissions)).await { break; }
                         }
                         ipc::Data::Close => {
                             conn.chat_unanswered = false; // seen
@@ -1997,7 +2012,7 @@ impl Connection {
         self.grant_lan_access(lr, ConnAuditPrimaryAuth::LanCredential).await
     }
 
-    async fn handle_lan_approval(&mut self, nonce: String, accept: bool) -> bool {
+    async fn handle_lan_approval(&mut self, nonce: String, accept: bool, permissions: Option<ipc::LanApprovalPermissions>) -> bool {
         if self.authorized || self.pending_lan_approval.as_deref() != Some(nonce.as_str()) { return true; }
         let result = crate::lan_access::decide_manual(self.inner.id(), &nonce, accept);
         self.pending_lan_approval = None;
@@ -2007,10 +2022,14 @@ impl Connection {
             return false;
         }
         let lr = self.lr.clone();
-        self.grant_lan_access(&lr, ConnAuditPrimaryAuth::LanManual).await
+        self.grant_lan_access_with_permissions(&lr, ConnAuditPrimaryAuth::LanManual, permissions).await
     }
 
     async fn grant_lan_access(&mut self, lr: &LoginRequest, auth: ConnAuditPrimaryAuth) -> bool {
+        self.grant_lan_access_with_permissions(lr, auth, None).await
+    }
+
+    async fn grant_lan_access_with_permissions(&mut self, lr: &LoginRequest, auth: ConnAuditPrimaryAuth, permissions: Option<ipc::LanApprovalPermissions>) -> bool {
         clear_lan_auth_source(&self.ip);
         self.credential_revision_at_auth = Config::get_credential_revision();
         self.set_conn_audit_primary_auth(auth);
@@ -2035,6 +2054,29 @@ impl Connection {
             self.recording = true;
             self.block_input = true;
             self.privacy_mode = true;
+        }
+        if let Some(permissions) = permissions {
+            // Intersect local choices with transport limits before authorization.
+            let allowed = manual_permission_set(WebPermissionSet {
+                keyboard: self.keyboard, clipboard: self.clipboard, file: self.file,
+                audio: self.audio, restart: self.restart, recording: self.recording,
+                block_input: self.block_input, privacy_mode: self.privacy_mode,
+            }, permissions);
+            self.keyboard = allowed.keyboard;
+            self.clipboard = allowed.clipboard;
+            self.file = allowed.file;
+            self.restart = allowed.restart;
+            self.recording = allowed.recording;
+            self.block_input = allowed.block_input;
+            self.privacy_mode = allowed.privacy_mode;
+            if matches!(lr.union.as_ref(), Some(login_request::Union::FileTransfer(_))) && !self.file {
+                self.send_login_error("File transfer was not approved").await;
+                return false;
+            }
+            if !self.keyboard && matches!(lr.union.as_ref(), Some(login_request::Union::Terminal(_)) | Some(login_request::Union::PortForward(_))) {
+                self.send_login_error("The requested access was not approved").await;
+                return false;
+            }
         }
         if !self.configure_lan_connection_scope(lr).await {
             return false;
@@ -6304,6 +6346,39 @@ mod test {
         assert!(!collaboration.restart);
         assert!(web_permission_set_for_transport(false, "view-only").is_none());
         assert!(web_permission_set_for_transport(true, "view-only").is_some());
+    }
+
+    #[test]
+    fn manual_session_permissions_never_expand_transport_or_admin_access() {
+        let all = ipc::LanApprovalPermissions { keyboard: true, clipboard: true, file: true };
+        let web = manual_permission_set(web_permission_set("view-only"), all);
+        assert!(!web.keyboard && !web.clipboard && !web.file);
+        let native = WebPermissionSet { keyboard: true, clipboard: true, audio: true,
+            file: true, restart: true, recording: true, block_input: true, privacy_mode: true };
+        let view = manual_permission_set(native, ipc::LanApprovalPermissions {
+            keyboard: false, clipboard: false, file: false });
+        assert!(!view.keyboard && !view.clipboard && !view.file);
+        assert!(!view.restart && !view.recording && !view.block_input && !view.privacy_mode);
+        let control = manual_permission_set(native, ipc::LanApprovalPermissions {
+            keyboard: true, clipboard: false, file: false });
+        assert!(control.keyboard && !control.clipboard && !control.file);
+        let files = manual_permission_set(native, ipc::LanApprovalPermissions {
+            keyboard: false, clipboard: false, file: true });
+        assert!(!files.keyboard && !files.clipboard && files.file);
+    }
+
+    #[test]
+    fn manual_session_permissions_reject_missing_and_unknown_fields() {
+        for value in [r#"{}"#, r#"{"keyboard":true,"clipboard":false}"#,
+            r#"{"keyboard":false,"clipboard":false,"file":false,"restart":true}"#,
+            r#"{"keyboard":"true","clipboard":false,"file":false}"#] {
+            assert!(serde_json::from_str::<ipc::LanApprovalPermissions>(value).is_err());
+        }
+        let value: ipc::LanApprovalPermissions = serde_json::from_str(
+            r#"{"keyboard":false,"clipboard":false,"file":false}"#).unwrap();
+        assert!(!value.keyboard && !value.clipboard && !value.file);
+        assert!(preauth_cm_command_allowed(&ipc::Data::LanApprovalDecisionWithPermissions {
+            nonce: "nonce".into(), accept: true, permissions: value }));
     }
 
     #[test]

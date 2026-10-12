@@ -12,6 +12,8 @@ import 'package:flutter_hbb/models/peer_model.dart';
 
 import '../../common.dart';
 import '../../common/widgets/peer_tab_page.dart';
+import '../../common/widgets/connection_diagnostic_dialog.dart';
+import '../../common/widgets/scan_range_dialog.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
@@ -98,7 +100,21 @@ class _ConnectionPageState extends State<ConnectionPage> {
     return CustomScrollView(
       slivers: [
         SliverList(
-          delegate: SliverChildListDelegate([_buildRemoteIDTextField()]),
+          delegate: SliverChildListDelegate([_buildRemoteIDTextField(),
+            Align(alignment: Alignment.centerRight, child: Wrap(
+              alignment: WrapAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: () => showScanRangeDialog(context),
+                  icon: const Icon(Icons.travel_explore),
+                  label: Text(translate('Scan IP range'))),
+                TextButton.icon(
+                  onPressed: () => showConnectionDiagnostic(context, _idController.id),
+                  icon: const Icon(Icons.network_check),
+                  label: Text(translate('Check connection'))),
+              ],
+            )),
+          ]),
         ),
         SliverFillRemaining(hasScrollBody: true, child: PeerTabPage()),
       ],

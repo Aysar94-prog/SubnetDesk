@@ -25,7 +25,8 @@ function Query([string]$sql, [int]$columns) {
 }
 $taskProps = @{}
 foreach ($taskRow in @(Query 'SELECT `Property`, `Value` FROM `Property`' 2)) { $taskProps[$taskRow[0]] = $taskRow[1] }
-if ($taskProps['ProductVersion'] -ne $ReleaseVersion -or $taskProps['HELPER_BUILD'] -ne "$ReleaseBuild" -or $taskProps['ProductLanguage'] -ne '1033' -or $taskProps['ProductName'] -ne 'SubnetDesk Helper') { throw 'MSI release/English identity mismatch.' }
+$taskExpectedProductName = if ($taskMachine) { 'SubnetDesk' } else { 'SubnetDesk Helper' }
+if ($taskProps['ProductVersion'] -ne $ReleaseVersion -or $taskProps['HELPER_BUILD'] -ne "$ReleaseBuild" -or $taskProps['ProductLanguage'] -ne '1033' -or $taskProps['ProductName'] -ne $taskExpectedProductName) { throw 'MSI release/English identity mismatch.' }
 if ($taskMachine) {
     if ($taskProps['UpgradeCode'] -ne '{0351F62F-54C5-42BE-B162-C4F2088E7C39}' -or $taskProps['ALLUSERS'] -ne '1') { throw 'MSI private/machine identity mismatch.' }
     $taskLocators = @(Query 'SELECT `Root`, `Key`, `Name` FROM `RegLocator`' 3)
@@ -37,17 +38,27 @@ if ($ReleaseBuild -ge 86) {
     $taskSameVersionRows = @(Query 'SELECT `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`' 3 | Where-Object {
         $_[0] -eq $ReleaseVersion -and $_[2] -eq 'WIX_UPGRADE_DETECTED' -and ([int]$_[1] -band 512) -ne 0
     })
-    $taskExpectedSameVersion = if ($ReleaseVersion -eq '1.3.7' -and $ReleaseBuild -eq 86) { 1 } else { 0 }
+    $taskExpectedSameVersion = if (($ReleaseVersion -eq '1.3.7' -and $ReleaseBuild -eq 86) -or ($ReleaseVersion -eq '1.4.0' -and $ReleaseBuild -eq 96)) { 1 } else { 0 }
     if ($taskSameVersionRows.Count -ne $taskExpectedSameVersion) { throw 'Unexpected same-public-version private upgrade detection.' }
 }
 $taskDirectories = @{}
 foreach ($taskRow in @(Query 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) { $taskDirectories[$taskRow[0]] = @($taskRow[1], ($taskRow[2] -split '\|')[-1]) }
 if ($taskMachine) {
-    if ($taskDirectories['INSTALLFOLDER'][0] -ne 'ProgramFiles64Folder' -or $taskDirectories['INSTALLFOLDER'][1] -ne 'SubnetDeskHelper') { throw 'Expected Program Files installation.' }
+    if ($taskDirectories['INSTALLFOLDER'][0] -ne 'ProgramFiles64Folder' -or $taskDirectories['INSTALLFOLDER'][1] -ne 'SubnetDesk') { throw 'Expected Program Files installation.' }
 } elseif ($taskDirectories['INSTALLFOLDER'][0] -ne 'HelperPrograms' -or $taskDirectories['INSTALLFOLDER'][1] -ne 'SubnetDeskHelper' -or $taskDirectories['HelperPrograms'][0] -ne 'LocalAppDataFolder') { throw 'Unexpected install directory.' }
 $taskTables = @(Query 'SELECT `Name` FROM `_Tables`' 1 | ForEach-Object { $_[0] })
-foreach ($taskForbidden in @('ServiceInstall','ServiceControl','Environment','MoveFiles','RemoveIniFile','IniFile','SelfReg','RemoveRegistry','Font','Class','ProgId','Extension','MIME','TypeLib','ODBCDriver','ODBCDataSource')) {
+foreach ($taskForbidden in @('Environment','MoveFiles','RemoveIniFile','IniFile','SelfReg','RemoveRegistry','Font','Class','ProgId','Extension','MIME','TypeLib','ODBCDriver','ODBCDataSource')) {
     if ($taskTables -contains $taskForbidden -and @(Query ('SELECT * FROM `' + $taskForbidden + '`') 1).Count) { throw "Unexpected installer mutation table: $taskForbidden" }
+}
+if ($taskMachine) {
+    $taskServices = @(Query 'SELECT `Name`, `DisplayName`, `StartType`, `StartName`, `Arguments`, `Description` FROM `ServiceInstall`' 6)
+    if ($taskServices.Count -ne 1 -or ($taskServices[0] -join '|') -ne 'SubnetDesk|SubnetDesk Service|2|LocalSystem|--service|Keeps SubnetDesk available for unattended remote access.') { throw 'Missing or unexpected automatic SubnetDesk service.' }
+    $taskServiceControls = @(Query 'SELECT `Name`, `Wait` FROM `ServiceControl`' 2)
+    if ($taskServiceControls.Count -ne 1 -or ($taskServiceControls[0] -join '|') -ne 'SubnetDesk|1') { throw 'Missing or unexpected SubnetDesk service control.' }
+} else {
+    foreach ($taskForbidden in @('ServiceInstall','ServiceControl')) {
+        if ($taskTables -contains $taskForbidden -and @(Query ('SELECT * FROM `' + $taskForbidden + '`') 1).Count) { throw "Unexpected per-user installer service table: $taskForbidden" }
+    }
 }
 if ($taskTables -contains 'CustomAction') {
     foreach ($taskRow in @(Query 'SELECT `Action`, `Type`, `Source`, `Target` FROM `CustomAction`' 4)) {
@@ -62,16 +73,25 @@ if ($taskTables -contains 'CustomAction') {
 foreach ($taskRow in @(Query 'SELECT `Root`, `Key` FROM `Registry`' 2)) {
     $taskExpectedRoot = if ($taskMachine) { '2' } else { '1' }
     $taskExpectedKey = if ($taskMachine) { 'Software\SubnetDeskPrivate\HelperMachineInstaller' } else { 'Software\SubnetDeskPrivate\HelperInstaller' }
-    if ($taskRow[0] -ne $taskExpectedRoot -or ($taskRow[1] -ne $taskExpectedKey -and $taskRow[1] -ne "$taskExpectedKey\Files")) { throw 'Unexpected installer registry target.' }
+    $taskIsMachineRun = $taskMachine -and $taskRow[0] -eq '2' -and $taskRow[1] -eq 'Software\Microsoft\Windows\CurrentVersion\Run'
+    if (-not $taskIsMachineRun -and ($taskRow[0] -ne $taskExpectedRoot -or ($taskRow[1] -ne $taskExpectedKey -and $taskRow[1] -ne "$taskExpectedKey\Files"))) { throw 'Unexpected installer registry target.' }
+}
+if ($taskMachine) {
+    $taskRunRows = @(Query 'SELECT `Root`, `Key`, `Name`, `Value` FROM `Registry`' 4 | Where-Object {
+        $_[0] -eq '2' -and $_[1] -eq 'Software\Microsoft\Windows\CurrentVersion\Run' -and $_[2] -eq 'SubnetDesk' -and $_[3] -match '^"\[#F.+\]" --tray$'
+    })
+    if ($taskRunRows.Count -ne 1) { throw 'Missing or unexpected machine tray autorun registration.' }
 }
 foreach ($taskRow in @(Query 'SELECT `FileName`, `InstallMode` FROM `RemoveFile`' 2)) {
     if ($taskRow[0] -or $taskRow[1] -ne '2') { throw 'MSI must remove empty owned folders only.' }
 }
-$taskShortcuts = @(Query 'SELECT `Shortcut`, `Directory_`, `Name`, `Target`, `WkDir`, `Component_` FROM `Shortcut`' 6)
+$taskShortcuts = @(Query 'SELECT `Shortcut`, `Directory_`, `Name`, `Target`, `WkDir`, `Component_`, `Arguments` FROM `Shortcut`' 7)
 if ($taskShortcuts.Count -ne $(if ($taskMachine) { 2 } else { 1 })) { throw 'Unexpected shortcut count.' }
 foreach ($taskRow in $taskShortcuts) {
     $taskExpectedTarget = if ($taskMachine) { 'Complete' } else { '[INSTALLFOLDER]SubnetDesk.exe' }
-    if ($taskRow[2] -notmatch 'SubnetDesk Helper$' -or $taskRow[3] -ne $taskExpectedTarget -or $taskRow[4] -ne 'INSTALLFOLDER') { throw 'Unexpected shortcut.' }
+    $taskExpectedName = if ($taskMachine) { 'SubnetDesk' } else { 'SubnetDesk Helper' }
+    $taskExpectedArguments = ''
+    if ($taskRow[2] -notmatch ([regex]::Escape($taskExpectedName) + '$') -or $taskRow[3] -ne $taskExpectedTarget -or $taskRow[4] -ne 'INSTALLFOLDER' -or $taskRow[6] -ne $taskExpectedArguments) { throw 'Unexpected shortcut.' }
     if ($taskMachine) {
         $taskShortcutComponent = $taskRow[5]
         $taskKeys = @(Query ("SELECT ``KeyPath`` FROM ``Component`` WHERE ``Component`` = '$taskShortcutComponent'") 1)
@@ -89,7 +109,14 @@ if ($LASTEXITCODE -ne 0) { throw 'MSI embedded payload extraction failed.' }
 [xml]$taskPayload = Get-Content -LiteralPath $PayloadXml -Raw
 $taskExpected = @($taskPayload.SelectNodes('//*[local-name()="File"]'))
 if (@(Query 'SELECT `File` FROM `File`' 1).Count -ne $taskExpected.Count) { throw 'MSI file table differs from generated source.' }
-$taskActual = @(Get-ChildItem "$ExtractPath\payload" -Recurse -File)
+$taskCab = Get-Item "$ExtractPath\payload\cab1.cab" -ErrorAction SilentlyContinue
+if ($taskCab) {
+    & $SevenZip x $taskCab.FullName "-o$ExtractPath\payload-cab" -y | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'MSI cabinet payload extraction failed.' }
+    $taskActual = @(Get-ChildItem "$ExtractPath\payload-cab" -Recurse -File)
+} else {
+    $taskActual = @(Get-ChildItem "$ExtractPath\payload" -Recurse -File)
+}
 if ($taskActual.Count -ne $taskExpected.Count) { throw 'MSI payload file count mismatch.' }
 foreach ($taskFile in $taskExpected) {
     $taskMatches = @($taskActual | Where-Object { $_.Name -eq $taskFile.Id -or $_.Name -eq $taskFile.Name })

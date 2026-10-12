@@ -14,6 +14,11 @@ class Peer {
   String rdpUsername;
   bool online = false;
 
+  /// When LAN discovery last observed this peer (Unix ms), or 0 if unknown.
+  /// Only LAN discovery peers carry it; recent/favorite peers do not.
+  int lastSeenAt = 0;
+  int lastConnectedAt = 0;
+
   String getId() {
     if (alias != '') {
       return alias;
@@ -30,7 +35,23 @@ class Peer {
         fingerprint = json['fingerprint'] ?? '',
         rdpPort = json['rdpPort'] ?? '',
         rdpUsername = json['rdpUsername'] ?? '' {
-    online = json['online'] == true;
+    lastConnectedAt = int.tryParse(json['last_connected_at']?.toString() ?? '') ?? 0;
+    // LAN discovery peers carry a tri-state `reachability` string
+    // ('online'|'unknown'|'offline') and a `last_seen_at` timestamp; recent
+    // and favorite peers still carry the legacy `online` bool. Prefer
+    // reachability when present so a discovered device is only "online" while
+    // it is actually reachable. The backend serializes every field of this
+    // projection as a string, so the timestamp arrives as text.
+    final reachability = json['reachability'];
+    if (reachability is String && reachability.isNotEmpty) {
+      online = reachability == 'online';
+      final lastSeenAt = json['last_seen_at'];
+      this.lastSeenAt = lastSeenAt is int
+          ? lastSeenAt
+          : int.tryParse(lastSeenAt?.toString() ?? '') ?? 0;
+    } else {
+      online = json['online'] == true;
+    }
   }
 
   Map<String, dynamic> toJson() {
@@ -43,6 +64,7 @@ class Peer {
       "fingerprint": fingerprint,
       "rdpPort": rdpPort,
       "rdpUsername": rdpUsername,
+      "last_connected_at": lastConnectedAt,
     };
   }
 
@@ -76,7 +98,8 @@ class Peer {
         alias == other.alias &&
         fingerprint == other.fingerprint &&
         rdpPort == other.rdpPort &&
-        rdpUsername == other.rdpUsername;
+        rdpUsername == other.rdpUsername &&
+        lastConnectedAt == other.lastConnectedAt;
   }
 
   factory Peer.copy(Peer other) {
@@ -90,8 +113,31 @@ class Peer {
         rdpPort: other.rdpPort,
         rdpUsername: other.rdpUsername);
     peer.online = other.online;
+    peer.lastSeenAt = other.lastSeenAt;
+    peer.lastConnectedAt = other.lastConnectedAt;
     return peer;
   }
+}
+
+/// How long a device stays in the live Discovered list after LAN discovery
+/// last saw it. Once this elapses the device drops out; it reappears as soon
+/// as it is observed again.
+const discoveredOnlineWindowMs = 30 * 1000;
+
+/// Filter for the live Discovered ("LAN") list: only devices that are
+/// currently reachable are shown, so an offline device drops out instead of
+/// lingering forever. A peer the backend reports as online but that has not
+/// been observed within [discoveredOnlineWindowMs] is treated as gone. Peers
+/// without a timestamp fall back to the backend's reachability.
+bool includeInDiscoveredList(Peer peer, {int? nowMs}) {
+  if (!peer.online) {
+    return false;
+  }
+  if (peer.lastSeenAt <= 0) {
+    return true;
+  }
+  final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+  return now - peer.lastSeenAt <= discoveredOnlineWindowMs;
 }
 
 enum UpdateEvent { online, load }

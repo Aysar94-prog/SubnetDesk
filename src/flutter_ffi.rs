@@ -88,7 +88,6 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     }
     #[cfg(target_os = "android")]
     {
-        // flexi_logger can't work when android_logger initialized.
         #[cfg(debug_assertions)]
         android_logger::init_once(
             android_logger::Config::default()
@@ -1271,6 +1270,10 @@ pub fn main_import_legacy_lan_credential(
 
 pub fn main_get_connect_status() -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let active_session_count = get_connect_status().active_session_count;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let active_session_count = 0usize;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let (status_num, video_conn_count) = {
         let status = get_connect_status();
         (status.status_num, status.video_conn_count)
@@ -1287,6 +1290,7 @@ pub fn main_get_connect_status() -> String {
     serde_json::json!({
         "status_num": status_num,
         "video_conn_count": video_conn_count,
+        "active_session_count": active_session_count,
     })
     .to_string()
 }
@@ -1298,6 +1302,42 @@ pub fn main_check_connect_status() {
 
 pub fn main_discover() {
     discover();
+}
+
+/// Starts a manual, unicast-only scan of `range` (a single IP, CIDR block
+/// like "10.96.160.0/24", or dash range like "10.96.160.1-254"), bypassing
+/// UDP broadcast/mDNS so a device on another routed subnet can still be
+/// found. Runs in the background; results arrive via the usual
+/// `load_lan_peers` event once probed devices respond.
+///
+/// Returns an empty string on success, or an error message if `range`
+/// couldn't be parsed.
+pub fn main_discover_range(range: String) -> String {
+    match crate::lan::discover_range_async(range) {
+        Ok(_count) => String::new(),
+        Err(err) => err.to_string(),
+    }
+}
+
+pub fn main_get_saved_subnets() -> Vec<String> {
+    LocalConfig::get_saved_subnets()
+}
+
+/// Saves `subnet` for reuse in the manual scan dialog. Returns an empty string
+/// on success, or the parse error if it isn't a valid IP, CIDR, or range, so
+/// a typo is never persisted.
+pub fn main_add_saved_subnet(subnet: String) -> String {
+    match crate::lan::parse_ip_range(&subnet) {
+        Ok(_) => {
+            LocalConfig::add_saved_subnet(&subnet);
+            String::new()
+        }
+        Err(err) => err.to_string(),
+    }
+}
+
+pub fn main_remove_saved_subnet(subnet: String) {
+    LocalConfig::remove_saved_subnet(&subnet);
 }
 
 pub fn main_get_local_option(key: String) -> SyncReturn<String> {
@@ -1523,12 +1563,40 @@ pub fn main_peer_exists(id: String) -> bool {
     peer_exists(&id)
 }
 
+/// Looks up a saved (recent/favorite) device's live discovery reachability by
+/// fingerprint or last-known endpoint. Saved devices are often reachable only
+/// by direct/routed unicast (e.g. on another subnet, never seen by broadcast
+/// or mDNS), so without this lookup they would carry no reachability data at
+/// all and the UI would default them to looking offline. Defaults to
+/// `"unknown"` rather than omitting the field, so the UI never has to treat a
+/// missing key as a hardcoded false/offline.
+fn lan_reachability_fields(fingerprint: &str, endpoint: &str) -> (String, String) {
+    let now_ms = hbb_common::get_time();
+    let matched = config::LanPeers::load().peers.into_iter().find(|peer| {
+        (!fingerprint.is_empty() && peer.fingerprint.eq_ignore_ascii_case(fingerprint))
+            || (!endpoint.is_empty() && peer.endpoint == endpoint)
+    });
+    match matched {
+        Some(peer) => {
+            let reachability = match peer.reachability(now_ms) {
+                config::LanReachability::Online => "online",
+                config::LanReachability::Unknown => "unknown",
+                config::LanReachability::Offline => "offline",
+            };
+            (reachability.to_owned(), peer.last_seen_at.to_string())
+        }
+        None => ("unknown".to_owned(), "0".to_owned()),
+    }
+}
+
 fn recent_lan_endpoint_to_map(recent: RecentLanEndpoint) -> HashMap<&'static str, String> {
     let alias = PeerConfig::load(&recent.endpoint)
         .options
         .get("alias")
         .cloned()
         .unwrap_or_default();
+    let (reachability, last_seen_at) =
+        lan_reachability_fields(&recent.fingerprint, &recent.endpoint);
     HashMap::from([
         ("id", recent.endpoint),
         ("username", recent.username),
@@ -1536,7 +1604,24 @@ fn recent_lan_endpoint_to_map(recent: RecentLanEndpoint) -> HashMap<&'static str
         ("platform", recent.platform),
         ("alias", alias),
         ("fingerprint", recent.fingerprint),
+        ("last_connected_at", recent.last_connected_at.to_string()),
+        ("reachability", reachability),
+        ("last_seen_at", last_seen_at),
     ])
+}
+
+/// Kicks off a background unicast reachability probe of each saved
+/// endpoint's host, so a device that broadcast/mDNS discovery can never see
+/// (e.g. on a different routed subnet) still gets a real, non-default
+/// reachability signal over time instead of looking permanently offline.
+/// Fire-and-forget: results land in the shared LAN peers cache and the next
+/// `load_recent_peers`/`load_fav_peers`/`load_lan_peers` refresh picks them up.
+fn refresh_saved_endpoints_reachability(endpoints: impl Iterator<Item = String>) {
+    let targets: Vec<std::net::IpAddr> = endpoints
+        .filter_map(|endpoint| hbb_common::lan::Endpoint::parse(&endpoint).ok())
+        .filter_map(|endpoint| endpoint.host().parse().ok())
+        .collect();
+    crate::lan::probe_ips_async(targets);
 }
 
 pub fn main_load_recent_peers() {
@@ -1549,10 +1634,9 @@ pub fn main_load_recent_peers() {
     };
 
     if !config::APP_DIR.read().unwrap().is_empty() {
-        let peers: Vec<_> = LocalConfig::get_recent_lan_endpoints()
-            .into_iter()
-            .map(recent_lan_endpoint_to_map)
-            .collect();
+        let recent = LocalConfig::get_recent_lan_endpoints();
+        refresh_saved_endpoints_reachability(recent.iter().map(|r| r.endpoint.clone()));
+        let peers: Vec<_> = recent.into_iter().map(recent_lan_endpoint_to_map).collect();
         push_to_flutter(serde_json::ser::to_string(&peers).unwrap_or_else(|_| "[]".to_owned()));
     } else {
         push_to_flutter("[]".to_owned())
@@ -1569,11 +1653,29 @@ pub fn main_load_fav_peers() {
     };
     if !config::APP_DIR.read().unwrap().is_empty() {
         let favs = get_fav();
-        let peers: Vec<_> = LocalConfig::get_recent_lan_endpoints()
+        refresh_saved_endpoints_reachability(favs.iter().cloned());
+        let mut peers: Vec<_> = LocalConfig::get_recent_lan_endpoints()
             .into_iter()
             .filter(|recent| favs.contains(&recent.endpoint))
             .map(recent_lan_endpoint_to_map)
             .collect();
+
+        // A discovered device can be starred before its first successful login.
+        let discovered = get_lan_peers();
+        for id in favs {
+            if peers.iter().any(|peer| peer.get("id") == Some(&id)) { continue; }
+            let peer = discovered.iter().find(|peer| peer.get("id") == Some(&id)).cloned()
+                .unwrap_or_else(|| {
+                    let (reachability, last_seen_at) = lan_reachability_fields("", &id);
+                    HashMap::from([
+                        ("id", id.clone()),
+                        ("alias", PeerConfig::load(&id).options.get("alias").cloned().unwrap_or_default()),
+                        ("reachability", reachability),
+                        ("last_seen_at", last_seen_at),
+                    ])
+                });
+            peers.push(peer);
+        }
 
         push_to_flutter(serde_json::ser::to_string(&peers).unwrap_or_else(|_| "[]".to_owned()));
     } else {
@@ -2374,6 +2476,15 @@ pub fn main_regenerate_lan_code() -> String {
 
 pub fn cm_decide_lan_request(id: i32, nonce: String, accept: bool) -> String {
     crate::ui_cm_interface::decide_lan_request(id, nonce, accept).err().unwrap_or_default().to_owned()
+}
+
+pub fn cm_decide_lan_request_with_permissions(id: i32, nonce: String, accept: bool, permissions: String) -> String {
+    let permissions = match serde_json::from_str::<crate::ipc::LanApprovalPermissions>(&permissions) {
+        Ok(value) => value,
+        Err(_) => return "Invalid session permissions; access was not granted".to_owned(),
+    };
+    crate::ui_cm_interface::decide_lan_request_with_permissions(id, nonce, accept, permissions)
+        .err().unwrap_or_default().to_owned()
 }
 
 pub fn cm_close_connection(conn_id: i32) {

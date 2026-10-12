@@ -16,6 +16,7 @@ import '../../models/platform_model.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
 import '../../desktop/widgets/popup_menu.dart';
 import 'responsive_layout.dart';
+import 'connection_diagnostic_dialog.dart';
 
 typedef PopupMenuEntryBuilder =
     Future<List<mod_menu.PopupMenuEntry<String>>> Function(BuildContext);
@@ -393,7 +394,13 @@ class _PeerCardState extends State<_PeerCard>
                   Row(
                     children: [
                       getOnline(8, peer.online),
-                      Text('LAN', style: TextStyle(fontSize: 12, color: muted)),
+                      Flexible(child: Tooltip(
+                        message: peer.lastConnectedAt > 0
+                            ? '${translate('Last connection')}: ${DateTime.fromMillisecondsSinceEpoch(peer.lastConnectedAt).toLocal()}'
+                            : translate('No previous connection'),
+                        child: Text(translate(peer.online ? 'Online' : 'Offline'),
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(fontSize: 12, color: muted)))),
                       const Spacer(),
                       IconButton(
                         tooltip: _favorite
@@ -438,6 +445,21 @@ class _PeerCardState extends State<_PeerCard>
                     peer.hostname.isEmpty ? secondaryLabel : peer.hostname,
                     muted,
                   ),
+                  if (_isDiscoveredPeer) ...[
+                    const SizedBox(height: 3),
+                    _buildPeerDetail(
+                      Icons.lan_outlined,
+                      formatID(peer.id),
+                      muted,
+                    ),
+                  ],
+                  if (peer.lastConnectedAt > 0) ...[
+                    const SizedBox(height: 3),
+                    Tooltip(message: translate('Last connection'),
+                      child: _buildPeerDetail(Icons.history,
+                        DateTime.fromMillisecondsSinceEpoch(peer.lastConnectedAt)
+                            .toLocal().toString().split('.').first, muted)),
+                  ],
                   const Spacer(),
                   Row(
                     children: [
@@ -948,6 +970,12 @@ abstract class BasePeerCard extends StatelessWidget {
     );
   }
 
+  MenuEntryBase<String> _diagnosticAction(BuildContext context) => MenuEntryButton<String>(
+    childBuilder: (style) => Text(translate('Check connection'), style: style),
+    proc: () => showConnectionDiagnostic(context, peer.id),
+    padding: menuPadding, dismissOnClicked: true,
+  );
+
   @protected
   MenuEntryBase<String> _removeAction(String id) {
     return MenuEntryButton<String>(
@@ -1085,6 +1113,7 @@ class RecentPeerCard extends BasePeerCard {
     BuildContext context,
   ) async {
     final List<MenuEntryBase<String>> menuItems = [
+      _diagnosticAction(context),
       _connectAction(context),
       _transferFileAction(context),
       _terminalAction(context),
@@ -1141,6 +1170,7 @@ class FavoritePeerCard extends BasePeerCard {
     BuildContext context,
   ) async {
     final List<MenuEntryBase<String>> menuItems = [
+      _diagnosticAction(context),
       _connectAction(context),
       _transferFileAction(context),
       _terminalAction(context),
@@ -1244,6 +1274,8 @@ class DiscoveredPeerCard extends BasePeerCard {
     BuildContext context,
   ) async {
     final List<MenuEntryBase<String>> menuItems = [
+      _diagnosticAction(context),
+      _renameAction(peer.id),
       _connectAction(context),
       _transferFileAction(context),
       _terminalAction(context),

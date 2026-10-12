@@ -45,11 +45,13 @@ void main() {
     expect(Peer.copy(peer).online, isTrue);
   });
 
-  test('LAN peer JSON preserves backend online state', () {
-    final onlinePeer = Peer.fromJson({'id': 'online', 'online': true});
-    final offlinePeer = Peer.fromJson({'id': 'offline', 'online': false});
+  test('LAN peer JSON derives online state from backend reachability', () {
+    final onlinePeer = Peer.fromJson({'id': 'online', 'reachability': 'online'});
+    final unknownPeer = Peer.fromJson({'id': 'unknown', 'reachability': 'unknown'});
+    final offlinePeer = Peer.fromJson({'id': 'offline', 'reachability': 'offline'});
 
     expect(onlinePeer.online, isTrue);
+    expect(unknownPeer.online, isFalse);
     expect(offlinePeer.online, isFalse);
   });
 

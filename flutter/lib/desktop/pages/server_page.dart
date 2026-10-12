@@ -1,6 +1,7 @@
 // original cm window in Sciter version.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -318,7 +319,10 @@ class ConnectionManagerState extends State<ConnectionManager>
         name: client?.name ?? '', source: client?.lanApprovalSource ?? '',
         scope: client?.lanApprovalScope ?? '', ready: client?.lanApprovalNonce.isNotEmpty == true,
         onDecision: (accept) => bind.cmDecideLanRequest(id: client!.id,
-          nonce: client.lanApprovalNonce, accept: accept));
+          nonce: client.lanApprovalNonce, accept: accept),
+        onDecisionWithPermissions: (accept, permissions) => bind.cmDecideLanRequestWithPermissions(
+          id: client!.id, nonce: client.lanApprovalNonce, accept: accept,
+          permissions: jsonEncode(permissions)));
       final controls = pending ? approval() : client == null
           ? Center(child: Text(translate('Waiting')))
           : buildConnectionCard(client);
@@ -338,7 +342,14 @@ class ConnectionManagerState extends State<ConnectionManager>
             block: block, mask: mask);
       return CmSessionPanel(
         title: client == null ? 'SubnetDesk' :
-            '${client.name} · ${pending ? translate("Waiting for approval") : translate(client.disconnected ? "Disconnected" : "Connected")}',
+            '${client.name} · ${pending ? translate("Waiting for approval") : translate(client.disconnected ? "Disconnected" : "Connected")} · ${serverModel.clients.where((c) => c.authorized && !c.disconnected).length}',
+        onEndSession: client == null || client.disconnected ? null :
+            () => checkClickTime(client.id, () {
+              if (client.disconnected) return;
+              serverModel.voiceRing.silence(client.id);
+              bind.cmCloseConnection(connId: client.id);
+            }),
+        endSessionLabel: translate('Disconnect'),
         collapsed: serverModel.windowsCmCollapsed,
         showChat: chatModel.isShowCMSidePage,
         chatLabel: translate(client?.type_() == ClientType.file

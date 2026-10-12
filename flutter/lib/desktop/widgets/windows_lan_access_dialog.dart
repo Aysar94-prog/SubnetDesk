@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../../common/widgets/connection_diagnostic_dialog.dart';
 
 class WindowsLanAccessSelection {
   const WindowsLanAccessSelection(this.endpoint, this.payload);
@@ -221,6 +222,10 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
                 t(_error),
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
+            TextButton.icon(
+              onPressed: _busy ? null : () => showConnectionDiagnostic(context, _endpoint.text, translateText: t),
+              icon: const Icon(Icons.network_check), label: Text(t('Check connection')),
+            ),
           ],
         ),
       ),

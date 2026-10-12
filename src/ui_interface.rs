@@ -40,6 +40,8 @@ pub struct UiStatus {
     pub id: String,
     #[cfg(feature = "flutter")]
     pub video_conn_count: usize,
+    #[cfg(feature = "flutter")]
+    pub active_session_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +62,8 @@ lazy_static::lazy_static! {
         id: "".to_owned(),
         #[cfg(feature = "flutter")]
         video_conn_count: 0,
+        #[cfg(feature = "flutter")]
+        active_session_count: 0,
     }));
     static ref ASYNC_JOB_STATUS : Arc<Mutex<String>> = Default::default();
     static ref ASYNC_HTTP_STATUS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -680,6 +684,8 @@ pub fn get_lan_peers() -> Vec<HashMap<&'static str, String>> {
                 ("hostname", peer.hostname.clone()),
                 ("platform", peer.platform.clone()),
                 ("fingerprint", peer.fingerprint.clone()),
+                ("alias", PeerConfig::load(if peer.endpoint.is_empty() { &peer.id } else { &peer.endpoint })
+                    .options.get("alias").cloned().unwrap_or_default()),
                 // Discovery-derived tri-state reachability and timestamps,
                 // distinct from the legacy boolean `online` projection.
                 ("reachability", reachability.to_owned()),
@@ -1048,6 +1054,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
     let mut mouse_time = 0;
     #[cfg(feature = "flutter")]
     let mut video_conn_count = 0;
+    #[cfg(feature = "flutter")]
+    let mut active_session_count = 0;
     let is_cm = crate::common::is_cm();
 
     loop {
@@ -1078,6 +1086,11 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 video_conn_count = n;
                             }
                             #[cfg(feature = "flutter")]
+                            Ok(Some(ipc::Data::ActiveSessionCount(Some(n)))) => {
+                                active_session_count = n;
+                                UI_STATUS.lock().unwrap().active_session_count = n;
+                            }
+                            #[cfg(feature = "flutter")]
                             Ok(Some(ipc::Data::LanServerStatus(Some(status)))) => {
                                 *LAN_SERVER_RUNTIME_STATUS.lock().unwrap() = status;
                             }
@@ -1099,6 +1112,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                     id: String::new(),
                                     #[cfg(feature = "flutter")]
                                     video_conn_count,
+                                    #[cfg(feature = "flutter")]
+                                    active_session_count,
                                 };
                             }
                             _ => {}
@@ -1113,6 +1128,7 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                         #[cfg(feature = "flutter")]
                         {
                             c.send(&ipc::Data::VideoConnCount(None)).await.ok();
+                            allow_err!(c.send(&ipc::Data::ActiveSessionCount(None)).await);
                             c.send(&ipc::Data::LanServerStatus(None)).await.ok();
                         }
                     }
@@ -1136,6 +1152,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
             id: String::new(),
             #[cfg(feature = "flutter")]
             video_conn_count,
+            #[cfg(feature = "flutter")]
+            active_session_count: 0,
         };
         #[cfg(feature = "flutter")]
         {

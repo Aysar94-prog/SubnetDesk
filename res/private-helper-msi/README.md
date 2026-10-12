@@ -19,25 +19,30 @@ text as well as exit code. Empty installation directories get uninstall cleanup 
 register fonts with Windows. ICE91's intentional per-user-only warning is accepted;
 build86 additionally permits only the exact ICE61 equal-public-version diagnostic
 and verifies the inclusive Upgrade table flag. All errors and other ICE warnings fail.
-Machine87+ permits no ICE warnings. validate.ps1 can validate an existing MSI
-without rebuilding or installing it.
+Machine87+ permits no ICE warnings except the exact ICE61 diagnostic for the scoped
+1.4.0/build96 same-version corrective respin. validate.ps1 can validate an existing
+MSI without rebuilding or installing it.
 Readonly verification extracts every
 MSI payload file using 7-Zip and compares hashes with the version-checked staged bundle.
 
 Old85/86 installs to LocalAppData\Programs\SubnetDeskHelper with Start shortcut;
-87+ installs to ProgramFiles64Folder\SubnetDeskHelper with Start and Desktop shortcuts.
-Uses an independent UpgradeCode, not the upstream product. The only custom action
+87+ installs to ProgramFiles64Folder\SubnetDesk with Start and Desktop shortcuts.
+Uses an independent UpgradeCode, not the upstream product. Machine builds install and
+start the `SubnetDesk` Windows service with automatic startup, and register
+`SubnetDesk.exe --tray` to launch at user sign-in. Closing the main
+window hides it; the notification-area menu remains the explicit Open/Quit control.
+The only custom action
 is WiX's user-clicked license Print button; it is absent from the install execution
-sequence. No service, firewall,
-process termination, driver registration, autorun, updater, or app-launch action.
+sequence. No firewall, process termination, driver registration, updater, or
+post-install app-launch action.
 Uninstall removes owned installer files/markers/shortcut, not application config.
 Close a running helper yourself before upgrading. This MSI does not replace a
 portable running helper. Normal Windows Installer in-use-file prompts remain.
 
 Same-public-version upgrades are enabled so 1.3.7/build85 can upgrade to build86.
-This exception applies only to1.3.7/build86. Machine1.3.8/build87 uses a new private
-UpgradeCode, with same-version upgrades disabled. Future machine releases use
-normal higher-public-version detection.
+The same narrow exception applies to the 1.4.0/build96 background-service corrective
+respin, allowing it to replace the earlier 1.4.0 MSI in place. Other machine releases
+use normal higher-public-version detection.
 Windows Installer compares only the public three-part ProductVersion, not
 HELPER_BUILD. Consequently it cannot prevent rollback between private builds of
 the same public version: do not reinstall build85 over build86. Higher public

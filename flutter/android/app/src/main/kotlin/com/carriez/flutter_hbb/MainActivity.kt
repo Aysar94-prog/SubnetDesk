@@ -11,6 +11,11 @@ package com.carriez.flutter_hbb
 import ffi.FFI
 
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import java.io.File
+import java.util.concurrent.Executors
 import android.content.ClipboardManager
 import android.os.Bundle
 import android.os.Build
@@ -42,6 +47,10 @@ class MainActivity : FlutterActivity() {
 
     private val channelTag = "mChannel"
     private val logTag = "mMainActivity"
+    private var shareChannel: MethodChannel? = null
+    private val shareExecutor = Executors.newSingleThreadExecutor()
+    private val sharedFiles = mutableListOf<String>()
+    private val shareErrors = mutableListOf<String>()
 
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
@@ -53,6 +62,26 @@ class MainActivity : FlutterActivity() {
             channelTag
         )
         initFlutterChannel(flutterMethodChannel!!)
+        shareChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "subnetdesk/share")
+        synchronized(sharedFiles) {
+            sharedFiles.addAll(getSharedPreferences("share-inbox", Context.MODE_PRIVATE)
+                .getStringSet("pending", emptySet())?.filter { File(it).isFile } ?: emptyList())
+        }
+        shareChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "pending" -> synchronized(sharedFiles) {
+                    result.success(mapOf("files" to sharedFiles.toList(), "errors" to shareErrors.toList()))
+                    shareErrors.clear()
+                }
+                "acknowledge" -> synchronized(sharedFiles) {
+                    val paths = call.arguments as? List<*> ?: emptyList<Any>()
+                    sharedFiles.removeAll { paths.contains(it) }
+                    saveShareInbox()
+                    result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
         thread {
             try {
                 setCodecInfo()
@@ -64,6 +93,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) receiveSharedFiles(intent)
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
@@ -73,6 +103,65 @@ class MainActivity : FlutterActivity() {
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
         super.onDestroy()
+        shareExecutor.shutdown()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        receiveSharedFiles(intent)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun receiveSharedFiles(sharedIntent: Intent?) {
+        if (sharedIntent == null) return
+        if (sharedIntent?.action != Intent.ACTION_SEND && sharedIntent?.action != Intent.ACTION_SEND_MULTIPLE) return
+        val uris = mutableListOf<Uri>()
+        if (sharedIntent.action == Intent.ACTION_SEND_MULTIPLE) {
+            uris.addAll(sharedIntent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList())
+        } else {
+            sharedIntent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)?.let { uris.add(it) }
+        }
+        sharedIntent.clipData?.let { clips ->
+            for (index in 0 until clips.itemCount) clips.getItemAt(index).uri?.let { uris.add(it) }
+        }
+        if (uris.isEmpty()) return
+        shareExecutor.execute {
+            if (uris.distinct().size > 100) synchronized(sharedFiles) {
+                shareErrors.add("Only the first 100 files were imported. Share the remaining files separately.")
+            }
+            for (uri in uris.distinct().take(100)) {
+                var destination: File? = null
+                try {
+                    require(uri.scheme == "content") { "Only shared content files are supported" }
+                    val folder = File(getExternalFilesDir(null) ?: filesDir, "Transfers/Shared")
+                    check(folder.isDirectory || folder.mkdirs()) { "Cannot create transfer folder" }
+                    var displayName = "shared-file"
+                    contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) displayName = cursor.getString(0) ?: displayName
+                    }
+                    val safeName = displayName.substringAfterLast('/').substringAfterLast('\\')
+                        .replace(Regex("[\\x00-\\x1f]"), "_").take(180).trim('.').ifBlank { "shared-file" }
+                    var file = File(folder, safeName)
+                    var index = 1
+                    while (file.exists()) file = File(folder, "${index++}-$safeName")
+                    destination = file
+                    val input = contentResolver.openInputStream(uri) ?: error("Shared file is unavailable")
+                    input.use { source -> file.outputStream().use { target -> source.copyTo(target) } }
+                    synchronized(sharedFiles) { sharedFiles.add(file.absolutePath); saveShareInbox() }
+                } catch (error: Exception) {
+                    destination?.let { if (it.exists() && !it.delete()) Log.w(logTag, "Cannot remove incomplete shared file") }
+                    Log.e(logTag, "Cannot import shared file", error)
+                    synchronized(sharedFiles) { shareErrors.add("Unable to import a shared file. Please share it again.") }
+                }
+            }
+            runOnUiThread { if (!isDestroyed) shareChannel?.invokeMethod("changed", null) }
+        }
+    }
+
+    private fun saveShareInbox() {
+        getSharedPreferences("share-inbox", Context.MODE_PRIVATE).edit()
+            .putStringSet("pending", sharedFiles.toSet()).apply()
     }
 
     private fun initFlutterChannel(flutterMethodChannel: MethodChannel) {

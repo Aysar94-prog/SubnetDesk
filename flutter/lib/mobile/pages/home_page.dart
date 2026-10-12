@@ -6,6 +6,8 @@ import '../../common.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
 import 'connection_page.dart';
+import '../shared_file_inbox.dart';
+import '../../desktop/widgets/windows_lan_access_dialog.dart';
 
 abstract class PageShape extends Widget {
   final String title = "";
@@ -41,6 +43,7 @@ class HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     initPages();
+    if (isAndroid) SharedFileInbox.instance.initialize();
   }
 
   void initPages() {
@@ -100,7 +103,30 @@ class HomePageState extends State<HomePage> {
             }
           }),
         ),
-        body: _pages.elementAt(_selectedIndex),
+        body: Column(children: [
+          if (isAndroid) AnimatedBuilder(animation: SharedFileInbox.instance,
+            builder: (context, _) {
+              final inbox = SharedFileInbox.instance;
+              if (inbox.files.isEmpty && inbox.error == null) return const SizedBox.shrink();
+              return MaterialBanner(
+                content: Text(inbox.error ?? '${inbox.files.length} ${translate('files ready to send')}'),
+                actions: [
+                  TextButton(onPressed: inbox.files.isEmpty ? () => inbox.refresh() : () async {
+                    final selection = await showDialog<WindowsLanAccessSelection>(context: context,
+                      builder: (_) => WindowsLanAccessDialog(endpoint: '', editEndpoint: true,
+                        translateText: translate, title: 'Transfer file'));
+                    if (selection != null && context.mounted) {
+                      await connect(context, selection.endpoint, isFileTransfer: true,
+                        password: selection.payload);
+                    }
+                  }, child: Text(translate(inbox.files.isEmpty ? 'Retry' : 'Choose computer'))),
+                  TextButton(onPressed: () => inbox.acknowledge(List.of(inbox.files)),
+                    child: Text(translate('Dismiss'))),
+                ],
+              );
+            }),
+          Expanded(child: _pages.elementAt(_selectedIndex)),
+        ]),
       ),
     );
   }

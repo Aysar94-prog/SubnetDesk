@@ -291,6 +291,14 @@ pub enum DataPortableService {
     CmShowElevation(bool),
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct LanApprovalPermissions {
+    pub keyboard: bool,
+    pub clipboard: bool,
+    pub file: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "t", content = "c")]
 pub enum Data {
@@ -369,6 +377,7 @@ pub enum Data {
     CmErr(String),
     LanApprovalRequest { nonce: String, source: String, scope: String, timeout_seconds: u32 },
     LanApprovalDecision { nonce: String, accept: bool },
+    LanApprovalDecisionWithPermissions { nonce: String, accept: bool, permissions: LanApprovalPermissions },
     // CM-side file reading responses (Windows only)
     // These are sent from CM back to Connection when CM handles file reading
     /// Response to ReadFile: contains initial file list or error
@@ -438,6 +447,8 @@ pub enum Data {
     CheckHwcodec,
     #[cfg(feature = "flutter")]
     VideoConnCount(Option<usize>),
+    #[cfg(feature = "flutter")]
+    ActiveSessionCount(Option<usize>),
     // Although the key is not necessary, it is used to avoid hardcoding the key.
     WaylandScreencastRestoreToken((String, String)),
     HwCodecConfig(Option<String>),
@@ -795,6 +806,11 @@ async fn handle(data: Data, stream: &mut Connection) {
                 .filter(|x| x.conn_type == crate::server::AuthConnType::Remote)
                 .count();
             allow_err!(stream.send(&Data::VideoConnCount(Some(n))).await);
+        }
+        #[cfg(feature = "flutter")]
+        Data::ActiveSessionCount(None) => {
+            let count = crate::server::AUTHED_CONNS.lock().unwrap().len();
+            allow_err!(stream.send(&Data::ActiveSessionCount(Some(count))).await);
         }
         Data::Config((name, value)) => match value {
             None => {

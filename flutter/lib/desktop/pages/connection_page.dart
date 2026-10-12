@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/peer_card.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
+import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/lan_discovery_refresh.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
@@ -14,6 +15,8 @@ import 'package:get/get.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../common.dart';
+import '../../common/widgets/connection_diagnostic_dialog.dart';
+import '../../common/widgets/scan_range_dialog.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../common/widgets/peer_tab_page.dart';
 import '../../models/favorite_group_model.dart';
@@ -35,6 +38,9 @@ class OnlineStatusWidget extends StatefulWidget {
 class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   final _svcStopped = Get.find<RxBool>(tag: 'stop-service');
   Timer? _updateTimer;
+  final _activeSessionCount = 0.obs;
+  final _runtimeError = ''.obs;
+  bool _updating = false;
 
   double get em => 14.0;
   double? get height => bind.isIncomingOnly() ? null : em * 3;
@@ -86,10 +92,10 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
                         : Color.fromARGB(255, 224, 79, 95)),
               ),
             ).marginSymmetric(horizontal: em),
-            Container(
+            Flexible(child: Container(
               width: isIncomingOnly ? 226 : null,
               child: _buildConnStatusMsg(),
-            ),
+            )),
             // stop
             if (!isIncomingOnly) startServiceWidget(),
           ],
@@ -115,34 +121,44 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
 
   _buildConnStatusMsg() {
     widget.onSvcStatusChanged?.call();
-    return Text(
+    return Tooltip(message: _runtimeError.value, child: Text(
       _svcStopped.value
           ? translate("Service is not running")
           : stateGlobal.svcStatus.value == SvcStatus.connecting
               ? translate("connecting_status")
               : stateGlobal.svcStatus.value == SvcStatus.notReady
-                  ? translate("not_ready_status")
-                  : translate('Ready'),
+                  ? translate('Receiver service is unavailable')
+                  : '${translate('Receiving connections')} · ${translate('Active sessions')}: ${_activeSessionCount.value}',
       style: TextStyle(fontSize: em),
-    );
+    ));
   }
 
-  updateStatus() async {
-    final status =
-        jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
-    final statusNum = status['status_num'] as int;
-    if (statusNum == 0) {
-      stateGlobal.svcStatus.value = SvcStatus.connecting;
-    } else if (statusNum == -1) {
-      stateGlobal.svcStatus.value = SvcStatus.notReady;
-    } else if (statusNum == 1) {
-      stateGlobal.svcStatus.value = SvcStatus.ready;
-    } else {
-      stateGlobal.svcStatus.value = SvcStatus.notReady;
-    }
+  Future<void> updateStatus() async {
+    if (_updating) return;
+    _updating = true;
     try {
+      final status = jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
+      final receiver = jsonDecode(await bind.mainGetLanServerInfo()) as Map<String, dynamic>;
+      if (!mounted) return;
+      _runtimeError.value = receiver['runtime_error']?.toString() ?? '';
+      if (receiver['runtime_state'] == 'starting') {
+        stateGlobal.svcStatus.value = SvcStatus.connecting;
+      } else if (receiver['running'] == true) {
+        stateGlobal.svcStatus.value = SvcStatus.ready;
+      } else {
+        stateGlobal.svcStatus.value = SvcStatus.notReady;
+      }
       stateGlobal.videoConnCount.value = status['video_conn_count'] as int;
-    } catch (_) {}
+      _activeSessionCount.value = (status['active_session_count'] as int?) ?? status['video_conn_count'] as int;
+    } catch (error) {
+      debugPrint('Unable to read receiver status: $error');
+      stateGlobal.svcStatus.value = SvcStatus.notReady;
+      stateGlobal.videoConnCount.value = 0;
+      _activeSessionCount.value = 0;
+      _runtimeError.value = translate('Unable to read receiver status');
+    } finally {
+      _updating = false;
+    }
   }
 }
 
@@ -327,6 +343,8 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
     };
     return Column(
       children: [
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 22),
+          child: OnlineStatusWidget()),
         Container(
           height: 72,
           padding: const EdgeInsets.symmetric(horizontal: 22),
@@ -337,6 +355,13 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
           child: Row(
             children: [
               const Spacer(),
+              IconButton(tooltip: translate('Check connection'),
+                onPressed: () => showConnectionDiagnostic(context, ''),
+                icon: const Icon(Icons.network_check)),
+              if (widget.selectedPeerTab == PeerTabIndex.lan)
+                IconButton(tooltip: translate('Scan IP range'),
+                  onPressed: () => showScanRangeDialog(context),
+                  icon: const Icon(Icons.travel_explore)),
               OutlinedButton.icon(
                 onPressed: () async {
                   await showLanIdentityManager(context);
@@ -381,7 +406,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                     onChanged: (value) => peerSearchText.value = value,
                     decoration: InputDecoration(
                       hintText:
-                          '${translate('Search')} · ${translate('Local Address')}',
+                          '${translate('Search')} · ${translate('Name')} / IP / ${translate('Group')}',
                       prefixIcon: const Icon(Icons.search, size: 21),
                       suffixIcon: Obx(
                         () => peerSearchText.value.isEmpty
@@ -433,7 +458,15 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                               peers.peers.map((peer) => peer.id),
                               widget.favoriteGroupId,
                             )
-                          : peers.peers.length;
+                          : widget.selectedPeerTab == PeerTabIndex.lan
+                              // The Discovered list only shows currently-online
+                              // devices, so the header must count the same set;
+                              // otherwise an offline device keeps the old
+                              // number up while the list is empty.
+                              ? peers.peers
+                                  .where(includeInDiscoveredList)
+                                  .length
+                              : peers.peers.length;
                       return Text.rich(
                         TextSpan(
                           children: [

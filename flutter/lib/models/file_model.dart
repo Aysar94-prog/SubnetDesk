@@ -589,7 +589,12 @@ class FileController {
     }
     jobController.registerTransferConflictBatch(transferJobIds);
     for (final (from, jobID) in transferJobs) {
-      bind.sessionSendFiles(
+      final job = jobController.jobTable[jobController.getJob(jobID)];
+      job.retrySource = from.path;
+      job.retryDestination = PathUtil.join(toPath, from.name, isWindows);
+      job.retryIsDirectory = from.isDirectory;
+      job.showHidden = showHidden;
+      await bind.sessionSendFiles(
           sessionId: sessionId,
           actId: jobID,
           path: from.path,
@@ -1297,6 +1302,45 @@ class JobController {
     }
   }
 
+  /// Retry with a new job ID so delayed events cannot mutate the new attempt.
+  Future<void> retryTransfer(int id) async {
+    final index = getJob(id);
+    if (index < 0) return;
+    final failed = jobTable[index];
+    if (failed.type != JobType.transfer || failed.state != JobState.error || failed.retrySource.isEmpty) return;
+    // Reserve the attempt before awaiting cancellation to prevent double retry.
+    failed.state = JobState.paused;
+    jobTable.refresh();
+    try {
+      await bind.sessionCancelJob(sessionId: sessionId, actId: id);
+      final nextId = jobID.next();
+      final next = JobProgress()
+        ..type = JobType.transfer..id = nextId..state = JobState.inProgress
+        ..fileName = failed.fileName..jobName = failed.jobName
+        ..totalSize = failed.totalSize..fileCount = failed.fileCount
+        ..isRemoteToLocal = failed.isRemoteToLocal..showHidden = failed.showHidden
+        ..retrySource = failed.retrySource..retryDestination = failed.retryDestination
+        ..retryIsDirectory = failed.retryIsDirectory;
+      jobTable.add(next);
+      registerTransferConflictBatch([nextId]);
+      try {
+        await bind.sessionSendFiles(sessionId: sessionId, actId: nextId,
+          path: next.retrySource, to: next.retryDestination, fileNum: 0,
+          includeHidden: next.showHidden, isRemote: next.isRemoteToLocal, isDir: next.retryIsDirectory);
+      } catch (e) {
+        next.state = JobState.error;
+        next.err = e.toString();
+        unregisterTransferConflictJob(nextId);
+        rethrow;
+      }
+      failed.state = JobState.done;
+      failed.err = 'Retried';
+    } catch (_) {
+      failed.state = JobState.error;
+      rethrow;
+    } finally { jobTable.refresh(); }
+  }
+
   void updateFolderFiles(Map<String, dynamic> evt) {
     // ret: "{\"id\":1,\"num_entries\":12,\"total_size\":1264822.0}"
     Map<String, dynamic> info = json.decode(evt['info']);
@@ -1617,6 +1661,9 @@ extension JobStateDisplay on JobState {
 enum JobType { none, transfer, deleteFile, deleteDir }
 
 class JobProgress {
+  String retrySource = '';
+  String retryDestination = '';
+  bool retryIsDirectory = false;
   JobType type = JobType.none;
   JobState state = JobState.none;
   var recvJobRes = false;
@@ -1644,6 +1691,9 @@ class JobProgress {
 
   clear() {
     type = JobType.none;
+    retrySource = '';
+    retryDestination = '';
+    retryIsDirectory = false;
     state = JobState.none;
     recvJobRes = false;
     id = 0;

@@ -1580,6 +1580,23 @@ pub(crate) fn decide_lan_request(id: i32, nonce: String, accept: bool) -> Result
     { let _ = (id, nonce, accept); Err("Unsupported platform") }
 }
 
+pub(crate) fn decide_lan_request_with_permissions(
+    id: i32, nonce: String, accept: bool, permissions: crate::ipc::LanApprovalPermissions,
+) -> Result<(), &'static str> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let clients = CLIENTS.read().unwrap();
+        let Some(client) = clients.get(&id) else { return Err("Request no longer exists"); };
+        if client.authorized || client.disconnected || nonce.is_empty() || client.lan_approval_nonce != nonce {
+            return Err("Request no longer awaits approval");
+        }
+        client.tx.send(Data::LanApprovalDecisionWithPermissions { nonce, accept, permissions })
+            .map_err(|_| "Connection manager channel closed")
+    }
+    #[cfg(target_os = "ios")]
+    { let _ = (id, nonce, accept, permissions); Err("Unsupported platform") }
+}
+
 pub fn elevate_portable(_id: i32) {
     #[cfg(windows)]
     {

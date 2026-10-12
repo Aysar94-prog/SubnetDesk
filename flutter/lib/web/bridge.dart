@@ -961,6 +961,22 @@ class RustdeskImpl {
     throw UnimplementedError("mainDiscover");
   }
 
+  Future<String> mainDiscoverRange({required String range, dynamic hint}) {
+    throw UnimplementedError("mainDiscoverRange");
+  }
+
+  Future<List<String>> mainGetSavedSubnets({dynamic hint}) {
+    return Future.value(<String>[]);
+  }
+
+  Future<String> mainAddSavedSubnet({required String subnet, dynamic hint}) {
+    throw UnimplementedError("mainAddSavedSubnet");
+  }
+
+  Future<void> mainRemoveSavedSubnet({required String subnet, dynamic hint}) {
+    throw UnimplementedError("mainRemoveSavedSubnet");
+  }
+
   Future<String> mainGetApiServer({dynamic hint}) {
     return Future(() => js.context.callMethod('getByName', ['api_server']));
   }

@@ -25,6 +25,8 @@ class CmSessionPanel extends StatelessWidget {
     this.onToggleVoiceRing,
     this.voiceRingError,
     this.buzzerError,
+    this.onEndSession,
+    this.endSessionLabel = 'Disconnect',
   });
 
   final String title;
@@ -47,6 +49,8 @@ class CmSessionPanel extends StatelessWidget {
   final VoidCallback? onToggleVoiceRing;
   final String? voiceRingError;
   final String? buzzerError;
+  final VoidCallback? onEndSession;
+  final String endSessionLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -120,6 +124,10 @@ class CmSessionPanel extends StatelessWidget {
                     icon: Icon(voiceRingMuted ? Icons.volume_off : Icons.phone_in_talk,
                       color: Colors.white, size: 18),
                   ),
+                if (onEndSession != null)
+                  IconButton(key: const ValueKey('cm-end-session'), tooltip: endSessionLabel,
+                    onPressed: onEndSession,
+                    icon: const Icon(Icons.link_off, color: Colors.white, size: 18)),
               ],
             ),
           ),

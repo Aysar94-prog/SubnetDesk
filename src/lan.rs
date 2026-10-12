@@ -788,6 +788,139 @@ fn publish_observed(observed: &[config::DiscoveryPeer], generation: u64, full_co
     }
 }
 
+/// Maximum number of addresses a single manual range/CIDR scan will probe, to
+/// bound worst-case packet volume and scan duration from a mistyped range
+/// (e.g. a /8 instead of a /24).
+const MAX_UNICAST_PROBE_TARGETS: usize = 1024;
+
+/// Parses a manual scan target into the list of addresses to probe. Accepts:
+/// - a single IP ("10.96.160.130")
+/// - a CIDR block ("10.96.160.0/24")
+/// - a dash range sharing the first three octets ("10.96.160.1-254" or
+///   "10.96.160.1-10.96.160.254")
+pub(crate) fn parse_ip_range(input: &str) -> ResultType<Vec<IpAddr>> {
+    let input = input.trim();
+    if input.is_empty() {
+        bail!("Empty range");
+    }
+    if let Some((base, bits)) = input.split_once('/') {
+        let base: Ipv4Addr = base.trim().parse()?;
+        let bits: u32 = bits.trim().parse()?;
+        if bits > 32 || bits < 16 {
+            bail!("CIDR prefix must be between 16 and 32");
+        }
+        let mask = if bits == 0 { 0 } else { u32::MAX << (32 - bits) };
+        let network = u32::from(base) & mask;
+        let host_bits = 32 - bits;
+        let count = 1u64 << host_bits;
+        let mut addresses = Vec::new();
+        for offset in 0..count {
+            if addresses.len() >= MAX_UNICAST_PROBE_TARGETS {
+                break;
+            }
+            addresses.push(IpAddr::V4(Ipv4Addr::from(network + offset as u32)));
+        }
+        return Ok(addresses);
+    }
+    if let Some((start, end)) = input.split_once('-') {
+        let start: Ipv4Addr = start.trim().parse()?;
+        let end = end.trim();
+        let end: Ipv4Addr = if end.contains('.') {
+            end.parse()?
+        } else {
+            let last: u8 = end.parse()?;
+            let octets = start.octets();
+            Ipv4Addr::new(octets[0], octets[1], octets[2], last)
+        };
+        let start_u32 = u32::from(start);
+        let end_u32 = u32::from(end);
+        if end_u32 < start_u32 {
+            bail!("Range end must not be before range start");
+        }
+        let mut addresses = Vec::new();
+        for value in start_u32..=end_u32 {
+            if addresses.len() >= MAX_UNICAST_PROBE_TARGETS {
+                break;
+            }
+            addresses.push(IpAddr::V4(Ipv4Addr::from(value)));
+        }
+        return Ok(addresses);
+    }
+    Ok(vec![input.parse::<IpAddr>()?])
+}
+
+/// Sends a unicast discovery ping directly to each address in `targets` on
+/// the LAN discovery port and collects any pongs, independent of UDP
+/// broadcast/mDNS. This is how a cross-subnet device (reachable by routed
+/// unicast but never seeing our broadcast/multicast traffic) can still be
+/// found or have its reachability refreshed: the discovery listener
+/// (`start_listening`) already answers any ping addressed to it, broadcast or
+/// not.
+///
+/// Runs synchronously on the calling thread; callers that must not block
+/// (e.g. an FFI entry point) should spawn this onto a background thread.
+fn probe_unicast(targets: &[IpAddr]) -> Vec<config::DiscoveryPeer> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    let Ok(socket) = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))) else {
+        log::warn!("Unicast LAN probe: failed to bind socket");
+        return Vec::new();
+    };
+
+    let mut msg_out = Message::new();
+    let id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
+    let peer = PeerDiscovery {
+        cmd: "ping".to_owned(),
+        id,
+        ..Default::default()
+    };
+    msg_out.set_peer_discovery(peer);
+    let Ok(out) = msg_out.write_to_bytes() else {
+        return Vec::new();
+    };
+    for target in targets {
+        allow_err!(socket.send_to(&out, SocketAddr::from((*target, get_broadcast_port()))));
+    }
+    log::info!("unicast discover ping sent to {} target(s)", targets.len());
+
+    let (tx, mut rx) = unbounded_channel::<config::DiscoveryPeer>();
+    let scan_start = Instant::now();
+    let hit_hard_cap = Arc::new(AtomicBool::new(false));
+    allow_err!(wait_response(socket, scan_start, hit_hard_cap, tx));
+
+    let mut observed = Vec::new();
+    while let Ok(peer) = rx.try_recv() {
+        observed.push(peer);
+    }
+    observed
+}
+
+/// Probes a set of IPv4 addresses by unicast and merges whatever responds
+/// into the shared LAN peers cache, refreshing the UI. `full_coverage` is
+/// always `false`: a partial, targeted probe must only ever add positive
+/// observations, never mark an unanswering address Offline (it may simply be
+/// outside this probe's target list, not actually gone).
+pub(crate) fn probe_ips_async(targets: Vec<IpAddr>) {
+    if targets.is_empty() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let observed = probe_unicast(&targets);
+        let generation = SCAN_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+        publish_observed(&observed, generation, false);
+    });
+}
+
+/// Entry point for a user-initiated manual IP range scan, bypassing
+/// broadcast/mDNS entirely. `range` is parsed by [`parse_ip_range`].
+pub(crate) fn discover_range_async(range: String) -> ResultType<usize> {
+    let targets = parse_ip_range(&range)?;
+    let count = targets.len();
+    probe_ips_async(targets);
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -907,6 +1040,29 @@ mod tests {
 
         assert_eq!(intent, ConnectionIntent::ManualEndpoint);
         assert_eq!(resolved_fingerprint, None);
+    }
+
+    #[test]
+    fn parses_manual_scan_ranges() {
+        let cidr = parse_ip_range("10.96.160.0/24").unwrap();
+        assert_eq!(cidr.len(), 256);
+        assert_eq!(cidr[0], "10.96.160.0".parse::<IpAddr>().unwrap());
+        assert_eq!(cidr[255], "10.96.160.255".parse::<IpAddr>().unwrap());
+
+        let short = parse_ip_range("10.96.160.1-254").unwrap();
+        assert_eq!(short.len(), 254);
+        assert_eq!(short[253], "10.96.160.254".parse::<IpAddr>().unwrap());
+
+        let full = parse_ip_range(" 10.96.39.10-10.96.39.12 ").unwrap();
+        assert_eq!(full.len(), 3);
+
+        assert_eq!(parse_ip_range("10.96.160.130").unwrap().len(), 1);
+        assert_eq!(parse_ip_range("10.0.0.0/16").unwrap().len(), MAX_UNICAST_PROBE_TARGETS);
+
+        assert!(parse_ip_range("").is_err());
+        assert!(parse_ip_range("10.0.0.0/8").is_err());
+        assert!(parse_ip_range("10.96.160.20-10").is_err());
+        assert!(parse_ip_range("not-an-ip").is_err());
     }
 
     #[test]
