@@ -35,8 +35,6 @@ class WindowsLanAccessDialog extends StatefulWidget {
 class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
   late final TextEditingController _endpoint;
   final _password = TextEditingController();
-  final _code = TextEditingController();
-  int _method = 0;
   bool _remember = false;
   String _error = '';
   bool _busy = false;
@@ -49,7 +47,6 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
 
   void _clearCredentials() {
     _password.clear();
-    _code.clear();
     _remember = false;
     _error = '';
   }
@@ -61,32 +58,12 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
       setState(() => _error = 'Enter the receiver IP address or hostname');
       return;
     }
-    final code = _code.text.trim();
-    if (_method == 1 && !RegExp(r'^[0-9]{6}$').hasMatch(code)) {
-      setState(() => _error = 'Enter a 6-digit temporary code');
-      return;
-    }
-    if (_method == 0 && _password.text.isEmpty && !widget.allowSavedPassword) {
-      setState(
-        () => _error =
-            'Enter the receiver password or choose another access method',
-      );
-      return;
-    }
-    final payload = _method != 0
-        ? jsonEncode({
-            'lan_version': 1,
-            'access_method': _method,
-            'temporary_code': _method == 1 ? code : '',
-          })
-        : _password.text.isEmpty
-        ? null
-        : jsonEncode({
-            'lan_version': 1,
-            'username': '',
-            'password': _password.text,
-            'remember': _remember,
-          });
+    final entered = _password.text;
+    final payload = jsonEncode({
+      'lan_version': 1,
+      'access_method': 4,
+      'temporary_code': entered,
+    });
     _clearCredentials();
     final selection = WindowsLanAccessSelection(endpoint, payload);
     if (widget.onSubmit == null) {
@@ -114,7 +91,6 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
     _endpoint.clear();
     _endpoint.dispose();
     _password.dispose();
-    _code.dispose();
     super.dispose();
   }
 
@@ -144,48 +120,21 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
             else
               Text(widget.endpoint),
             const SizedBox(height: 12),
-            DropdownButtonFormField<int>(
-              key: const ValueKey('windows-lan-method'),
-              initialValue: _method,
-              isExpanded: true,
-              decoration: InputDecoration(labelText: t('Access method')),
-              items: [
-                DropdownMenuItem(
-                  value: 0,
-                  child: Text(
-                    t('Password / saved password'),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                DropdownMenuItem(value: 1, child: Text(t('Temporary code'))),
-                DropdownMenuItem(value: 2, child: Text(t('Manual approval'))),
-              ],
-              onChanged: _busy
-                  ? null
-                  : (method) => setState(() {
-                      _clearCredentials();
-                      _method = method ?? 0;
-                    }),
+            TextField(
+              key: const ValueKey('windows-lan-password'),
+              controller: _password,
+              enabled: !_busy,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: InputDecoration(
+                labelText: t('Password or temporary code (optional)'),
+                helperText: t('Leave blank to request manual approval'),
+              ),
+              onSubmitted: (_) => _submit(),
             ),
             const SizedBox(height: 12),
-            if (_method == 0) ...[
-              TextField(
-                key: const ValueKey('windows-lan-password'),
-                controller: _password,
-                enabled: !_busy,
-                obscureText: true,
-                autocorrect: false,
-                enableSuggestions: false,
-                decoration: InputDecoration(
-                  labelText: t('Password'),
-                  helperText: t(
-                    widget.allowSavedPassword
-                        ? 'Leave blank to use the saved password for this device'
-                        : 'Enter the unattended access password configured on the receiver',
-                  ),
-                ),
-                onSubmitted: (_) => _submit(),
-              ),
+            if (widget.allowSavedPassword)
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
                 dense: true,
@@ -194,28 +143,6 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
                 onChanged: _busy
                     ? null
                     : (value) => setState(() => _remember = value == true),
-              ),
-            ],
-            if (_method == 1)
-              TextField(
-                key: const ValueKey('windows-lan-code'),
-                controller: _code,
-                enabled: !_busy,
-                keyboardType: TextInputType.number,
-                maxLength: 6,
-                autocorrect: false,
-                enableSuggestions: false,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                decoration: InputDecoration(
-                  labelText: t('Receiver code (6 digits)'),
-                ),
-                onSubmitted: (_) => _submit(),
-              ),
-            if (_method == 2)
-              Text(
-                t(
-                  'A request appears on the receiver. Control starts only after acceptance.',
-                ),
               ),
             if (_error.isNotEmpty)
               Text(

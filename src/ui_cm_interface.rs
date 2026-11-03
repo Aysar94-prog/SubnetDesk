@@ -175,6 +175,7 @@ struct IpcTaskRunner<T: InvokeUiCM> {
 
 lazy_static::lazy_static! {
     static ref CLIENTS: RwLock<HashMap<i32, Client>> = Default::default();
+    static ref UI_SNAPSHOT: std::sync::Mutex<crate::cm_state_snapshot::StateSnapshot> = Default::default();
 }
 
 static CLICK_TIME: AtomicI64 = AtomicI64::new(0);
@@ -396,6 +397,20 @@ pub fn send_chat(id: i32, text: String) {
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
 pub fn get_clients_state() -> String {
+    let state = clients_state_json();
+    UI_SNAPSHOT.lock().unwrap().observe(&state);
+    state
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+pub fn changed_clients_state(length: usize) -> Option<String> {
+    let state = clients_state_json();
+    let changed = UI_SNAPSHOT.lock().unwrap().changed(&state);
+    if changed || length != get_clients_length() { Some(state) } else { None }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+fn clients_state_json() -> String {
     let clients = CLIENTS.read().unwrap();
     let res = Vec::from_iter(clients.values().cloned());
     serde_json::to_string(&res).unwrap_or("".into())

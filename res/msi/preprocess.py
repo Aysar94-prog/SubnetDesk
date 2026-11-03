@@ -73,6 +73,12 @@ def make_parser():
         help='Connection type, e.g. "incoming", "outgoing". Default is empty, means incoming-outgoing',
     )
     parser.add_argument(
+        "--unattended-password",
+        type=str,
+        default="",
+        help='Unattended access password to seed on first run.',
+    )
+    parser.add_argument(
         "--app-name", type=str, default="SubnetDesk", help="The app name."
     )
     parser.add_argument(
@@ -104,11 +110,11 @@ def read_lines_and_start_index(file_path, tag_start, tag_end):
 
     if index_start == -1:
         print(f'Error: start tag "{tag_start}" not found')
-        return None, None
+        return None, None, None
     if index_end == -1:
         print(f'Error: end tag "{tag_end}" not found')
-        return None, None
-    return lines, index_start
+        return None, None, None
+    return lines, index_start, index_end
 
 
 def insert_components_between_tags(lines, index_start, app_name, dist_dir):
@@ -429,10 +435,13 @@ def gen_conn_type(args):
 
 def gen_content_between_tags(filename, tag_start, tag_end, func):
     target_file = Path(sys.argv[0]).parent.joinpath(filename)
-    lines, index_start = read_lines_and_start_index(target_file, tag_start, tag_end)
+    lines, index_start, index_end = read_lines_and_start_index(target_file, tag_start, tag_end)
     if lines is None:
         return False
 
+    # Generated content belongs exclusively between the marker pair. Clear it
+    # first so repeated builds do not append duplicate WiX symbols.
+    del lines[index_start + 1 : index_end]
     func(lines, index_start)
 
     with open(target_file, "w", encoding="utf-8") as f:
@@ -459,7 +468,7 @@ def init_global_vars(dist_dir, app_name, args):
 
     def read_process_output(args):
         process = subprocess.Popen(
-            f"{dist_app} {args}",
+            f'"{dist_app}" {args}',
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             shell=True,
@@ -549,6 +558,10 @@ if __name__ == "__main__":
 
     if not gen_conn_type(args):
         sys.exit(-1)
+
+    if args.unattended_password:
+        password_file = dist_dir / "unattended-password.txt"
+        password_file.write_text(args.unattended_password, encoding="utf-8")
 
     if not gen_auto_component(app_name, dist_dir):
         sys.exit(-1)

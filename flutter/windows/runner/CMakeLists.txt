@@ -21,6 +21,12 @@ add_executable(${BINARY_NAME} WIN32
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
 
+# Match the same Dart build flag used to select the Deploy application.
+file(STRINGS "${FLUTTER_MANAGED_DIR}/ephemeral/generated_config.cmake" DEPLOY_DART_DEFINES REGEX "DART_DEFINES=")
+if(DEPLOY_DART_DEFINES MATCHES "U1VCTkVUREVTS19ERVBMT1lNRU5UX1VUSUxJVFk9dHJ1ZQ==")
+  target_compile_definitions(${BINARY_NAME} PRIVATE SUBNETDESK_DEPLOY_ICON)
+endif()
+
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION_MAJOR=${FLUTTER_VERSION_MAJOR}")

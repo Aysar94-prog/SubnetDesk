@@ -80,6 +80,20 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     {
         *config::APP_DIR.write().unwrap() = app_dir.to_owned();
     }
+    #[cfg(target_os = "windows")]
+    {
+        let password_file = std::path::PathBuf::from(config::APP_DIR.read().unwrap().clone())
+            .join("unattended-password.txt");
+        if let Ok(password) = std::fs::read_to_string(&password_file) {
+            let password = password.trim();
+            if !password.is_empty() {
+                let _ = config::Config::set_lan_password(password.as_bytes());
+                let _ = config::Config::set_lan_password_access_enabled(true);
+            }
+            let _ = std::fs::remove_file(&password_file);
+        }
+        config::initialize_receiver_only();
+    }
     // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
     if custom_client_config.is_empty() {
         crate::load_custom_client();
@@ -982,10 +996,12 @@ pub fn main_get_sound_inputs() -> Vec<String> {
 }
 
 pub fn main_get_option(key: String) -> String {
+    if key.starts_with("incoming-only") { return config::Config::get_option(&key); }
     get_option(key)
 }
 
 pub fn main_get_option_sync(key: String) -> SyncReturn<String> {
+    if key.starts_with("incoming-only") { return SyncReturn(config::Config::get_option(&key)); }
     SyncReturn(get_option(key))
 }
 
@@ -1002,6 +1018,13 @@ pub fn main_show_option(_key: String) -> SyncReturn<bool> {
 }
 
 pub fn main_set_option(key: String, mut value: String) {
+    if key.starts_with("incoming-only") {
+        #[cfg(windows)]
+        if config::Config::get_option("incoming-only-scope") == "device" {
+            log::warn!("Receiver policy is managed by SubnetDesk Deploy"); return;
+        }
+        config::Config::set_option(key.clone(), value.clone());
+    }
     if config::is_lan_only_obsolete_option(&key) {
         log::warn!("Ignored obsolete public-network option in LAN-only mode: {key}");
         return;
@@ -1923,19 +1946,27 @@ fn lan_server_info() -> String {
             .map(ToOwned::to_owned)
             .collect();
     #[cfg(not(target_os = "ios"))]
-    let addresses: Vec<String> = crate::lan::local_connectable_addresses()
+    let address_details: Vec<_> = crate::lan::local_connectable_address_details()
         .into_iter()
-        .filter(|address| {
-            if configured_listen_addresses.is_empty() {
-                crate::lan_server::source_allowed(*address)
+        .filter(|item| {
+            let wildcard = if item.address.is_ipv4() { "0.0.0.0" } else { "::" };
+            if configured_listen_addresses.is_empty() || configured_listen_addresses.contains(wildcard) {
+                crate::lan_server::source_allowed(item.address)
             } else {
-                configured_listen_addresses.contains(&address.to_string())
+                configured_listen_addresses.contains(&item.address.to_string())
             }
         })
-        .map(|address| address.to_string())
+        .collect();
+    #[cfg(not(target_os = "ios"))]
+    let addresses: Vec<String> = address_details.iter().map(|item| item.address.to_string()).collect();
+    #[cfg(not(target_os = "ios"))]
+    let address_details: Vec<_> = address_details.into_iter()
+        .map(|item| serde_json::json!({"address": item.address.to_string(), "adapter": item.adapter}))
         .collect();
     #[cfg(target_os = "ios")]
     let addresses: Vec<String> = Vec::new();
+    #[cfg(target_os = "ios")]
+    let address_details: Vec<serde_json::Value> = Vec::new();
     let port = Config::get_option("lan-listen-port")
         .parse::<u16>()
         .ok()
@@ -1973,6 +2004,7 @@ fn lan_server_info() -> String {
         "system_device_name": crate::hostname(),
         "fingerprint": crate::lan_protocol::fingerprint(&Config::get_key_pair().1),
         "addresses": addresses,
+        "address_details": address_details,
         "port": port,
         "listen_addresses": Config::get_option("lan-listen-addresses"),
         "allowed_networks": Config::get_option("lan-allowed-networks"),
@@ -2135,11 +2167,7 @@ pub fn cm_get_clients_state() -> String {
 }
 
 pub fn cm_check_clients_length(length: usize) -> Option<String> {
-    if length != crate::ui_cm_interface::get_clients_length() {
-        Some(crate::ui_cm_interface::get_clients_state())
-    } else {
-        None
-    }
+    crate::ui_cm_interface::changed_clients_state(length)
 }
 
 pub fn cm_get_clients_length() -> usize {

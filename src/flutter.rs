@@ -1411,12 +1411,7 @@ pub fn session_add(
                 || payload.remember || payload.bind_identity {
                 bail!("Optional access must not include or save credentials");
             }
-            match payload.access_method {
-                hbb_common::lan::ACCESS_CODE if payload.temporary_code.len() == 6
-                    && payload.temporary_code.bytes().all(|byte| byte.is_ascii_digit()) => {},
-                hbb_common::lan::ACCESS_MANUAL if payload.temporary_code.is_empty() => {},
-                _ => bail!("Invalid access method or temporary code"),
-            }
+            hbb_common::lan::validate_optional_access(payload.access_method, &payload.temporary_code)?;
             (Some(LanSessionCredential { access_method: payload.access_method, temporary_code: payload.temporary_code,
                 username: String::new(), password: Vec::new(), remember: false, identity_id: String::new(),
                 bind_identity_on_success: false }), None)

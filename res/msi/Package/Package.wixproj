@@ -1,5 +1,6 @@
 ﻿<Project Sdk="WixToolset.Sdk/4.0.5">
   <PropertyGroup>
+    <OutputName>SubnetDesk-Helper</OutputName>
     <IncludeSearchPaths>
     </IncludeSearchPaths>
     <Configurations>Release</Configurations>

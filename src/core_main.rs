@@ -7,6 +7,7 @@ use crate::platform::breakdown_callback;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::platform::register_breakdown_handler;
 use hbb_common::{config, log};
+use zeroize::Zeroize;
 #[cfg(windows)]
 use tauri_winrt_notification::{Duration, Sound, Toast};
 
@@ -33,6 +34,8 @@ pub fn core_main() -> Option<Vec<String>> {
         return None;
     }
     crate::load_custom_client();
+    #[cfg(windows)]
+    config::initialize_installed_helper();
     #[cfg(windows)]
     if !crate::platform::windows::bootstrap() {
         // return None to terminate the process
@@ -503,6 +506,9 @@ pub fn core_main() -> Option<Vec<String>> {
             }
             return None;
         } else if args[0] == "--option" {
+            if args.len() == 3 && args[1].starts_with("incoming-only") && config::Config::get_option("incoming-only-scope") == "device" {
+                log::error!("Receiver policy is managed by SubnetDesk Deploy"); std::process::exit(1);
+            }
             if is_cli_setting_change_disabled() {
                 println!("Settings are disabled!");
                 return None;
@@ -512,11 +518,129 @@ pub fn core_main() -> Option<Vec<String>> {
                     let options = crate::ipc::get_options();
                     println!("{}", options.get(&args[1]).unwrap_or(&"".to_owned()));
                 } else if args.len() == 3 {
+                    if args[1] == "incoming-only"
+                        && !config::Config::get_option("incoming-only-password").is_empty()
+                    {
+                        println!("Incoming-only mode is password-locked. Use --incoming-only-unlock <password>.");
+                        return None;
+                    }
                     crate::ipc::set_option(&args[1], &args[2]);
                 }
             } else {
                 println!("Installation and administrative privileges required!");
             }
+            return None;
+        } else if args[0] == "--incoming-only-lock" {
+            if config::Config::get_option("incoming-only-scope") == "device" { log::error!("Receiver policy is managed by SubnetDesk Deploy"); std::process::exit(1); }
+            if args.len() != 2 {
+                println!("Usage: --incoming-only-lock <password>");
+                return None;
+            }
+            if !(crate::platform::is_installed() && is_root()) {
+                println!("Installation and administrative privileges required!");
+                return None;
+            }
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(args[1].as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            config::Config::set_option("incoming-only".to_owned(), "Y".to_owned());
+            config::Config::set_option("incoming-only-password".to_owned(), hash);
+            config::Config::set_option("incoming-only-initialized".to_owned(), "locked".to_owned());
+            println!("Incoming-only mode locked.");
+            return None;
+        } else if args[0] == "--incoming-only-unlock" {
+            if config::Config::get_option("incoming-only-scope") == "device" { log::error!("Receiver policy is managed by SubnetDesk Deploy"); std::process::exit(1); }
+            if args.len() != 2 {
+                println!("Usage: --incoming-only-unlock <password>");
+                return None;
+            }
+            if !(crate::platform::is_installed() && is_root()) {
+                println!("Installation and administrative privileges required!");
+                return None;
+            }
+            let mut stored = config::Config::get_option("incoming-only-password");
+            if stored.is_empty() {
+                stored = "b008f337c227dcb4fa0fa4b1e9b915dd24a34e698b6739236f96b29fa9d2f532".to_owned();
+            }
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(args[1].as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            if hash == stored {
+                config::Config::set_option("incoming-only".to_owned(), "".to_owned());
+                config::Config::set_option("incoming-only-password".to_owned(), "".to_owned());
+                config::Config::set_option("incoming-only-initialized".to_owned(), "unlocked".to_owned());
+                println!("Incoming-only mode unlocked.");
+            } else {
+                println!("Incorrect password.");
+            }
+            return None;
+        } else if args[0] == "--set-unattended-password" {
+            if args.len() != 2 {
+                println!("Usage: --set-unattended-password <password>");
+                return None;
+            }
+            if !(crate::platform::is_installed() && is_root()) {
+                println!("Installation and administrative privileges required!");
+                return None;
+            }
+            match config::Config::set_lan_password(args[1].as_bytes()) {
+                Ok(_) => {
+                    let _ = config::Config::set_lan_password_access_enabled(true);
+                    println!("Unattended password set.");
+                }
+                Err(err) => println!("Failed to set unattended password: {err}"),
+            }
+            return None;
+        } else if args[0] == "--reset-receiver-only-for-install" {
+            #[cfg(windows)]
+            {
+                if !is_root() {
+                    log::error!("Installed Helper and administrator rights required to reset receiver mode");
+                    std::process::exit(1);
+                }
+                if let Err(err) = crate::platform::windows::reset_receiver_only_for_install() {
+                    log::error!("Receiver-only installation reset failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return None;
+        } else if args[0] == "--set-unattended-password-stdin" {
+            if !(crate::platform::is_installed() && is_root()) {
+                log::error!("Installation and administrative privileges required for unattended password configuration");
+                std::process::exit(1);
+            }
+            use std::io::Read;
+            let mut password = String::new();
+            if let Err(err) = std::io::stdin().read_to_string(&mut password) {
+                password.zeroize();
+                log::error!("Failed to read unattended password input: {err}");
+                std::process::exit(1);
+            }
+            if password.ends_with('\n') {
+                password.pop();
+            }
+            if password.is_empty() {
+                log::error!("Unattended password input was empty");
+                std::process::exit(1);
+            }
+            match config::Config::set_lan_password(password.as_bytes()) {
+                Ok(_) => match config::Config::set_lan_password_access_enabled(true) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        password.zeroize();
+                        log::error!("Failed to enable unattended password access: {err}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(err) => {
+                    password.zeroize();
+                    log::error!("Failed to set unattended password: {err}");
+                    std::process::exit(1);
+                }
+            }
+            password.zeroize();
             return None;
         } else if args[0] == "--check-hwcodec-config" {
             #[cfg(feature = "hwcodec")]

@@ -61,3 +61,26 @@ vcpkg_installed
 flutter/lib/generated_plugin_registrant.dart
 libsciter.dylib
 flutter/web/
+
+# Local tools, build artifacts, releases, and planning sessions
+/output/
+/outputs/
+/baseline/
+/flutter/.wix/
+/.ai-planner/
+
+/tools/
+/.claude/
+/logs/
+
+# Personal settings, signing material and runtime credentials
+.env.*
+!.env.example
+!.env.sample
+**/.private/
+*.pfx
+*.p12
+*.pem
+*.key
+*.jks
+*.keystore

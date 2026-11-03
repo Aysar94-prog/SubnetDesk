@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter_hbb/desktop/widgets/receiver_only_settings.dart';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -386,6 +387,8 @@ class _GeneralState extends State<_General> {
           _Card(title: 'Unattended access', children: [const LanUnattendedAccess()]),
         if (isWindows && !bind.isOutgoingOnly())
           _Card(title: 'Connection approval', children: [const LanOptionalAccess(showSettings: true)]),
+        if (isWindows)
+          _Card(title: 'Receiver-only mode', children: [incomingOnlyLock()]),
         theme(),
         _Card(title: 'Language', children: [language()]),
         if (!isWeb) hwcodec(),
@@ -432,6 +435,12 @@ class _GeneralState extends State<_General> {
       ],
     );
   }
+
+  Widget incomingOnlyLock() => ReceiverOnlySettings(
+    initiallyLocked: bind.isIncomingOnly(),
+    readOption: (key) => bind.mainGetOption(key: key),
+    writeOption: (key, value) => bind.mainSetOption(key: key, value: value),
+  );
 
   Widget service() {
     if (bind.isOutgoingOnly()) {

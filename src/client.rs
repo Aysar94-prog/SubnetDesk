@@ -274,7 +274,7 @@ impl Client {
             bail!(crate::camera_access::DISABLED_MESSAGE);
         }
         if config::is_incoming_only() {
-            bail!("Incoming only mode");
+            bail!("This device is receiver-only and cannot initiate connections");
         }
         if let Some(remaining) = interface.get_lch().read().unwrap().auth_retry_remaining() {
             bail!(
@@ -2782,6 +2782,7 @@ async fn negotiate_lan_access(peer: &mut Stream, method: u32) -> ResultType<()> 
                     hbb_common::lan::ACCESS_CODE => caps.code_enabled,
                     hbb_common::lan::ACCESS_MANUAL => caps.manual_enabled,
                     hbb_common::lan::ACCESS_PASSWORD_ONLY => caps.password_only_enabled,
+                    hbb_common::lan::ACCESS_AUTO => caps.code_enabled || caps.manual_enabled || caps.password_only_enabled,
                     _ => false,
                 };
                 if !enabled { bail!("Selected access method is disabled or unsupported on the receiver"); }

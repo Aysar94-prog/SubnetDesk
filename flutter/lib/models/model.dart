@@ -3924,7 +3924,6 @@ class FFI {
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
     if (isNewPeer) {
-      // ignore: unused_local_variable
       final addRes = bind.sessionAddSync(
         sessionId: sessionId,
         id: id,
@@ -3935,6 +3934,22 @@ class FFI {
         isTerminal: isTerminal,
         password: password ?? '',
       );
+      if (addRes.isNotEmpty) {
+        // The caller installs its Connecting overlay after start() returns.
+        // Deliver this like an async native event so it replaces that overlay.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          Future.microtask(() {
+            if (closed) return;
+            ffiModel.handleMsgBox({
+              'type': 'error',
+              'title': 'Connection Error',
+              'text': addRes,
+              'link': '',
+            }, sessionId, id);
+          });
+        });
+        return;
+      }
     } else if (display != null) {
       if (displays == null) {
         debugPrint(

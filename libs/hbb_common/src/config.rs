@@ -1,0 +1,5694 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    io::{Read, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    ops::{Deref, DerefMut},
+    path::{Path, PathBuf},
+    sync::{Mutex, RwLock},
+    time::{Duration, Instant, SystemTime},
+};
+
+use anyhow::{anyhow, Result};
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Algorithm, Argon2, Params, Version,
+};
+use rand::Rng;
+use regex::Regex;
+use serde as de;
+use serde_derive::{Deserialize, Serialize};
+use serde_json;
+use sodiumoxide::base64;
+use sodiumoxide::crypto::sign;
+
+mod permanent_password;
+mod helper_profile;
+
+pub use permanent_password::{
+    compute_permanent_password_h1, decode_permanent_password_h1_from_storage,
+    decode_preset_password_h1_from_storage, local_permanent_password_storage_is_usable_for_auth,
+    preset_permanent_password_storage_is_usable_for_auth, ENCRYPT_MAX_LEN,
+};
+use permanent_password::{
+    decode_permanent_password_h1_from_hashed_storage, decrypt_permanent_password_str_or_original,
+    encode_permanent_password_encrypted_storage_from_h1, password_is_empty_or_not_hashed,
+    preset_permanent_password_storage_matches_plain, DEFAULT_SALT_LEN, PASSWORD_ENC_VERSION,
+};
+
+use crate::{
+    compress::{compress, decompress},
+    log,
+    password_security::{
+        decrypt_str_or_original, decrypt_vec_or_original, encrypt_str_or_original,
+        encrypt_vec_or_original, symmetric_crypt,
+    },
+};
+
+pub const CONNECT_TIMEOUT: u64 = 18_000;
+pub const READ_TIMEOUT: u64 = 18_000;
+// https://github.com/quic-go/quic-go/issues/525#issuecomment-294531351
+// https://datatracker.ietf.org/doc/html/draft-hamilton-early-deployment-quic-00#section-6.10
+// 15 seconds is recommended by quic, though oneSIP recommend 25 seconds,
+// https://www.onsip.com/voip-resources/voip-fundamentals/what-is-nat-keepalive
+pub const COMPRESS_LEVEL: i32 = 3;
+const LAN_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
+const LAN_ARGON2_ITERATIONS: u32 = 3;
+const LAN_ARGON2_PARALLELISM: u32 = 1;
+const LAN_SCHEMA_VERSION: u32 = 1;
+
+pub fn is_lan_only_obsolete_option(key: &str) -> bool {
+    matches!(
+        key,
+        "id-server"
+            | "rendezvous-server"
+            | "custom-rendezvous-server"
+            | "rendezvous-servers"
+            | "relay-server"
+            | "api-server"
+            | "key"
+            | "proxy-url"
+            | "proxy-username"
+            | "proxy-password"
+            | "enable-udp-punch"
+            | "enable-ipv6-punch"
+            | "allow-websocket"
+            | "force-always-relay"
+            | "access-token"
+            | "direct-server"
+            | "direct-access-port"
+            | "access-mode"
+            | "approve-mode"
+            | "verification-method"
+            | "temporary-password-length"
+            | "allow-numeric-one-time-password"
+            | "enable-perm-change-in-accept-window"
+            | "allow-remote-config-modification"
+            | "allow-hide-cm"
+            | "disable-change-id"
+            | "enable-check-update"
+            | "allow-auto-update"
+            | "sync-ab-with-recent-sessions"
+            | "sync-ab-tags"
+            | "filter-ab-by-intersection"
+            | "preset-address-book-name"
+            | "preset-address-book-tag"
+            | "preset-address-book-alias"
+            | "preset-address-book-password"
+            | "preset-address-book-note"
+            | "enable-trusted-devices"
+            | "register-device"
+    )
+}
+
+fn lan_argon2() -> Result<Argon2<'static>> {
+    let params = Params::new(
+        LAN_ARGON2_MEMORY_KIB,
+        LAN_ARGON2_ITERATIONS,
+        LAN_ARGON2_PARALLELISM,
+        None,
+    )
+    .map_err(|err| anyhow!("Invalid LAN Argon2 parameters: {err}"))?;
+    Ok(Argon2::new(Algorithm::Argon2id, Version::V0x13, params))
+}
+
+fn hash_lan_password(password: &[u8]) -> Result<String> {
+    crate::lan::validate_password(password)?;
+    let salt = SaltString::generate(&mut OsRng);
+    lan_argon2()?
+        .hash_password(password, &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|err| anyhow!("Failed to hash access password: {err}"))
+}
+
+fn verify_lan_password_hash(password_hash: &str, password: &[u8]) -> Result<bool> {
+    crate::lan::validate_password(password)?;
+    let parsed = PasswordHash::new(password_hash)
+        .map_err(|err| anyhow!("Invalid stored access password hash: {err}"))?;
+    Ok(lan_argon2()?.verify_password(password, &parsed).is_ok())
+}
+
+#[cfg(target_os = "macos")]
+lazy_static::lazy_static! {
+pub static ref ORG: RwLock<String> = RwLock::new("com.zibochen".to_owned());
+}
+
+type Size = (i32, i32, i32, i32);
+type KeyPair = (Vec<u8>, Vec<u8>);
+
+lazy_static::lazy_static! {
+    static ref CONFIG: RwLock<Config> = RwLock::new(Config::load());
+    static ref CONFIG2: RwLock<Config2> = RwLock::new(Config2::load());
+    static ref LOCAL_CONFIG: RwLock<LocalConfig> = RwLock::new(LocalConfig::load());
+    static ref STATUS: RwLock<Status> = RwLock::new(Status::load());
+    pub static ref APP_NAME: RwLock<String> = RwLock::new("SubnetDesk".to_owned());
+    static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
+    static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
+    pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
+    pub static ref DEFAULT_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref OVERWRITE_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref DEFAULT_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref OVERWRITE_DISPLAY_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref DEFAULT_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref OVERWRITE_LOCAL_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref HARD_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+    pub static ref BUILTIN_SETTINGS: RwLock<HashMap<String, String>> = Default::default();
+}
+
+#[cfg(target_os = "android")]
+lazy_static::lazy_static! {
+    pub static ref ANDROID_RUSTLS_PLATFORM_VERIFIER_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+}
+
+lazy_static::lazy_static! {
+    pub static ref APP_DIR: RwLock<String> = Default::default();
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+lazy_static::lazy_static! {
+    pub static ref APP_HOME_DIR: RwLock<String> = Default::default();
+}
+
+const NUM_CHARS: &[char] = &['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+
+const CHARS: &[char] = &[
+    '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k',
+    'm', 'n', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+];
+
+#[inline]
+pub fn is_service_ipc_postfix(postfix: &str) -> bool {
+    // `_service` is a protected cross-user IPC channel used by the root service.
+    //
+    // On Linux Wayland, input injection is implemented via uinput in the root service process.
+    // The user `--server` process must be able to connect to these uinput IPC channels, so they
+    // must share the same IPC parent directory as `_service`.
+    postfix == "_service" || postfix.starts_with("_uinput_")
+}
+
+// Keep Linux/macOS IPC parent directory rules in one place to avoid drift between
+// `ipc_path()` and Unix `ipc_path_for_uid()`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[inline]
+fn ipc_parent_dir_for_uid(uid: u32, postfix: &str) -> String {
+    let app_name = APP_NAME.read().unwrap().clone();
+    if is_service_ipc_postfix(postfix) {
+        format!("/tmp/{app_name}-service")
+    } else {
+        format!("/tmp/{app_name}-{uid}")
+    }
+}
+
+macro_rules! serde_field_string {
+    ($default_func:ident, $de_func:ident, $default_expr:expr) => {
+        fn $default_func() -> String {
+            $default_expr
+        }
+
+        fn $de_func<'de, D>(deserializer: D) -> Result<String, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            let s: String =
+                de::Deserialize::deserialize(deserializer).unwrap_or(Self::$default_func());
+            if s.is_empty() {
+                return Ok(Self::$default_func());
+            }
+            Ok(s)
+        }
+    };
+}
+
+macro_rules! serde_field_bool {
+    ($struct_name: ident, $field_name: literal, $func: ident, $default: literal) => {
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+        pub struct $struct_name {
+            #[serde(default = $default, rename = $field_name, deserialize_with = "deserialize_bool")]
+            pub v: bool,
+        }
+        impl Default for $struct_name {
+            fn default() -> Self {
+                Self { v: Self::$func() }
+            }
+        }
+        impl $struct_name {
+            pub fn $func() -> bool {
+                UserDefaultConfig::read($field_name) == "Y"
+            }
+        }
+        impl Deref for $struct_name {
+            type Target = bool;
+
+            fn deref(&self) -> &Self::Target {
+                &self.v
+            }
+        }
+        impl DerefMut for $struct_name {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                &mut self.v
+            }
+        }
+    };
+}
+
+#[derive(Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Config {
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "deserialize_string"
+    )]
+    pub id: String, // use
+    #[serde(default, deserialize_with = "deserialize_string")]
+    enc_id: String, // store
+    #[serde(default, deserialize_with = "deserialize_string")]
+    password: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    salt: String,
+    #[serde(default, deserialize_with = "deserialize_keypair")]
+    key_pair: KeyPair, // sk, pk
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    key_confirmed: bool,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    access_username: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    access_password_hash: String,
+    #[serde(default, deserialize_with = "deserialize_u64")]
+    credential_revision: u64,
+    #[serde(default, deserialize_with = "deserialize_u32")]
+    lan_schema_version: u32,
+    // TOML tables must follow all scalar values when serialized by toml 0.5.
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_bool")]
+    keys_confirmed: HashMap<String, bool>,
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    trusted_lan_endpoints: HashMap<String, String>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("id", &self.id)
+            .field("key_pair_configured", &!self.key_pair.0.is_empty())
+            .field("key_confirmed", &self.key_confirmed)
+            .field(
+                "trusted_lan_endpoint_count",
+                &self.trusted_lan_endpoints.len(),
+            )
+            .field(
+                "access_username_configured",
+                &!self.access_username.is_empty(),
+            )
+            .field("access_password_hash", &"<redacted>")
+            .field("credential_revision", &self.credential_revision)
+            .field("lan_schema_version", &self.lan_schema_version)
+            .finish()
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize, Clone)]
+pub struct Socks5Server {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub proxy: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub username: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub password: String,
+}
+
+// more variable configs
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Config2 {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    rendezvous_server: String,
+    #[serde(default, deserialize_with = "deserialize_i32")]
+    nat_type: i32,
+    #[serde(default, deserialize_with = "deserialize_i32")]
+    serial: i32,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    unlock_pin: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    trusted_devices: String,
+
+    #[serde(default)]
+    socks: Option<Socks5Server>,
+
+    // the other scalar value must before this
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Resolution {
+    pub w: i32,
+    pub h: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PeerConfig {
+    #[serde(default, deserialize_with = "deserialize_vec_u8")]
+    pub password: Vec<u8>,
+    #[serde(default, deserialize_with = "deserialize_size")]
+    pub size: Size,
+    #[serde(default, deserialize_with = "deserialize_size")]
+    pub size_ft: Size,
+    #[serde(default, deserialize_with = "deserialize_size")]
+    pub size_pf: Size,
+    #[serde(
+        default = "PeerConfig::default_view_style",
+        deserialize_with = "PeerConfig::deserialize_view_style",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub view_style: String,
+    // Image scroll style, scrolledge, scrollbar or scroll auto
+    #[serde(
+        default = "PeerConfig::default_scroll_style",
+        deserialize_with = "PeerConfig::deserialize_scroll_style",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub scroll_style: String,
+    #[serde(
+        default = "PeerConfig::default_edge_scroll_edge_thickness",
+        deserialize_with = "PeerConfig::deserialize_edge_scroll_edge_thickness"
+    )]
+    pub edge_scroll_edge_thickness: i32,
+    #[serde(
+        default = "PeerConfig::default_image_quality",
+        deserialize_with = "PeerConfig::deserialize_image_quality",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub image_quality: String,
+    #[serde(
+        default = "PeerConfig::default_custom_image_quality",
+        deserialize_with = "PeerConfig::deserialize_custom_image_quality",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub custom_image_quality: Vec<i32>,
+    #[serde(flatten)]
+    pub show_remote_cursor: ShowRemoteCursor,
+    #[serde(flatten)]
+    pub lock_after_session_end: LockAfterSessionEnd,
+    #[serde(flatten)]
+    pub terminal_persistent: TerminalPersistent,
+    #[serde(flatten)]
+    pub privacy_mode: PrivacyMode,
+    #[serde(flatten)]
+    pub allow_swap_key: AllowSwapKey,
+    #[serde(default, deserialize_with = "deserialize_vec_i32_string_i32")]
+    pub port_forwards: Vec<(i32, String, i32)>,
+    #[serde(default, deserialize_with = "deserialize_i32")]
+    pub direct_failures: i32,
+    #[serde(flatten)]
+    pub disable_audio: DisableAudio,
+    #[serde(flatten)]
+    pub disable_clipboard: DisableClipboard,
+    #[serde(flatten)]
+    pub enable_file_copy_paste: EnableFileCopyPaste,
+    #[serde(flatten)]
+    pub show_quality_monitor: ShowQualityMonitor,
+    #[serde(flatten)]
+    pub follow_remote_cursor: FollowRemoteCursor,
+    #[serde(flatten)]
+    pub follow_remote_window: FollowRemoteWindow,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub keyboard_mode: String,
+    #[serde(flatten)]
+    pub view_only: ViewOnly,
+    #[serde(flatten)]
+    pub show_my_cursor: ShowMyCursor,
+    #[serde(flatten)]
+    pub sync_init_clipboard: SyncInitClipboard,
+    // Mouse wheel or touchpad scroll mode
+    #[serde(
+        default = "PeerConfig::default_reverse_mouse_wheel",
+        deserialize_with = "PeerConfig::deserialize_reverse_mouse_wheel",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub reverse_mouse_wheel: String,
+    #[serde(
+        default = "PeerConfig::default_displays_as_individual_windows",
+        deserialize_with = "PeerConfig::deserialize_displays_as_individual_windows",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub displays_as_individual_windows: String,
+    #[serde(
+        default = "PeerConfig::default_use_all_my_displays_for_the_remote_session",
+        deserialize_with = "PeerConfig::deserialize_use_all_my_displays_for_the_remote_session",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub use_all_my_displays_for_the_remote_session: String,
+    #[serde(
+        rename = "trackpad-speed",
+        default = "PeerConfig::default_trackpad_speed",
+        deserialize_with = "PeerConfig::deserialize_trackpad_speed"
+    )]
+    pub trackpad_speed: i32,
+
+    #[serde(
+        default,
+        deserialize_with = "deserialize_hashmap_resolutions",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub custom_resolutions: HashMap<String, Resolution>,
+
+    // The other scalar value must before this
+    #[serde(
+        default,
+        deserialize_with = "deserialize_hashmap_string_string",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub options: HashMap<String, String>, // not use delete to represent default values
+    // Various data for flutter ui
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    pub ui_flutter: HashMap<String, String>,
+    #[serde(default)]
+    pub info: PeerInfoSerde,
+    #[serde(default)]
+    pub transfer: TransferSerde,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            password: Default::default(),
+            size: Default::default(),
+            size_ft: Default::default(),
+            size_pf: Default::default(),
+            view_style: Self::default_view_style(),
+            scroll_style: Self::default_scroll_style(),
+            edge_scroll_edge_thickness: Self::default_edge_scroll_edge_thickness(),
+            image_quality: Self::default_image_quality(),
+            custom_image_quality: Self::default_custom_image_quality(),
+            show_remote_cursor: Default::default(),
+            lock_after_session_end: Default::default(),
+            terminal_persistent: Default::default(),
+            privacy_mode: Default::default(),
+            allow_swap_key: Default::default(),
+            port_forwards: Default::default(),
+            direct_failures: Default::default(),
+            disable_audio: Default::default(),
+            disable_clipboard: Default::default(),
+            enable_file_copy_paste: Default::default(),
+            show_quality_monitor: Default::default(),
+            follow_remote_cursor: Default::default(),
+            follow_remote_window: Default::default(),
+            keyboard_mode: Default::default(),
+            view_only: Default::default(),
+            show_my_cursor: Default::default(),
+            reverse_mouse_wheel: Self::default_reverse_mouse_wheel(),
+            displays_as_individual_windows: Self::default_displays_as_individual_windows(),
+            use_all_my_displays_for_the_remote_session:
+                Self::default_use_all_my_displays_for_the_remote_session(),
+            trackpad_speed: Self::default_trackpad_speed(),
+            custom_resolutions: Default::default(),
+            options: Self::default_options(),
+            ui_flutter: Default::default(),
+            info: Default::default(),
+            transfer: Default::default(),
+            sync_init_clipboard: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Default, Serialize, Deserialize, Clone)]
+pub struct PeerInfoSerde {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub username: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub hostname: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub platform: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TransferSerde {
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
+    pub write_jobs: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
+    pub read_jobs: Vec<String>,
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn patch(path: PathBuf) -> PathBuf {
+    if let Some(_tmp) = path.to_str() {
+        #[cfg(windows)]
+        return _tmp
+            .replace(
+                "system32\\config\\systemprofile",
+                "ServiceProfiles\\LocalService",
+            )
+            .into();
+        #[cfg(target_os = "macos")]
+        return _tmp.replace("Application Support", "Preferences").into();
+        #[cfg(target_os = "linux")]
+        {
+            if _tmp == "/root" {
+                if let Ok(user) = crate::platform::linux::run_cmds_trim_newline("whoami") {
+                    if user != "root" {
+                        let cmd = format!("getent passwd '{}' | awk -F':' '{{print $6}}'", user);
+                        if let Ok(output) = crate::platform::linux::run_cmds_trim_newline(&cmd) {
+                            return output.into();
+                        }
+                        return format!("/home/{user}").into();
+                    }
+                }
+            }
+        }
+    }
+    path
+}
+
+impl Config2 {
+    fn lan_manual_approval_enabled(&self) -> Result<bool> {
+        match self.options.get("lan-manual-approval-disabled").map(String::as_str) {
+            None | Some("N") => Ok(true),
+            Some("Y") => Ok(false),
+            _ => Err(anyhow!("Invalid saved manual approval preference")),
+        }
+    }
+
+    fn update_lan_manual_approval(
+        &mut self,
+        enabled: bool,
+        store: impl FnOnce(&Self) -> Result<()>,
+    ) -> Result<()> {
+        let mut updated = self.clone();
+        updated.options.insert("lan-manual-approval-disabled".to_owned(),
+            if enabled { "N" } else { "Y" }.to_owned());
+        store(&updated)?;
+        *self = updated;
+        Ok(())
+    }
+
+    fn load() -> Config2 {
+        let mut config = Config::load_::<Config2>("2");
+        let mut store = config.sanitize_lan_only();
+        let (unlock_pin, _, store2) =
+            decrypt_str_or_original(&config.unlock_pin, PASSWORD_ENC_VERSION);
+        config.unlock_pin = unlock_pin;
+        store |= store2;
+        if store {
+            config.store();
+        }
+        config
+    }
+
+    fn sanitize_lan_only(&mut self) -> bool {
+        let before = self.clone();
+        self.rendezvous_server.clear();
+        self.nat_type = 0;
+        self.trusted_devices.clear();
+        self.socks = None;
+        self.options
+            .retain(|key, _| !is_lan_only_obsolete_option(key));
+        *self != before
+    }
+
+    pub fn file() -> PathBuf {
+        Config::file_("2")
+    }
+
+    fn store(&self) {
+        let mut config = self.clone();
+        let stored = Config::load_::<Config2>("2");
+        if let Some(mut socks) = config.socks {
+            let stored_password = stored
+                .socks
+                .as_ref()
+                .map(|socks| socks.password.as_str())
+                .unwrap_or_default();
+            socks.password =
+                keep_encrypted_storage_if_plaintext_unchanged(&socks.password, stored_password);
+            config.socks = Some(socks);
+        }
+        config.unlock_pin =
+            keep_encrypted_storage_if_plaintext_unchanged(&config.unlock_pin, &stored.unlock_pin);
+        Config::store_(&config, "2");
+    }
+
+    fn store_checked(&self) -> Result<()> {
+        // Preserve the existing encryption transformations, including the unlock PIN.
+        let mut config = self.clone();
+        let stored = Config::load_::<Config2>("2");
+        if let Some(mut socks) = config.socks {
+            let previous = stored.socks.as_ref().map(|s| s.password.as_str()).unwrap_or_default();
+            socks.password = keep_encrypted_storage_if_plaintext_unchanged(&socks.password, previous);
+            config.socks = Some(socks);
+        }
+        config.unlock_pin = keep_encrypted_storage_if_plaintext_unchanged(&config.unlock_pin, &stored.unlock_pin);
+        store_path(Self::file(), &config)
+    }
+
+    pub fn get() -> Config2 {
+        return CONFIG2.read().unwrap().clone();
+    }
+
+    pub fn set(mut cfg: Config2) -> bool {
+        cfg.sanitize_lan_only();
+        let mut lock = CONFIG2.write().unwrap();
+        if *lock == cfg {
+            return false;
+        }
+        *lock = cfg;
+        lock.store();
+        true
+    }
+}
+
+fn keep_encrypted_storage_if_plaintext_unchanged(plain: &str, stored: &str) -> String {
+    let (stored_plain, encrypted, _) = decrypt_str_or_original(stored, PASSWORD_ENC_VERSION);
+    if encrypted && stored_plain == plain {
+        return stored.to_owned();
+    }
+    encrypt_str_or_original(plain, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN)
+}
+
+pub fn load_path<T: serde::Serialize + serde::de::DeserializeOwned + Default + std::fmt::Debug>(
+    file: PathBuf,
+) -> T {
+    let cfg = match confy::load_path(&file) {
+        Ok(config) => config,
+        Err(err) => {
+            if let confy::ConfyError::GeneralLoadError(err) = &err {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    return T::default();
+                }
+            }
+            log::error!("Failed to load config '{}': {}", file.display(), err);
+            T::default()
+        }
+    };
+    cfg
+}
+
+#[inline]
+pub fn store_path<T: serde::Serialize>(path: PathBuf, cfg: T) -> crate::ResultType<()> {
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Ok(confy::store_path_perms(
+            path,
+            cfg,
+            fs::Permissions::from_mode(0o600),
+        )?)
+    }
+    #[cfg(windows)]
+    {
+        Ok(confy::store_path(path, cfg)?)
+    }
+}
+
+/// A cross-process advisory lock implemented as an exclusively-created
+/// sentinel file next to the protected config. `create_new` is atomic at the
+/// filesystem level on every platform this project targets, so this is
+/// sufficient to serialize a checked read-modify-write cycle across separate
+/// OS processes (e.g. the Flutter UI process and a tray-launched connection
+/// process) without adding a platform-specific file-locking dependency.
+struct CrossProcessLock {
+    path: PathBuf,
+}
+
+impl CrossProcessLock {
+    fn acquire(path: PathBuf, timeout: Duration) -> crate::ResultType<Self> {
+        let start = Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self { path }),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        if let Ok(modified) = metadata.modified() {
+                            if let Ok(age) = SystemTime::now().duration_since(modified) {
+                                if age > Duration::from_secs(5) {
+                                    // The prior holder crashed without releasing the lock; break it.
+                                    let _ = fs::remove_file(&path);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if start.elapsed() > timeout {
+                        return Err(anyhow!("Timed out waiting for the LocalConfig lock"));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+}
+
+impl Drop for CrossProcessLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+impl Config {
+    fn load_<T: serde::Serialize + serde::de::DeserializeOwned + Default + std::fmt::Debug>(
+        suffix: &str,
+    ) -> T {
+        let file = Self::file_(suffix);
+        let cfg = load_path(file);
+        if suffix.is_empty() {
+            log::trace!("Loaded primary configuration");
+        }
+        cfg
+    }
+
+    fn store_<T: serde::Serialize>(config: &T, suffix: &str) {
+        let file = Self::file_(suffix);
+        if let Err(err) = store_path(file, config) {
+            log::error!("Failed to store {suffix} config: {err}");
+        }
+    }
+
+    fn load() -> Config {
+        let mut config = Config::load_::<Config>("");
+        Ab::remove();
+        Group::remove();
+        if config.sanitize_lan_only() {
+            Config::store_(&config, "");
+        }
+        config
+    }
+
+    fn sanitize_lan_only(&mut self) -> bool {
+        let changed = !self.id.is_empty()
+            || !self.enc_id.is_empty()
+            || !self.password.is_empty()
+            || !self.salt.is_empty()
+            || self.key_confirmed
+            || !self.keys_confirmed.is_empty()
+            || self.lan_schema_version != LAN_SCHEMA_VERSION;
+        self.id.clear();
+        self.enc_id.clear();
+        self.password.clear();
+        self.salt.clear();
+        self.key_confirmed = false;
+        self.keys_confirmed.clear();
+        self.lan_schema_version = LAN_SCHEMA_VERSION;
+        changed
+    }
+
+    fn validate_or_decrypt_permanent_password_storage(config: &mut Config) -> Result<()> {
+        if config.password.is_empty() {
+            return Ok(());
+        }
+
+        if config.password.starts_with(PASSWORD_ENC_VERSION) {
+            let (plain, decrypted, should_store) =
+                decrypt_str_or_original(&config.password, PASSWORD_ENC_VERSION);
+            if decrypted {
+                config.password = plain;
+                return Ok(());
+            }
+            if !should_store {
+                return Err(anyhow!("Invalid permanent password encrypted hash storage"));
+            }
+            return Ok(());
+        }
+
+        let (decrypted_storage, decrypted, _) =
+            decrypt_permanent_password_str_or_original(&config.password);
+        if decrypted {
+            Self::ensure_permanent_password_hash_salt(config)?;
+            if decode_permanent_password_h1_from_hashed_storage(&decrypted_storage).is_some() {
+                return Ok(());
+            }
+            return Err(anyhow!("Invalid permanent password encrypted hash storage"));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_permanent_password_hash_salt(config: &Config) -> Result<()> {
+        if config.salt.is_empty() {
+            return Err(anyhow!(
+                "Permanent password hash storage requires a non-empty salt"
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_permanent_password_salt(config: &mut Config) {
+        if config.salt.is_empty() {
+            config.salt = Config::get_auto_password(DEFAULT_SALT_LEN);
+        }
+    }
+
+    fn prepare_config_for_store(config: &mut Config) {
+        match Self::validate_or_decrypt_permanent_password_storage(config) {
+            Ok(_) => {}
+            Err(err) => {
+                // This path is for unrecoverable permanent-password storage, such as
+                // hashed storage without its salt. Keep unrelated config writes working,
+                // but handle future transient migration errors separately.
+                log::error!(
+                    "Clearing invalid permanent password storage before storing config: {err}"
+                );
+                config.password.clear();
+                config.salt.clear();
+            }
+        }
+    }
+
+    fn store(&self) {
+        let mut config = self.clone();
+        Self::prepare_config_for_store(&mut config);
+        if !config.password.is_empty()
+            && decode_permanent_password_h1_from_storage(&config.password).is_none()
+        {
+            let stored = Config::load_::<Config>("");
+            config.password =
+                keep_encrypted_storage_if_plaintext_unchanged(&config.password, &stored.password);
+        }
+        config.id.clear();
+        config.enc_id.clear();
+        Config::store_(&config, "");
+    }
+
+    fn store_checked(&self) -> Result<()> {
+        let mut config = self.clone();
+        Self::prepare_config_for_store(&mut config);
+        if !config.password.is_empty() && decode_permanent_password_h1_from_storage(&config.password).is_none() {
+            let stored = Config::load_::<Config>("");
+            config.password = keep_encrypted_storage_if_plaintext_unchanged(&config.password, &stored.password);
+        }
+        config.id.clear();
+        config.enc_id.clear();
+        store_path(Self::file(), &config)
+    }
+
+    pub fn file() -> PathBuf {
+        Self::file_("")
+    }
+
+    fn file_(suffix: &str) -> PathBuf {
+        let name = format!("{}{}", *APP_NAME.read().unwrap(), suffix);
+        Config::with_extension(Self::path(name))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.key_pair.0.is_empty()
+    }
+
+    /// Get the user's home directory for configuration purposes.
+    ///
+    /// # Security Note
+    /// This function uses `dirs_next::home_dir()` which reads the `$HOME` environment
+    /// variable on Unix systems. This is acceptable for user-space operations (config
+    /// file storage, logging) where the user may intentionally redirect their home
+    /// directory.
+    ///
+    /// **DO NOT use this function in privileged contexts** (e.g., code executed via
+    /// `gtk_sudo` or system services running as root). For privileged operations on
+    /// Linux, use `crate::platform::linux::get_home_dir_trusted()` which bypasses
+    /// the `$HOME` environment variable and queries the system password database
+    /// directly via `getpwuid`.
+    ///
+    /// Using `$HOME` in privileged contexts creates a confused-deputy vulnerability
+    /// where an attacker can manipulate the environment variable to inject malicious
+    /// paths into privileged operations.
+    pub fn get_home() -> PathBuf {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        return PathBuf::from(APP_HOME_DIR.read().unwrap().as_str());
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            if let Some(path) = dirs_next::home_dir() {
+                patch(path)
+            } else if let Ok(path) = std::env::current_dir() {
+                path
+            } else {
+                std::env::temp_dir()
+            }
+        }
+    }
+
+    pub fn path<P: AsRef<Path>>(p: P) -> PathBuf {
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            let mut path: PathBuf = APP_DIR.read().unwrap().clone().into();
+            path.push(p);
+            return path;
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            #[cfg(not(target_os = "macos"))]
+            let org = "".to_owned();
+            #[cfg(target_os = "macos")]
+            let org = ORG.read().unwrap().clone();
+            // /var/root for root
+            if let Some(project) =
+                directories_next::ProjectDirs::from("", &org, &APP_NAME.read().unwrap())
+            {
+                let mut path = patch(project.config_dir().to_path_buf());
+                #[cfg(windows)]
+                if let Some(id) = helper_profile::installed_profile() {
+                    if let Some(profile) = helper_profile::profile_path(path.clone(), &id) {
+                        path = profile;
+                    }
+                }
+                path.push(p);
+                return path;
+            }
+            "".into()
+        }
+    }
+
+    /// Get the log directory path.
+    ///
+    /// # Security Note
+    /// On macOS, this function uses `dirs_next::home_dir()` which reads the `$HOME`
+    /// environment variable. On Linux/Android, it uses `Self::get_home()`.
+    /// See [`Self::get_home()`] for security considerations regarding `$HOME` usage.
+    #[allow(unreachable_code)]
+    pub fn log_path() -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(path) = dirs_next::home_dir().as_mut() {
+                path.push(format!("Library/Logs/{}", *APP_NAME.read().unwrap()));
+                return path.clone();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut path = Self::get_home();
+            path.push(format!(".local/share/logs/{}", *APP_NAME.read().unwrap()));
+            std::fs::create_dir_all(&path).ok();
+            return path;
+        }
+        #[cfg(target_os = "android")]
+        {
+            let mut path = Self::get_home();
+            path.push(format!("{}/Logs", *APP_NAME.read().unwrap()));
+            std::fs::create_dir_all(&path).ok();
+            return path;
+        }
+        if let Some(path) = Self::path("").parent() {
+            let mut path: PathBuf = path.into();
+            path.push("log");
+            return path;
+        }
+        "".into()
+    }
+
+    pub fn ipc_path(postfix: &str) -> String {
+        #[cfg(windows)]
+        {
+            // \\ServerName\pipe\PipeName
+            // where ServerName is either the name of a remote computer or a period, to specify the local computer.
+            // https://docs.microsoft.com/en-us/windows/win32/ipc/pipe-names
+            format!(
+                "\\\\.\\pipe\\{}\\query{}",
+                *APP_NAME.read().unwrap(),
+                postfix
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            #[cfg(target_os = "android")]
+            use std::os::unix::fs::PermissionsExt;
+            #[cfg(target_os = "android")]
+            let mut path: PathBuf =
+                format!("{}/{}", *APP_DIR.read().unwrap(), *APP_NAME.read().unwrap()).into();
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            let mut path: PathBuf = {
+                let uid = unsafe { libc::geteuid() as u32 };
+                ipc_parent_dir_for_uid(uid, postfix).into()
+            };
+            #[cfg(not(any(target_os = "android", target_os = "linux", target_os = "macos")))]
+            let mut path: PathBuf = format!("/tmp/{}", *APP_NAME.read().unwrap()).into();
+            // Android stores IPC sockets under app-controlled directories. Create the IPC parent
+            // dir and enforce the expected mode here. On other Unix platforms, `ipc_path()` is
+            // intentionally side-effect free (no mkdir/chmod); callers should enforce directory and
+            // socket permissions at the IPC server boundary.
+            #[cfg(target_os = "android")]
+            {
+                fs::create_dir_all(&path).ok();
+                let path_mode = if is_service_ipc_postfix(postfix) {
+                    0o0711
+                } else {
+                    0o0700
+                };
+                fs::set_permissions(&path, fs::Permissions::from_mode(path_mode)).ok();
+            }
+            path.push(format!("ipc{postfix}"));
+            path.to_str().unwrap_or("").to_owned()
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn ipc_path_for_uid(uid: u32, postfix: &str) -> String {
+        let parent = ipc_parent_dir_for_uid(uid, postfix);
+        format!("{parent}/ipc{postfix}")
+    }
+
+    pub fn icon_path() -> PathBuf {
+        let mut path = Self::path("icons");
+        if fs::create_dir_all(&path).is_err() {
+            path = std::env::temp_dir();
+        }
+        path
+    }
+
+    #[inline]
+    pub fn get_any_listen_addr(is_ipv4: bool) -> SocketAddr {
+        if is_ipv4 {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
+        } else {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
+        }
+    }
+
+    pub fn set_id(id: &str) {
+        let _ = id;
+        log::warn!("Ignored obsolete device ID update in LAN-only mode");
+    }
+
+    pub fn get_auto_password(length: usize) -> String {
+        Self::get_auto_password_with_chars(length, CHARS)
+    }
+
+    pub fn get_auto_numeric_password(length: usize) -> String {
+        Self::get_auto_password_with_chars(length, NUM_CHARS)
+    }
+
+    fn get_auto_password_with_chars(length: usize, chars: &[char]) -> String {
+        let mut rng = rand::thread_rng();
+        (0..length)
+            .map(|_| chars[rng.gen::<usize>() % chars.len()])
+            .collect()
+    }
+
+    pub fn get_key_confirmed() -> bool {
+        CONFIG.read().unwrap().key_confirmed
+    }
+
+    pub fn set_key_confirmed(v: bool) {
+        let mut config = CONFIG.write().unwrap();
+        if config.key_confirmed == v {
+            return;
+        }
+        config.key_confirmed = v;
+        if !v {
+            config.keys_confirmed = Default::default();
+        }
+        config.store();
+    }
+
+    pub fn get_host_key_confirmed(host: &str) -> bool {
+        matches!(CONFIG.read().unwrap().keys_confirmed.get(host), Some(true))
+    }
+
+    pub fn set_host_key_confirmed(host: &str, v: bool) {
+        if Self::get_host_key_confirmed(host) == v {
+            return;
+        }
+        let mut config = CONFIG.write().unwrap();
+        config.keys_confirmed.insert(host.to_owned(), v);
+        config.store();
+    }
+
+    pub fn get_key_pair() -> KeyPair {
+        // lock here to make sure no gen_keypair more than once
+        // no use of CONFIG directly here to ensure no recursive calling in Config::load because of password dec which calling this function
+        let mut lock = KEY_PAIR.lock().unwrap();
+        if let Some(p) = lock.as_ref() {
+            return p.clone();
+        }
+        let mut config = Config::load_::<Config>("");
+        if config.key_pair.0.is_empty() {
+            log::info!("Generated new keypair for id: {}", config.id);
+            let (pk, sk) = sign::gen_keypair();
+            let key_pair = (sk.0.to_vec(), pk.0.into());
+            config.key_pair = key_pair.clone();
+            std::thread::spawn(|| {
+                let mut config = CONFIG.write().unwrap();
+                config.key_pair = key_pair;
+                config.store();
+            });
+        }
+        *lock = Some(config.key_pair.clone());
+        config.key_pair
+    }
+
+    pub fn lan_credentials_configured() -> bool {
+        let config = CONFIG.read().unwrap();
+        !config.access_password_hash.is_empty()
+    }
+
+    pub fn lan_password_access_enabled() -> bool {
+        Self::lan_credentials_configured() && Self::get_option("lan-password-access-disabled") != "Y"
+    }
+
+    /// Preserve an existing legacy account for explicit old-peer compatibility.
+    /// New password-only receivers need no account name and never invent one.
+    pub fn set_lan_password(password: &[u8]) -> Result<u64> {
+        let password_hash = hash_lan_password(password)?;
+        let mut config = CONFIG.write().unwrap();
+        let mut updated = config.clone();
+        updated.access_password_hash = password_hash;
+        updated.credential_revision = updated.credential_revision.saturating_add(1).max(1);
+        updated.lan_schema_version = LAN_SCHEMA_VERSION;
+        let revision = updated.credential_revision;
+        updated.store_checked()?;
+        *config = updated;
+        Ok(revision)
+    }
+
+    pub fn set_lan_password_access_enabled(enabled: bool) -> Result<()> {
+        let mut config = CONFIG2.write().unwrap();
+        let mut updated = config.clone();
+        updated.options.insert("lan-password-access-disabled".to_owned(), if enabled { "N" } else { "Y" }.to_owned());
+        updated.store_checked()?;
+        *config = updated;
+        Ok(())
+    }
+
+    pub fn lan_manual_approval_enabled() -> Result<bool> {
+        CONFIG2.read().unwrap().lan_manual_approval_enabled()
+    }
+
+    /// Only this preference persists; pending nonces/acceptance remain volatile.
+    pub fn set_lan_manual_approval_enabled(enabled: bool) -> Result<()> {
+        CONFIG2.write().unwrap().update_lan_manual_approval(enabled, Config2::store_checked)
+    }
+
+    pub fn verify_lan_password(password: &[u8]) -> Result<bool> {
+        let enabled = Self::lan_password_access_enabled();
+        let hash = CONFIG.read().unwrap().access_password_hash.clone();
+        Self::verify_lan_password_against(&hash, password, enabled)
+    }
+
+    fn verify_lan_password_against(hash: &str, password: &[u8], enabled: bool) -> Result<bool> {
+        crate::lan::validate_password(password)?;
+        if !enabled || hash.is_empty() { return Ok(false); }
+        verify_lan_password_hash(hash, password)
+    }
+
+    pub fn get_lan_access_username() -> String {
+        CONFIG.read().unwrap().access_username.clone()
+    }
+
+    pub fn get_credential_revision() -> u64 {
+        CONFIG.read().unwrap().credential_revision
+    }
+
+    pub fn get_lan_schema_version() -> u32 {
+        CONFIG.read().unwrap().lan_schema_version
+    }
+
+    pub fn get_trusted_lan_fingerprint(endpoint: &str) -> Option<String> {
+        CONFIG
+            .read()
+            .unwrap()
+            .trusted_lan_endpoints
+            .get(endpoint)
+            .cloned()
+    }
+
+    pub fn is_trusted_lan_fingerprint(fingerprint: &str) -> bool {
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        CONFIG
+            .read()
+            .unwrap()
+            .trusted_lan_endpoints
+            .values()
+            .any(|trusted| trusted == &fingerprint)
+    }
+
+    pub fn trust_lan_fingerprint(endpoint: &str, fingerprint: &str) -> Result<()> {
+        let endpoint = crate::lan::Endpoint::parse(endpoint)?
+            .authority()
+            .to_owned();
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(anyhow!("Invalid device fingerprint"));
+        }
+        let mut config = CONFIG.write().unwrap();
+        config
+            .trusted_lan_endpoints
+            .insert(endpoint, fingerprint.to_ascii_lowercase());
+        config.store();
+        Ok(())
+    }
+
+    pub fn forget_lan_fingerprint(endpoint: &str) -> Result<()> {
+        let endpoint = crate::lan::Endpoint::parse(endpoint)?
+            .authority()
+            .to_owned();
+        let mut config = CONFIG.write().unwrap();
+        if config.trusted_lan_endpoints.remove(&endpoint).is_some() {
+            config.store();
+        }
+        Ok(())
+    }
+
+    pub fn set_lan_credentials(username: &str, password: &[u8]) -> Result<u64> {
+        let username = crate::lan::validate_username(username)?;
+        let password_hash = hash_lan_password(password)?;
+
+        let mut config = CONFIG.write().unwrap();
+        config.access_username = username;
+        config.access_password_hash = password_hash;
+        config.credential_revision = config.credential_revision.saturating_add(1).max(1);
+        config.lan_schema_version = 1;
+        let revision = config.credential_revision;
+        config.store();
+        Ok(revision)
+    }
+
+    pub fn clear_lan_credentials() -> u64 {
+        let mut config = CONFIG.write().unwrap();
+        config.access_username.clear();
+        config.access_password_hash.clear();
+        config.credential_revision = config.credential_revision.saturating_add(1).max(1);
+        config.lan_schema_version = 1;
+        let revision = config.credential_revision;
+        config.store();
+        revision
+    }
+
+    pub fn verify_lan_credentials(username: &str, password: &[u8]) -> Result<bool> {
+        if !Self::lan_password_access_enabled() { return Ok(false); }
+        let (stored_username, stored_password_hash) = {
+            let config = CONFIG.read().unwrap();
+            (
+                config.access_username.clone(),
+                config.access_password_hash.clone(),
+            )
+        };
+        Self::verify_lan_credentials_against(
+            &stored_username,
+            &stored_password_hash,
+            username,
+            password,
+        )
+    }
+
+    fn verify_lan_credentials_against(
+        stored_username: &str,
+        stored_password_hash: &str,
+        username: &str,
+        password: &[u8],
+    ) -> Result<bool> {
+        let username = crate::lan::validate_username(username)?;
+        crate::lan::validate_password(password)?;
+        if stored_username.is_empty() || stored_password_hash.is_empty() {
+            return Ok(false);
+        }
+        let username_matches =
+            sodiumoxide::utils::memcmp(username.as_bytes(), stored_username.as_bytes());
+        let password_matches = verify_lan_password_hash(stored_password_hash, password)?;
+        Ok(username_matches && password_matches)
+    }
+
+    pub fn get_cached_pk() -> Option<Vec<u8>> {
+        KEY_PAIR.lock().unwrap().clone().map(|k| k.1)
+    }
+
+    /// Get existing key pair without generating a new one.
+    /// Returns None if no key pair exists in cache or config file.
+    pub fn get_existing_key_pair() -> Option<KeyPair> {
+        let mut lock = KEY_PAIR.lock().unwrap();
+        if let Some(p) = lock.as_ref() {
+            return Some(p.clone());
+        }
+
+        // IMPORTANT: this path is called while holding KEY_PAIR lock.
+        // Config::load_ must remain a raw conf load/deserialize path and must never
+        // call decrypt_* / symmetric_crypt (directly or indirectly), otherwise this
+        // can re-enter key loading and deadlock.
+        let config = Config::load_::<Config>("");
+        if !config.key_pair.0.is_empty() {
+            *lock = Some(config.key_pair.clone());
+            Some(config.key_pair)
+        } else {
+            None
+        }
+    }
+
+    pub fn no_register_device() -> bool {
+        BUILTIN_SETTINGS
+            .read()
+            .unwrap()
+            .get(keys::OPTION_REGISTER_DEVICE)
+            .map(|v| v == "N")
+            .unwrap_or(false)
+    }
+
+    pub fn is_disable_change_permanent_password() -> bool {
+        BUILTIN_SETTINGS
+            .read()
+            .unwrap()
+            .get(keys::OPTION_DISABLE_CHANGE_PERMANENT_PASSWORD)
+            .map(|v| v == "Y")
+            .unwrap_or(false)
+    }
+
+    pub fn is_disable_change_id() -> bool {
+        BUILTIN_SETTINGS
+            .read()
+            .unwrap()
+            .get(keys::OPTION_DISABLE_CHANGE_ID)
+            .map(|v| v == "Y")
+            .unwrap_or(false)
+    }
+
+    pub fn is_disable_unlock_pin() -> bool {
+        BUILTIN_SETTINGS
+            .read()
+            .unwrap()
+            .get(keys::OPTION_DISABLE_UNLOCK_PIN)
+            .map(|v| v == "Y")
+            .unwrap_or(false)
+    }
+
+    pub fn get_id() -> String {
+        crate::lan::device_fingerprint(&Self::get_key_pair().1)
+    }
+
+    pub fn get_id_or(b: String) -> String {
+        let fingerprint = Self::get_id();
+        if fingerprint.is_empty() {
+            b
+        } else {
+            fingerprint
+        }
+    }
+
+    pub fn get_options() -> HashMap<String, String> {
+        let mut res = DEFAULT_SETTINGS.read().unwrap().clone();
+        res.extend(CONFIG2.read().unwrap().options.clone());
+        res.extend(OVERWRITE_SETTINGS.read().unwrap().clone());
+        res.retain(|key, _| !is_lan_only_obsolete_option(key));
+        #[cfg(windows)]
+        for key in ["incoming-only", "incoming-only-password", "incoming-only-initialized", "incoming-only-scope"] {
+            if let Some(value) = helper_profile::machine_option(key) { if value.is_empty() { res.remove(key); } else { res.insert(key.into(), value); } }
+        }
+        res
+    }
+
+    #[inline]
+    fn purify_options(v: &mut HashMap<String, String>) {
+        v.retain(|k, v| is_option_can_save(&OVERWRITE_SETTINGS, k, &DEFAULT_SETTINGS, v));
+    }
+
+    pub fn set_options(mut v: HashMap<String, String>) {
+        Self::purify_options(&mut v);
+        v.retain(|key, _| !is_lan_only_obsolete_option(key));
+        let mut config = CONFIG2.write().unwrap();
+        if config.options == v {
+            return;
+        }
+        config.options = v;
+        config.store();
+    }
+
+    pub fn get_option(k: &str) -> String {
+        #[cfg(windows)]
+        if let Some(value) = helper_profile::machine_option(k) { return value; }
+        if is_lan_only_obsolete_option(k) {
+            return String::new();
+        }
+        get_or(
+            &OVERWRITE_SETTINGS,
+            &CONFIG2.read().unwrap().options,
+            &DEFAULT_SETTINGS,
+            k,
+        )
+        .unwrap_or_default()
+    }
+
+    /// Reads an option from persisted configuration instead of this process's
+    /// startup-time snapshot. This is used by long-lived companion processes.
+    pub fn get_option_from_file(k: &str) -> String {
+        #[cfg(windows)]
+        if let Some(value) = helper_profile::machine_option(k) { return value; }
+        if is_lan_only_obsolete_option(k) {
+            return String::new();
+        }
+        let config = Config2::load();
+        get_or(&OVERWRITE_SETTINGS, &config.options, &DEFAULT_SETTINGS, k).unwrap_or_default()
+    }
+
+    pub fn get_bool_option(k: &str) -> bool {
+        option2bool(k, &Self::get_option(k))
+    }
+
+    pub fn set_option(k: String, v: String) {
+        if is_lan_only_obsolete_option(&k) {
+            let mut config = CONFIG2.write().unwrap();
+            if config.options.remove(&k).is_some() {
+                config.store();
+            }
+            log::warn!("Ignored obsolete LAN-only option: {k}");
+            return;
+        }
+        if !is_option_can_save(&OVERWRITE_SETTINGS, &k, &DEFAULT_SETTINGS, &v) {
+            let mut config = CONFIG2.write().unwrap();
+            if config.options.remove(&k).is_some() {
+                config.store();
+            }
+            return;
+        }
+        let mut config = CONFIG2.write().unwrap();
+        let v2 = if v.is_empty() { None } else { Some(&v) };
+        if v2 != config.options.get(&k) {
+            if v2.is_none() {
+                config.options.remove(&k);
+            } else {
+                config.options.insert(k, v);
+            }
+            config.store();
+        }
+    }
+
+    pub fn update_id() {
+        log::warn!("Ignored obsolete device ID rotation in LAN-only mode");
+    }
+
+    /// Sets the local permanent password.
+    ///
+    /// Returns `true` when the password is accepted or already matches the effective
+    /// preset password. Returns `false` when changing the password is disabled or
+    /// the new password cannot be prepared for storage.
+    pub fn set_permanent_password(password: &str) -> bool {
+        if Self::is_disable_change_permanent_password() {
+            return false;
+        }
+        let (preset_storage, preset_salt) = Self::get_preset_password_storage_and_salt();
+        if preset_permanent_password_storage_matches_plain(&preset_storage, &preset_salt, password)
+        {
+            if CONFIG.read().unwrap().password.is_empty() {
+                return true;
+            }
+        }
+
+        let mut config = CONFIG.write().unwrap();
+
+        let stored = if password.is_empty() {
+            Some(String::new())
+        } else {
+            Self::compute_permanent_password_storage_for_update(&mut config, password)
+        };
+        let Some(stored) = stored else {
+            log::error!("Failed to compute permanent password storage; refusing update");
+            return false;
+        };
+        if stored == config.password {
+            return true;
+        }
+        config.password = stored;
+        config.store();
+        true
+    }
+
+    fn compute_permanent_password_storage_for_update(
+        config: &mut Config,
+        password: &str,
+    ) -> Option<String> {
+        // Keep salt stable for user-initiated permanent password updates.
+        // Salt should only change when service->user sync updates storage and salt as a pair.
+        Self::ensure_permanent_password_salt(config);
+        let h1 = compute_permanent_password_h1(password, &config.salt);
+        encode_permanent_password_encrypted_storage_from_h1(&h1)
+    }
+
+    /// Returns the locally persisted permanent password storage and salt (NOT the hard/preset one).
+    ///
+    /// This function is side-effect free:
+    /// - It does NOT call `get_salt()` (which may auto-generate salt).
+    /// - It returns a consistent snapshot under a single lock.
+    pub fn get_local_permanent_password_storage_and_salt() -> (String, String) {
+        let config = CONFIG.read().unwrap();
+        (config.password.clone(), config.salt.clone())
+    }
+
+    /// Persist permanent password storage and salt from service->user config sync.
+    pub fn set_permanent_password_storage_for_sync(
+        storage: &str,
+        salt: &str,
+    ) -> crate::ResultType<bool> {
+        let mut config = CONFIG.write().unwrap();
+        if !Self::apply_permanent_password_storage_for_sync(&mut config, storage, salt)? {
+            return Ok(false);
+        }
+
+        config.store();
+        Ok(true)
+    }
+
+    fn apply_permanent_password_storage_for_sync(
+        config: &mut Config,
+        storage: &str,
+        salt: &str,
+    ) -> Result<bool> {
+        if storage.is_empty() {
+            if config.password.is_empty() && (salt.is_empty() || config.salt == salt) {
+                return Ok(false);
+            }
+            config.password.clear();
+            if !salt.is_empty() {
+                config.salt = salt.to_owned();
+            }
+            return Ok(true);
+        }
+        if salt.is_empty() {
+            return Err(anyhow!(
+                "Refusing to persist permanent password storage without salt"
+            ));
+        }
+        if decode_permanent_password_h1_from_storage(storage).is_none() {
+            log::error!("Rejecting non-current permanent password storage sync payload");
+            return Err(anyhow!("Invalid permanent password storage sync payload"));
+        }
+        if config.password == storage && config.salt == salt {
+            return Ok(false);
+        }
+
+        config.password = storage.to_owned();
+        config.salt = salt.to_owned();
+        Ok(true)
+    }
+
+    pub fn has_permanent_password() -> bool {
+        let (local_storage, local_salt) = Self::get_local_permanent_password_storage_and_salt();
+        if !local_storage.is_empty() {
+            return local_permanent_password_storage_is_usable_for_auth(
+                &local_storage,
+                &local_salt,
+            );
+        }
+        Self::has_usable_preset_password()
+    }
+
+    fn has_usable_preset_password() -> bool {
+        let (preset_storage, preset_salt) = Self::get_preset_password_storage_and_salt();
+        preset_permanent_password_storage_is_usable_for_auth(&preset_storage, &preset_salt)
+    }
+
+    pub fn is_using_preset_password() -> bool {
+        let (local_storage, _) = Self::get_local_permanent_password_storage_and_salt();
+        local_storage.is_empty() && Self::has_usable_preset_password()
+    }
+
+    pub fn get_preset_password_storage_and_salt() -> (String, String) {
+        let hard_settings = HARD_SETTINGS.read().unwrap();
+        let storage = hard_settings.get("password").cloned().unwrap_or_default();
+        let salt = hard_settings.get("salt").cloned().unwrap_or_default();
+        (storage, salt)
+    }
+
+    pub fn get_effective_permanent_password_salt() -> String {
+        let (local_storage, local_salt) = Self::get_local_permanent_password_storage_and_salt();
+        if !local_storage.is_empty() {
+            if local_permanent_password_storage_is_usable_for_auth(&local_storage, &local_salt) {
+                return Self::get_salt();
+            }
+            return String::new();
+        }
+        let (preset_storage, preset_salt) = Self::get_preset_password_storage_and_salt();
+        if !preset_salt.is_empty() {
+            if preset_permanent_password_storage_is_usable_for_auth(&preset_storage, &preset_salt) {
+                return preset_salt;
+            }
+            return String::new();
+        }
+        Self::get_salt()
+    }
+
+    pub fn has_local_permanent_password() -> bool {
+        let (local_storage, local_salt) = Self::get_local_permanent_password_storage_and_salt();
+        local_permanent_password_storage_is_usable_for_auth(&local_storage, &local_salt)
+    }
+
+    // This shouldn't happen under normal circumstances because the salt
+    // should be automatically generated when migrating to hash storage.
+    // Actually, it is better to avoid calling set_salt at all.
+    pub fn set_salt(salt: &str) {
+        let mut config = CONFIG.write().unwrap();
+        if salt == config.salt {
+            return;
+        }
+        if !password_is_empty_or_not_hashed(&config.password) {
+            if config.salt.is_empty() {
+                log::warn!("Salt is empty but permanent password is hashed and salt is empty");
+            } else {
+                log::error!("Refusing to set salt because permanent password is hashed");
+                return;
+            }
+        }
+        config.salt = salt.into();
+        config.store();
+    }
+
+    pub fn get_salt() -> String {
+        let config = CONFIG.read().unwrap();
+        let mut salt = config.salt.clone();
+        if salt.is_empty() {
+            drop(config);
+            salt = Config::get_auto_password(DEFAULT_SALT_LEN);
+            Config::set_salt(&salt);
+        }
+        salt
+    }
+
+    pub fn get_unlock_pin() -> String {
+        if Self::is_disable_unlock_pin() {
+            return String::new();
+        }
+        CONFIG2.read().unwrap().unlock_pin.clone()
+    }
+
+    pub fn set_unlock_pin(pin: &str) {
+        if Self::is_disable_unlock_pin() {
+            return;
+        }
+        let mut config = CONFIG2.write().unwrap();
+        if pin == config.unlock_pin {
+            return;
+        }
+        config.unlock_pin = pin.to_string();
+        config.store();
+    }
+
+    pub fn get() -> Config {
+        return CONFIG.read().unwrap().clone();
+    }
+
+    // TODO: `Config::set()` does not invalidate trusted devices when permanent password/salt changes.
+    // This matches historical behavior, but may need revisiting in a separate PR.
+    pub fn set(mut cfg: Config) -> bool {
+        cfg.sanitize_lan_only();
+        let mut lock = CONFIG.write().unwrap();
+        if *lock == cfg {
+            return false;
+        }
+        *lock = cfg;
+        lock.store();
+        // Drop CONFIG lock before acquiring KEY_PAIR lock to avoid potential deadlock.
+        #[cfg(target_os = "macos")]
+        let new_key_pair = lock.key_pair.clone();
+        drop(lock);
+        #[cfg(target_os = "macos")]
+        Self::invalidate_key_pair_cache_if_changed(&new_key_pair);
+        true
+    }
+
+    /// Invalidate KEY_PAIR cache if it differs from the new key_pair.
+    /// Use None to invalidate the cache instead of Some(key_pair).
+    /// If we use Some with an empty key_pair, get_key_pair() would always return
+    /// the empty key_pair from cache without regenerating.
+    /// By clearing the cache, get_key_pair() will reload and regenerate if needed.
+    #[cfg(target_os = "macos")]
+    fn invalidate_key_pair_cache_if_changed(new_key_pair: &KeyPair) {
+        let mut key_pair_cache = KEY_PAIR.lock().unwrap();
+        if let Some(cached) = key_pair_cache.as_ref() {
+            if cached != new_key_pair {
+                *key_pair_cache = None;
+                log::info!("key pair cache invalidated");
+            }
+        }
+    }
+
+    fn with_extension(path: PathBuf) -> PathBuf {
+        let ext = path.extension();
+        if let Some(ext) = ext {
+            let ext = format!("{}.toml", ext.to_string_lossy());
+            path.with_extension(ext)
+        } else {
+            path.with_extension("toml")
+        }
+    }
+}
+
+const PEERS: &str = "peers";
+
+impl PeerConfig {
+    pub fn load(id: &str) -> PeerConfig {
+        let _lock = CONFIG.read().unwrap();
+        match confy::load_path(Self::path(id)) {
+            Ok(config) => {
+                let mut config: PeerConfig = config;
+                let mut store = false;
+                let (password, _, store2) =
+                    decrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION);
+                config.password = password;
+                store = store || store2;
+                for opt in ["rdp_password", "os-username", "os-password"] {
+                    if let Some(v) = config.options.get_mut(opt) {
+                        let (encrypted, _, store2) =
+                            decrypt_str_or_original(v, PASSWORD_ENC_VERSION);
+                        *v = encrypted;
+                        store = store || store2;
+                    }
+                }
+                if store {
+                    config.store_(id);
+                }
+                config
+            }
+            Err(err) => {
+                if let confy::ConfyError::GeneralLoadError(err) = &err {
+                    if err.kind() == std::io::ErrorKind::NotFound {
+                        return Default::default();
+                    }
+                }
+                log::error!("Failed to load peer config '{}': {}", id, err);
+                Default::default()
+            }
+        }
+    }
+
+    pub fn store(&self, id: &str) {
+        let _lock = CONFIG.read().unwrap();
+        self.store_(id);
+    }
+
+    fn store_(&self, id: &str) {
+        let mut config = self.clone();
+        config.password =
+            encrypt_vec_or_original(&config.password, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+        for opt in ["rdp_password", "os-username", "os-password"] {
+            if let Some(v) = config.options.get_mut(opt) {
+                *v = encrypt_str_or_original(v, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN)
+            }
+        }
+        if let Err(err) = store_path(Self::path(id), config) {
+            log::error!("Failed to store config: {}", err);
+        }
+        NEW_STORED_PEER_CONFIG.lock().unwrap().insert(id.to_owned());
+    }
+
+    pub fn remove(id: &str) {
+        fs::remove_file(Self::path(id)).ok();
+    }
+
+    fn path(id: &str) -> PathBuf {
+        //If the id contains invalid chars, encode it
+        let forbidden_paths = Regex::new(r".*[<>:/\\|\?\*].*");
+        let path: PathBuf;
+        if let Ok(forbidden_paths) = forbidden_paths {
+            let id_encoded = if forbidden_paths.is_match(id) {
+                "base64_".to_string() + base64::encode(id, base64::Variant::Original).as_str()
+            } else {
+                id.to_string()
+            };
+            path = [PEERS, id_encoded.as_str()].iter().collect();
+        } else {
+            log::warn!("Regex create failed: {:?}", forbidden_paths.err());
+            // fallback for failing to create this regex.
+            path = [PEERS, id.replace(":", "_").as_str()].iter().collect();
+        }
+        Config::with_extension(Config::path(path))
+    }
+
+    // The number of peers to load in the first round when showing the peers card list in the main window.
+    // When there're too many peers, loading all of them at once will take a long time.
+    // We can load them in two rouds, the first round loads the first 100 peers, and the second round loads the rest.
+    // Then the UI will show the first 100 peers first, and the rest will be loaded and shown later.
+    pub const BATCH_LOADING_COUNT: usize = 100;
+
+    pub fn get_vec_id_modified_time_path(
+        id_filters: &Option<Vec<String>>,
+    ) -> Vec<(String, SystemTime, PathBuf)> {
+        if let Ok(peers) = Config::path(PEERS).read_dir() {
+            let mut vec_id_modified_time_path = peers
+                .into_iter()
+                .filter_map(|res| match res {
+                    Ok(res) => {
+                        let p = res.path();
+                        if p.is_file()
+                            && p.extension().map(|p| p.to_str().unwrap_or("")) == Some("toml")
+                        {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .map(|p| {
+                    let id = p
+                        .file_stem()
+                        .map(|p| p.to_str().unwrap_or(""))
+                        .unwrap_or("")
+                        .to_owned();
+
+                    let id_decoded_string = if id.starts_with("base64_") && id.len() != 7 {
+                        let id_decoded =
+                            base64::decode(&id[7..], base64::Variant::Original).unwrap_or_default();
+                        String::from_utf8_lossy(&id_decoded).as_ref().to_owned()
+                    } else {
+                        id
+                    };
+                    (id_decoded_string, p)
+                })
+                .filter(|(id, _)| {
+                    let Some(filters) = id_filters else {
+                        return true;
+                    };
+                    filters.contains(id)
+                })
+                .map(|(id, p)| {
+                    let t = crate::get_modified_time(&p);
+                    (id, t, p)
+                })
+                .collect::<Vec<_>>();
+            vec_id_modified_time_path.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+            vec_id_modified_time_path
+        } else {
+            vec![]
+        }
+    }
+
+    #[inline]
+    async fn preload_file_async(path: PathBuf) {
+        let _ = tokio::fs::File::open(path).await;
+    }
+
+    #[tokio::main(flavor = "current_thread")]
+    async fn preload_peers_async() {
+        let now = std::time::Instant::now();
+        let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&None);
+        let total_count = vec_id_modified_time_path.len();
+        let mut futs = vec![];
+        for (_, _, path) in vec_id_modified_time_path.into_iter() {
+            futs.push(Self::preload_file_async(path));
+            if futs.len() >= Self::BATCH_LOADING_COUNT {
+                let first_load_start = std::time::Instant::now();
+                futures::future::join_all(futs).await;
+                if first_load_start.elapsed().as_millis() < 10 {
+                    // No need to preload the rest if the first load is fast.
+                    return;
+                }
+                futs = vec![];
+            }
+        }
+        if !futs.is_empty() {
+            futures::future::join_all(futs).await;
+        }
+        log::info!(
+            "Preload peers done in {:?}, batch_count: {}, total: {}",
+            now.elapsed(),
+            Self::BATCH_LOADING_COUNT,
+            total_count
+        );
+    }
+
+    // We have to preload all peers in a background thread.
+    // Because we find that opening files the first time after the system (Windows) booting will be very slow, up to 200~400ms.
+    // The reason is that the Windows has "Microsoft Defender Antivirus Service" running in the background, which will scan the file when it's opened the first time.
+    // So we have to preload all peers in a background thread to avoid the delay when opening the file the first time.
+    // We can temporarily stop "Microsoft Defender Antivirus Service" or add the fold to the white list, to verify this. But don't do this in the release version.
+    pub fn preload_peers() {
+        std::thread::spawn(|| {
+            Self::preload_peers_async();
+        });
+    }
+
+    pub fn peers(id_filters: Option<Vec<String>>) -> Vec<(String, SystemTime, PeerConfig)> {
+        let vec_id_modified_time_path = Self::get_vec_id_modified_time_path(&id_filters);
+        Self::batch_peers(
+            &vec_id_modified_time_path,
+            0,
+            Some(vec_id_modified_time_path.len()),
+        )
+        .0
+    }
+
+    pub fn batch_peers(
+        all: &Vec<(String, SystemTime, PathBuf)>,
+        from: usize,
+        to: Option<usize>,
+    ) -> (Vec<(String, SystemTime, PeerConfig)>, usize) {
+        if from >= all.len() {
+            return (vec![], 0);
+        }
+
+        let to = match to {
+            Some(to) => to.min(all.len()),
+            None => (from + Self::BATCH_LOADING_COUNT).min(all.len()),
+        };
+
+        // to <= from is unexpected, but we can just return an empty vec in this case.
+        if to <= from {
+            return (vec![], from);
+        }
+
+        let peers: Vec<_> = all[from..to]
+            .iter()
+            .map(|(id, t, p)| {
+                let c = PeerConfig::load(&id);
+                if c.info.platform.is_empty() {
+                    fs::remove_file(p).ok();
+                }
+                (id.clone(), t.clone(), c)
+            })
+            .filter(|p| !p.2.info.platform.is_empty())
+            .collect();
+        (peers, to)
+    }
+
+    pub fn exists(id: &str) -> bool {
+        Self::path(id).exists()
+    }
+
+    serde_field_string!(
+        default_view_style,
+        deserialize_view_style,
+        UserDefaultConfig::read(keys::OPTION_VIEW_STYLE)
+    );
+    serde_field_string!(
+        default_scroll_style,
+        deserialize_scroll_style,
+        UserDefaultConfig::read(keys::OPTION_SCROLL_STYLE)
+    );
+    serde_field_string!(
+        default_image_quality,
+        deserialize_image_quality,
+        UserDefaultConfig::read(keys::OPTION_IMAGE_QUALITY)
+    );
+    serde_field_string!(
+        default_reverse_mouse_wheel,
+        deserialize_reverse_mouse_wheel,
+        UserDefaultConfig::read(keys::OPTION_REVERSE_MOUSE_WHEEL)
+    );
+    serde_field_string!(
+        default_displays_as_individual_windows,
+        deserialize_displays_as_individual_windows,
+        UserDefaultConfig::read(keys::OPTION_DISPLAYS_AS_INDIVIDUAL_WINDOWS)
+    );
+    serde_field_string!(
+        default_use_all_my_displays_for_the_remote_session,
+        deserialize_use_all_my_displays_for_the_remote_session,
+        UserDefaultConfig::read(keys::OPTION_USE_ALL_MY_DISPLAYS_FOR_THE_REMOTE_SESSION)
+    );
+
+    fn default_custom_image_quality() -> Vec<i32> {
+        let f: f64 = UserDefaultConfig::read(keys::OPTION_CUSTOM_IMAGE_QUALITY)
+            .parse()
+            .unwrap_or(100.0);
+        vec![f as _]
+    }
+
+    fn deserialize_custom_image_quality<'de, D>(deserializer: D) -> Result<Vec<i32>, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v: Vec<i32> = de::Deserialize::deserialize(deserializer)?;
+        if v.len() == 1 && v[0] >= 10 && v[0] <= 0xFFF {
+            Ok(v)
+        } else {
+            Ok(Self::default_custom_image_quality())
+        }
+    }
+
+    fn default_options() -> HashMap<String, String> {
+        let mut mp: HashMap<String, String> = Default::default();
+        let _ = [
+            keys::OPTION_CODEC_PREFERENCE,
+            keys::OPTION_CUSTOM_FPS,
+            keys::OPTION_ZOOM_CURSOR,
+            keys::OPTION_I444,
+            keys::OPTION_SWAP_LEFT_RIGHT_MOUSE,
+            keys::OPTION_COLLAPSE_TOOLBAR,
+        ]
+        .map(|key| {
+            mp.insert(key.to_owned(), UserDefaultConfig::read(key));
+        });
+        mp
+    }
+
+    fn default_trackpad_speed() -> i32 {
+        UserDefaultConfig::read(keys::OPTION_TRACKPAD_SPEED)
+            .parse()
+            .unwrap_or(100)
+    }
+
+    fn deserialize_trackpad_speed<'de, D>(deserializer: D) -> Result<i32, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v: i32 = de::Deserialize::deserialize(deserializer)?;
+        if v >= 10 && v <= 1000 {
+            Ok(v)
+        } else {
+            Ok(Self::default_trackpad_speed())
+        }
+    }
+
+    fn default_edge_scroll_edge_thickness() -> i32 {
+        UserDefaultConfig::read(keys::OPTION_EDGE_SCROLL_EDGE_THICKNESS)
+            .parse()
+            .unwrap_or(100)
+    }
+
+    fn deserialize_edge_scroll_edge_thickness<'de, D>(deserializer: D) -> Result<i32, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        let v: i32 = de::Deserialize::deserialize(deserializer)?;
+        if v >= 20 && v <= 150 {
+            Ok(v)
+        } else {
+            Ok(Self::default_edge_scroll_edge_thickness())
+        }
+    }
+}
+
+serde_field_bool!(
+    ShowRemoteCursor,
+    "show_remote_cursor",
+    default_show_remote_cursor,
+    "ShowRemoteCursor::default_show_remote_cursor"
+);
+serde_field_bool!(
+    FollowRemoteCursor,
+    "follow_remote_cursor",
+    default_follow_remote_cursor,
+    "FollowRemoteCursor::default_follow_remote_cursor"
+);
+
+serde_field_bool!(
+    FollowRemoteWindow,
+    "follow_remote_window",
+    default_follow_remote_window,
+    "FollowRemoteWindow::default_follow_remote_window"
+);
+serde_field_bool!(
+    ShowQualityMonitor,
+    "show_quality_monitor",
+    default_show_quality_monitor,
+    "ShowQualityMonitor::default_show_quality_monitor"
+);
+serde_field_bool!(
+    DisableAudio,
+    "disable_audio",
+    default_disable_audio,
+    "DisableAudio::default_disable_audio"
+);
+serde_field_bool!(
+    EnableFileCopyPaste,
+    "enable-file-copy-paste",
+    default_enable_file_copy_paste,
+    "EnableFileCopyPaste::default_enable_file_copy_paste"
+);
+serde_field_bool!(
+    DisableClipboard,
+    "disable_clipboard",
+    default_disable_clipboard,
+    "DisableClipboard::default_disable_clipboard"
+);
+serde_field_bool!(
+    LockAfterSessionEnd,
+    "lock_after_session_end",
+    default_lock_after_session_end,
+    "LockAfterSessionEnd::default_lock_after_session_end"
+);
+serde_field_bool!(
+    TerminalPersistent,
+    "terminal-persistent",
+    default_terminal_persistent,
+    "TerminalPersistent::default_terminal_persistent"
+);
+serde_field_bool!(
+    PrivacyMode,
+    "privacy_mode",
+    default_privacy_mode,
+    "PrivacyMode::default_privacy_mode"
+);
+
+serde_field_bool!(
+    AllowSwapKey,
+    "allow_swap_key",
+    default_allow_swap_key,
+    "AllowSwapKey::default_allow_swap_key"
+);
+
+serde_field_bool!(
+    ViewOnly,
+    "view_only",
+    default_view_only,
+    "ViewOnly::default_view_only"
+);
+
+serde_field_bool!(
+    ShowMyCursor,
+    "show_my_cursor",
+    default_show_my_cursor,
+    "ShowMyCursor::default_show_my_cursor"
+);
+
+serde_field_bool!(
+    SyncInitClipboard,
+    "sync-init-clipboard",
+    default_sync_init_clipboard,
+    "SyncInitClipboard::default_sync_init_clipboard"
+);
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct RecentLanEndpoint {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub endpoint: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub username: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub hostname: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub platform: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub fingerprint: String,
+    #[serde(default, deserialize_with = "deserialize_i64")]
+    pub last_connected_at: i64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct LanIdentity {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub username: String,
+    #[serde(default, deserialize_with = "deserialize_i64")]
+    pub created_at: i64,
+    #[serde(default, deserialize_with = "deserialize_i64")]
+    pub updated_at: i64,
+}
+
+/// The key under which the legacy Flutter group JSON blob
+/// (`{"version":1,"groups":[...],"peer_groups":{...}}`) is stored in
+/// `LocalConfig::ui_flutter`. Kept in sync with canonical `favorites`/
+/// `favorite_groups` in both directions until the Flutter UI is migrated to
+/// dedicated canonical bridge calls (plan phase 4).
+const FAVORITE_PEER_GROUPS_OPTION_KEY: &str = "favorite-peer-groups";
+
+/// A canonical, fingerprint-keyed saved LAN device. `fingerprint` is the
+/// device's verified identity and is empty only for a legacy favorite that
+/// migration could not unambiguously match to a single verified recent
+/// connection; such an entry remains manageable by its last-known `endpoint`
+/// until the user edits or removes it.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct FavoriteDevice {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub fingerprint: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub endpoint: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub group_id: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct FavoriteGroup {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub name: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct LocalConfig {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    remote_id: String, // latest used one
+    #[serde(default, deserialize_with = "deserialize_string")]
+    kb_layout_type: String,
+    #[serde(default, deserialize_with = "deserialize_size")]
+    size: Size,
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
+    pub fav: Vec<String>,
+    /// User-saved subnet/VLAN ranges (CIDR, dash range, or single IP) for the
+    /// manual LAN scan, so a routed subnet the user already knows about
+    /// doesn't need to be retyped on every scan.
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
+    pub saved_subnets: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    default_lan_identity_id: String,
+    /// 0 means favorites/groups have not yet been migrated from the legacy
+    /// endpoint-keyed `fav` list and the Flutter `ui_flutter` JSON blob.
+    // TOML tables must follow scalar values when serialized by toml 0.5, so
+    // this scalar is declared before any of the table/array-of-tables fields
+    // below (favorites, favorite_groups, options, recent_lan_endpoints, ...).
+    #[serde(default)]
+    schema_version: u32,
+    /// Canonical, fingerprint-keyed favorites. Order is preserved and is the
+    /// source of truth; `fav` is derived from this after migration.
+    // toml 0.5 (used by `confy` for the on-disk format) additionally
+    // requires every array-of-tables field (`Vec<Struct>`, emitted as
+    // `[[field]]`) to be declared before any plain-table field (`HashMap`,
+    // emitted as `[field]`): a `HashMap` field emitted first marks the
+    // struct's table state as "table emitted", and toml 0.5 then rejects a
+    // later array-of-tables field with `ValueAfterTable` even though both
+    // are "table" category and the ordering is valid TOML. This silently
+    // broke every `_local.toml` save once `favorites`/`favorite_groups`
+    // were added after `options`/`recent_lan_endpoints`/etc., which is why
+    // LAN favorites and recent sessions appeared to vanish on relaunch:
+    // the write never actually reached disk.
+    #[serde(default)]
+    favorites: Vec<FavoriteDevice>,
+    #[serde(default)]
+    favorite_groups: Vec<FavoriteGroup>,
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    options: HashMap<String, String>,
+    #[serde(default)]
+    recent_lan_endpoints: HashMap<String, RecentLanEndpoint>,
+    #[serde(default)]
+    lan_identities: HashMap<String, LanIdentity>,
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    lan_identity_bindings: HashMap<String, String>,
+    // Various data for flutter ui
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    ui_flutter: HashMap<String, String>,
+}
+
+impl LocalConfig {
+    fn upsert_recent_lan_endpoint(&mut self, recent: RecentLanEndpoint) {
+        self.remote_id = recent.endpoint.clone();
+        self.recent_lan_endpoints
+            .insert(recent.fingerprint.clone(), recent);
+    }
+
+    fn sorted_recent_lan_endpoints(&self) -> Vec<RecentLanEndpoint> {
+        let mut recent: Vec<_> = self.recent_lan_endpoints.values().cloned().collect();
+        recent.sort_by(|a, b| b.last_connected_at.cmp(&a.last_connected_at));
+        recent
+    }
+
+    fn remove_recent_lan_endpoint_entry(&mut self, endpoint_or_fingerprint: &str) -> bool {
+        let removed_fingerprints = self
+            .recent_lan_endpoints
+            .iter()
+            .filter_map(|(fingerprint, recent)| {
+                (fingerprint.eq_ignore_ascii_case(endpoint_or_fingerprint)
+                    || recent.endpoint == endpoint_or_fingerprint)
+                    .then(|| fingerprint.clone())
+            })
+            .collect::<Vec<_>>();
+        let removed = self
+            .recent_lan_endpoints
+            .remove(&endpoint_or_fingerprint.to_ascii_lowercase())
+            .is_some();
+        let before = self.recent_lan_endpoints.len();
+        self.recent_lan_endpoints
+            .retain(|_, recent| recent.endpoint != endpoint_or_fingerprint);
+        for fingerprint in &removed_fingerprints {
+            self.lan_identity_bindings.remove(fingerprint);
+        }
+        removed || before != self.recent_lan_endpoints.len()
+    }
+
+    fn remove_lan_identity_entry(&mut self, identity_id: &str) -> bool {
+        if self.lan_identities.remove(identity_id).is_none() {
+            return false;
+        }
+        if self.default_lan_identity_id == identity_id {
+            self.default_lan_identity_id.clear();
+        }
+        self.lan_identity_bindings
+            .retain(|_, bound_identity_id| bound_identity_id != identity_id);
+        true
+    }
+
+    fn bind_lan_identity_entry(&mut self, fingerprint: &str, identity_id: &str) -> Result<bool> {
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(anyhow!("Invalid device fingerprint"));
+        }
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        if identity_id.is_empty() {
+            return Ok(self.lan_identity_bindings.remove(&fingerprint).is_some());
+        }
+        if !self.lan_identities.contains_key(identity_id) {
+            return Err(anyhow!("LAN identity does not exist"));
+        }
+        if self
+            .lan_identity_bindings
+            .get(&fingerprint)
+            .map(String::as_str)
+            == Some(identity_id)
+        {
+            return Ok(false);
+        }
+        self.lan_identity_bindings
+            .insert(fingerprint, identity_id.to_owned());
+        Ok(true)
+    }
+
+    fn resolve_lan_identity_entry(&self, fingerprint: &str) -> String {
+        self.lan_identity_bindings
+            .get(&fingerprint.to_ascii_lowercase())
+            .filter(|identity_id| self.lan_identities.contains_key(*identity_id))
+            .cloned()
+            .or_else(|| {
+                self.lan_identities
+                    .contains_key(&self.default_lan_identity_id)
+                    .then(|| self.default_lan_identity_id.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    fn load() -> LocalConfig {
+        let mut config = Config::load_::<LocalConfig>("_local");
+        if config.migrate_legacy_favorites_if_needed() {
+            // Best-effort: persist the migration immediately so a second
+            // process started right after doesn't re-derive it independently.
+            // If this fails (e.g. file lock contention), the in-memory
+            // migrated state is still used for this process, and the next
+            // successful checked write will persist it.
+            if let Err(err) = config.store_checked() {
+                log::error!("Failed to persist favorite migration: {err}");
+            }
+        }
+        config
+    }
+
+    fn store(&self) {
+        Config::store_(self, "_local");
+    }
+
+    /// Writes this config to a temporary file and atomically renames it into
+    /// place, returning an error instead of silently swallowing it. Does not
+    /// take the cross-process lock itself; callers that need a checked
+    /// read-modify-write cycle should go through [`Self::with_favorites_locked`].
+    fn store_checked(&self) -> Result<()> {
+        let file = Config::file_("_local");
+        let tmp = file.with_extension("local.tmp");
+        store_path(tmp.clone(), self)?;
+        fs::rename(&tmp, &file)?;
+        Ok(())
+    }
+
+    /// Reloads from disk, distinguishing "file missing" (fine, use defaults)
+    /// from "file present but unparseable" (never silently discard user data
+    /// by falling back to defaults; preserve the bad file plus a recovery
+    /// copy and surface the error to the caller instead).
+    fn load_checked() -> Result<LocalConfig> {
+        let file = Config::file_("_local");
+        let loaded: std::result::Result<LocalConfig, confy::ConfyError> = confy::load_path(&file);
+        match loaded {
+            Ok(config) => Ok(config),
+            Err(err) => {
+                if let confy::ConfyError::GeneralLoadError(io_err) = &err {
+                    if io_err.kind() == std::io::ErrorKind::NotFound {
+                        return Ok(LocalConfig::default());
+                    }
+                }
+                let recovery = file.with_extension("local.corrupt");
+                if let Err(copy_err) = fs::copy(&file, &recovery) {
+                    log::error!(
+                        "Failed to preserve a recovery copy of the corrupt LocalConfig at {}: {}",
+                        recovery.display(),
+                        copy_err
+                    );
+                } else {
+                    log::error!(
+                        "LocalConfig at {} is corrupt; preserved a recovery copy at {}",
+                        file.display(),
+                        recovery.display()
+                    );
+                }
+                Err(anyhow!("LocalConfig is corrupt: {err}"))
+            }
+        }
+    }
+
+    fn lock_path() -> PathBuf {
+        Config::file_("_local").with_extension("local.lock")
+    }
+
+    /// Runs `mutate` against a freshly reloaded, checked copy of the config
+    /// while holding the cross-process lock, then atomically persists the
+    /// result and refreshes the in-process cache. This is the only path
+    /// favorite/group mutations should use: it replaces the old pattern of a
+    /// separate unlocked read followed by an unlocked write, which could
+    /// silently clobber a concurrent edit from another process.
+    fn with_favorites_locked<R>(
+        mutate: impl FnOnce(&mut LocalConfig) -> R,
+    ) -> Result<R> {
+        let _lock = CrossProcessLock::acquire(Self::lock_path(), Duration::from_secs(5))?;
+        let mut fresh = Self::load_checked()?;
+        fresh.migrate_legacy_favorites_if_needed();
+        let result = mutate(&mut fresh);
+        // Keep the legacy Flutter group blob in sync so old, not-yet-migrated
+        // Dart UI observes canonical changes made from the Rust side too.
+        let projection = fresh.project_legacy_group_json();
+        fresh
+            .ui_flutter
+            .insert(FAVORITE_PEER_GROUPS_OPTION_KEY.to_owned(), projection);
+        fresh.store_checked()?;
+        *LOCAL_CONFIG.write().unwrap() = fresh;
+        Ok(result)
+    }
+
+    /// Migrates the legacy endpoint-keyed `fav` list into canonical,
+    /// fingerprint-keyed `favorites` the first time this runs (`schema_version
+    /// == 0`). A legacy favorite endpoint is matched to a fingerprint only
+    /// when **exactly one** verified recent-connection record has that
+    /// endpoint; ambiguous or unmatched endpoints are kept as manageable
+    /// legacy entries with an empty fingerprint rather than guessed at.
+    /// Returns whether anything changed (so the caller knows to persist).
+    fn migrate_legacy_favorites_if_needed(&mut self) -> bool {
+        let mut changed = false;
+        if self.schema_version == 0 {
+            self.schema_version = 1;
+            if let Some((groups, _)) = self.parse_legacy_group_json() {
+                self.favorite_groups = groups;
+            }
+            changed = true;
+        }
+        if self.reconcile_legacy_fav_entries() {
+            changed = true;
+        }
+        if changed {
+            self.sync_legacy_fav_projection();
+        }
+        changed
+    }
+
+    /// Absorbs any `fav` endpoint not yet represented in canonical
+    /// `favorites` into canonical form. Runs on every load, not only the
+    /// one-time schema migration above: the legacy Flutter UI still adds
+    /// favorites directly to the endpoint-keyed `fav` list (it hasn't been
+    /// switched to the canonical bridge calls yet), so without this, a
+    /// favorite added after the initial migration would never gain a
+    /// canonical, fingerprint-keyed record — and the atomic fingerprint-based
+    /// endpoint update that runs after a saved device reconnects at a new
+    /// address would have no canonical entry to find and update, silently
+    /// orphaning that favorite from the fingerprint-verification mechanism.
+    fn reconcile_legacy_fav_entries(&mut self) -> bool {
+        let legacy_groups = self.parse_legacy_group_json();
+        let mut added = false;
+        for endpoint in self.fav.clone() {
+            if self
+                .favorites
+                .iter()
+                .any(|favorite| favorite.endpoint == endpoint)
+            {
+                continue;
+            }
+            let matches: Vec<&RecentLanEndpoint> = self
+                .recent_lan_endpoints
+                .values()
+                .filter(|recent| recent.endpoint == endpoint)
+                .collect();
+            let fingerprint = if matches.len() == 1 {
+                matches[0].fingerprint.clone()
+            } else {
+                String::new()
+            };
+            let group_id = legacy_groups
+                .as_ref()
+                .and_then(|(_, peer_groups)| peer_groups.get(&endpoint).cloned())
+                .unwrap_or_default();
+            self.favorites.push(FavoriteDevice {
+                fingerprint,
+                endpoint,
+                group_id,
+            });
+            added = true;
+        }
+        added
+    }
+
+    /// Rebuilds the legacy `fav: Vec<String>` endpoint list from canonical
+    /// `favorites`, preserving order, for old readers during rollout.
+    fn sync_legacy_fav_projection(&mut self) {
+        self.fav = self
+            .favorites
+            .iter()
+            .map(|favorite| favorite.endpoint.clone())
+            .collect();
+    }
+
+    /// Parses the legacy Flutter group JSON blob (if present) into
+    /// `(groups, peer_id -> group_id)`.
+    fn parse_legacy_group_json(&self) -> Option<(Vec<FavoriteGroup>, HashMap<String, String>)> {
+        let raw = self.ui_flutter.get(FAVORITE_PEER_GROUPS_OPTION_KEY)?;
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let groups = value
+            .get("groups")?
+            .as_array()?
+            .iter()
+            .filter_map(|group| {
+                Some(FavoriteGroup {
+                    id: group.get("id")?.as_str()?.to_owned(),
+                    name: group.get("name")?.as_str()?.to_owned(),
+                })
+            })
+            .collect();
+        let peer_groups = value
+            .get("peer_groups")
+            .and_then(|value| value.as_object())
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(peer_id, group_id)| {
+                        Some((peer_id.clone(), group_id.as_str()?.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some((groups, peer_groups))
+    }
+
+    /// Serializes canonical `favorite_groups`/`favorites` back into the
+    /// legacy Flutter JSON shape so old Dart code keeps working against
+    /// `ui_flutter["favorite-peer-groups"]` while Rust-side canonical
+    /// mutations are the source of truth.
+    fn project_legacy_group_json(&self) -> String {
+        let peer_groups: HashMap<&str, &str> = self
+            .favorites
+            .iter()
+            .filter(|favorite| !favorite.group_id.is_empty())
+            .map(|favorite| (favorite.endpoint.as_str(), favorite.group_id.as_str()))
+            .collect();
+        serde_json::json!({
+            "version": 1,
+            "groups": self.favorite_groups,
+            "peer_groups": peer_groups,
+        })
+        .to_string()
+    }
+
+    /// Applies a legacy Flutter group JSON write (from `set_flutter_option`)
+    /// into canonical state, so an edit made by not-yet-migrated Dart UI is
+    /// not lost when a Rust-side canonical reader looks at `favorites`/
+    /// `favorite_groups` instead of `ui_flutter`.
+    fn sync_canonical_groups_from_legacy_json(raw: &str) -> Result<()> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|err| anyhow!("Invalid favorite group JSON: {err}"))?;
+        let groups: Vec<FavoriteGroup> = value
+            .get("groups")
+            .and_then(|value| value.as_array())
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|group| {
+                        Some(FavoriteGroup {
+                            id: group.get("id")?.as_str()?.to_owned(),
+                            name: group.get("name")?.as_str()?.to_owned(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let peer_groups: HashMap<String, String> = value
+            .get("peer_groups")
+            .and_then(|value| value.as_object())
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(peer_id, group_id)| {
+                        Some((peer_id.clone(), group_id.as_str()?.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self::with_favorites_locked(|config| {
+            config.favorite_groups = groups;
+            for favorite in config.favorites.iter_mut() {
+                favorite.group_id = peer_groups.get(&favorite.endpoint).cloned().unwrap_or_default();
+            }
+        })
+    }
+
+    pub fn get_favorites() -> Vec<FavoriteDevice> {
+        LOCAL_CONFIG.read().unwrap().favorites.clone()
+    }
+
+    /// Loads canonical favorite fingerprints directly from disk, keyed by
+    /// endpoint, so another desktop process (e.g. the tray, which has its own
+    /// static config cache) can resolve which saved favorite endpoint
+    /// corresponds to a verified device fingerprint without going through
+    /// the in-process cache.
+    pub fn load_favorite_fingerprints() -> HashMap<String, String> {
+        Self::load()
+            .favorites
+            .into_iter()
+            .filter(|favorite| !favorite.fingerprint.is_empty())
+            .map(|favorite| (favorite.endpoint, favorite.fingerprint))
+            .collect()
+    }
+
+    pub fn get_favorite_groups() -> Vec<FavoriteGroup> {
+        LOCAL_CONFIG.read().unwrap().favorite_groups.clone()
+    }
+
+    /// Adds a favorite, or updates its endpoint/group if a favorite with this
+    /// fingerprint already exists. `fingerprint` must be a verified device
+    /// identity, not a bare endpoint guess.
+    pub fn add_or_update_favorite(
+        fingerprint: &str,
+        endpoint: &str,
+        group_id: Option<&str>,
+    ) -> Result<()> {
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(anyhow!("Invalid device fingerprint"));
+        }
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        let endpoint = crate::lan::Endpoint::parse(endpoint)?
+            .authority()
+            .to_owned();
+        Self::with_favorites_locked(|config| {
+            config.upsert_favorite_entry(&fingerprint, &endpoint, group_id)
+        })
+    }
+
+    fn upsert_favorite_entry(&mut self, fingerprint: &str, endpoint: &str, group_id: Option<&str>) {
+        if let Some(existing) = self
+            .favorites
+            .iter_mut()
+            .find(|favorite| favorite.fingerprint == fingerprint)
+        {
+            existing.endpoint = endpoint.to_owned();
+            if let Some(group_id) = group_id {
+                existing.group_id = group_id.to_owned();
+            }
+        } else {
+            self.favorites.push(FavoriteDevice {
+                fingerprint: fingerprint.to_owned(),
+                endpoint: endpoint.to_owned(),
+                group_id: group_id.unwrap_or_default().to_owned(),
+            });
+        }
+        self.sync_legacy_fav_projection();
+    }
+
+    pub fn remove_favorite_by_fingerprint(fingerprint: &str) -> Result<()> {
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        Self::with_favorites_locked(|config| config.remove_favorite_entry(&fingerprint))
+    }
+
+    fn remove_favorite_entry(&mut self, fingerprint: &str) {
+        self.favorites
+            .retain(|favorite| favorite.fingerprint != fingerprint);
+        self.sync_legacy_fav_projection();
+    }
+
+    /// Reorders favorites to match `order` (a list of fingerprints). Entries
+    /// not named in `order` keep their relative order and are appended after
+    /// the named ones, so an unknown/legacy entry is never dropped.
+    pub fn reorder_favorites(order: Vec<String>) -> Result<()> {
+        Self::with_favorites_locked(|config| config.reorder_favorites_entries(&order))
+    }
+
+    fn reorder_favorites_entries(&mut self, order: &[String]) {
+        let mut reordered = Vec::with_capacity(self.favorites.len());
+        for fingerprint in order {
+            if let Some(pos) = self
+                .favorites
+                .iter()
+                .position(|favorite| &favorite.fingerprint == fingerprint)
+            {
+                reordered.push(self.favorites.remove(pos));
+            }
+        }
+        reordered.append(&mut self.favorites);
+        self.favorites = reordered;
+        self.sync_legacy_fav_projection();
+    }
+
+    /// Atomically updates the endpoint of any existing favorite(s) matching
+    /// `fingerprint`. Does nothing if the device is not currently a favorite,
+    /// and never creates a new favorite — this replaces the old non-atomic
+    /// `get_fav`/`set_fav` endpoint-string rewrite used after a verified LAN
+    /// reconnection at a new address.
+    pub fn update_favorite_endpoint_for_fingerprint(
+        fingerprint: &str,
+        new_endpoint: &str,
+    ) -> Result<bool> {
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        let new_endpoint = crate::lan::Endpoint::parse(new_endpoint)?
+            .authority()
+            .to_owned();
+        Self::with_favorites_locked(|config| {
+            config.update_favorite_endpoint_entry(&fingerprint, &new_endpoint)
+        })
+    }
+
+    fn update_favorite_endpoint_entry(&mut self, fingerprint: &str, new_endpoint: &str) -> bool {
+        let mut changed = false;
+        for favorite in self
+            .favorites
+            .iter_mut()
+            .filter(|favorite| favorite.fingerprint == fingerprint)
+        {
+            if favorite.endpoint != new_endpoint {
+                favorite.endpoint = new_endpoint.to_owned();
+                changed = true;
+            }
+        }
+        if changed {
+            self.sync_legacy_fav_projection();
+        }
+        changed
+    }
+
+    pub fn add_favorite_group(name: &str) -> Result<FavoriteGroup> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("Group name must not be empty"));
+        }
+        let group = FavoriteGroup {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.to_owned(),
+        };
+        let group_clone = group.clone();
+        Self::with_favorites_locked(|config| {
+            config.favorite_groups.push(group_clone);
+        })?;
+        Ok(group)
+    }
+
+    pub fn rename_favorite_group(group_id: &str, name: &str) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("Group name must not be empty"));
+        }
+        Self::with_favorites_locked(|config| config.rename_favorite_group_entry(group_id, name))
+    }
+
+    fn rename_favorite_group_entry(&mut self, group_id: &str, name: &str) {
+        if let Some(group) = self
+            .favorite_groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+        {
+            group.name = name.to_owned();
+        }
+    }
+
+    /// Removes a group and clears it from any favorite that referenced it;
+    /// the favorites themselves are kept (ungrouped), never deleted.
+    pub fn remove_favorite_group(group_id: &str) -> Result<()> {
+        Self::with_favorites_locked(|config| config.remove_favorite_group_entry(group_id))
+    }
+
+    fn remove_favorite_group_entry(&mut self, group_id: &str) {
+        self.favorite_groups.retain(|group| group.id != group_id);
+        for favorite in self.favorites.iter_mut() {
+            if favorite.group_id == group_id {
+                favorite.group_id.clear();
+            }
+        }
+    }
+
+    pub fn get_kb_layout_type() -> String {
+        LOCAL_CONFIG.read().unwrap().kb_layout_type.clone()
+    }
+
+    pub fn set_kb_layout_type(kb_layout_type: String) {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        config.kb_layout_type = kb_layout_type;
+        config.store();
+    }
+
+    pub fn record_recent_lan_endpoint(
+        endpoint: &str,
+        username: &str,
+        hostname: &str,
+        platform: &str,
+        fingerprint: &str,
+    ) -> Result<()> {
+        let endpoint = crate::lan::Endpoint::parse(endpoint)?
+            .authority()
+            .to_owned();
+        let username = crate::lan::validate_username(username)?;
+        if fingerprint.len() != 64 || !fingerprint.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(anyhow!("Invalid device fingerprint"));
+        }
+        let fingerprint = fingerprint.to_ascii_lowercase();
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: endpoint.clone(),
+            username,
+            hostname: hostname.trim().to_owned(),
+            platform: platform.trim().to_owned(),
+            fingerprint,
+            last_connected_at: crate::get_time(),
+        });
+        config.store();
+        Ok(())
+    }
+
+    pub fn get_recent_lan_endpoints() -> Vec<RecentLanEndpoint> {
+        LOCAL_CONFIG.read().unwrap().sorted_recent_lan_endpoints()
+    }
+
+    pub fn remove_recent_lan_endpoint(endpoint_or_fingerprint: &str) {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        if config.remove_recent_lan_endpoint_entry(endpoint_or_fingerprint) {
+            config.store();
+        }
+    }
+
+    pub fn get_lan_identities() -> Vec<LanIdentity> {
+        let config = LOCAL_CONFIG.read().unwrap();
+        let mut identities = config.lan_identities.values().cloned().collect::<Vec<_>>();
+        identities.sort_by(|a, b| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        identities
+    }
+
+    pub fn get_lan_identity(identity_id: &str) -> Option<LanIdentity> {
+        LOCAL_CONFIG
+            .read()
+            .unwrap()
+            .lan_identities
+            .get(identity_id)
+            .cloned()
+    }
+
+    pub fn lan_identity_name_exists(name: &str, excluding_id: Option<&str>) -> bool {
+        LOCAL_CONFIG
+            .read()
+            .unwrap()
+            .lan_identities
+            .values()
+            .any(|identity| {
+                Some(identity.id.as_str()) != excluding_id
+                    && identity.name.eq_ignore_ascii_case(name)
+            })
+    }
+
+    pub fn store_lan_identity(identity: LanIdentity) {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        config.lan_identities.insert(identity.id.clone(), identity);
+        config.store();
+    }
+
+    pub fn remove_lan_identity(identity_id: &str) -> bool {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        if !config.remove_lan_identity_entry(identity_id) {
+            return false;
+        }
+        config.store();
+        true
+    }
+
+    pub fn get_default_lan_identity_id() -> String {
+        LOCAL_CONFIG.read().unwrap().default_lan_identity_id.clone()
+    }
+
+    pub fn set_default_lan_identity_id(identity_id: &str) -> Result<()> {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        if !identity_id.is_empty() && !config.lan_identities.contains_key(identity_id) {
+            return Err(anyhow!("LAN identity does not exist"));
+        }
+        if config.default_lan_identity_id != identity_id {
+            config.default_lan_identity_id = identity_id.to_owned();
+            config.store();
+        }
+        Ok(())
+    }
+
+    pub fn get_bound_lan_identity_id(fingerprint: &str) -> String {
+        let config = LOCAL_CONFIG.read().unwrap();
+        config
+            .lan_identity_bindings
+            .get(&fingerprint.to_ascii_lowercase())
+            .filter(|identity_id| config.lan_identities.contains_key(*identity_id))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn bind_lan_identity(fingerprint: &str, identity_id: &str) -> Result<()> {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        if config.bind_lan_identity_entry(fingerprint, identity_id)? {
+            config.store();
+        }
+        Ok(())
+    }
+
+    pub fn resolve_lan_identity_id(fingerprint: &str) -> String {
+        LOCAL_CONFIG
+            .read()
+            .unwrap()
+            .resolve_lan_identity_entry(fingerprint)
+    }
+
+    pub fn get_size() -> Size {
+        LOCAL_CONFIG.read().unwrap().size
+    }
+
+    pub fn set_size(x: i32, y: i32, w: i32, h: i32) {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        let size = (x, y, w, h);
+        if size == config.size || size.2 < 300 || size.3 < 300 {
+            return;
+        }
+        config.size = size;
+        config.store();
+    }
+
+    pub fn set_remote_id(remote_id: &str) {
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        if remote_id == config.remote_id {
+            return;
+        }
+        config.remote_id = remote_id.into();
+        config.store();
+    }
+
+    pub fn get_remote_id() -> String {
+        LOCAL_CONFIG.read().unwrap().remote_id.clone()
+    }
+
+    pub fn set_fav(fav: Vec<String>) {
+        let mut lock = LOCAL_CONFIG.write().unwrap();
+        if lock.fav == fav {
+            return;
+        }
+        lock.fav = fav;
+        lock.store();
+    }
+
+    pub fn get_fav() -> Vec<String> {
+        LOCAL_CONFIG.read().unwrap().fav.clone()
+    }
+
+    pub fn get_saved_subnets() -> Vec<String> {
+        LOCAL_CONFIG.read().unwrap().saved_subnets.clone()
+    }
+
+    /// Adds `subnet` (trimmed) to the saved subnet list if not already
+    /// present, keeping the most recently added entry last. No-op for an
+    /// empty or already-saved value.
+    pub fn add_saved_subnet(subnet: &str) {
+        let subnet = subnet.trim();
+        if subnet.is_empty() {
+            return;
+        }
+        let mut lock = LOCAL_CONFIG.write().unwrap();
+        if lock.saved_subnets.iter().any(|value| value == subnet) {
+            return;
+        }
+        lock.saved_subnets.push(subnet.to_owned());
+        lock.store();
+    }
+
+    pub fn remove_saved_subnet(subnet: &str) {
+        let mut lock = LOCAL_CONFIG.write().unwrap();
+        let before = lock.saved_subnets.len();
+        lock.saved_subnets.retain(|value| value != subnet);
+        if lock.saved_subnets.len() != before {
+            lock.store();
+        }
+    }
+
+    /// Loads favorites and LAN peer metadata directly from disk so another
+    /// desktop process can observe changes made by the Flutter UI.
+    pub fn load_fav_with_recent_lan_endpoints() -> (Vec<String>, Vec<RecentLanEndpoint>) {
+        let config = Self::load();
+        let recent = config.sorted_recent_lan_endpoints();
+        (config.fav, recent)
+    }
+
+    pub fn get_option(k: &str) -> String {
+        get_or(
+            &OVERWRITE_LOCAL_SETTINGS,
+            &LOCAL_CONFIG.read().unwrap().options,
+            &DEFAULT_LOCAL_SETTINGS,
+            k,
+        )
+        .unwrap_or_default()
+    }
+
+    // Usually get_option should be used.
+    pub fn get_option_from_file(k: &str) -> String {
+        get_or(
+            &OVERWRITE_LOCAL_SETTINGS,
+            &Self::load().options,
+            &DEFAULT_LOCAL_SETTINGS,
+            k,
+        )
+        .unwrap_or_default()
+    }
+
+    pub fn get_bool_option(k: &str) -> bool {
+        option2bool(k, &Self::get_option(k))
+    }
+
+    pub fn set_option(k: String, v: String) {
+        if !is_option_can_save(&OVERWRITE_LOCAL_SETTINGS, &k, &DEFAULT_LOCAL_SETTINGS, &v) {
+            let mut config = LOCAL_CONFIG.write().unwrap();
+            if config.options.remove(&k).is_some() {
+                config.store();
+            }
+            return;
+        }
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        // The custom client will explictly set "default" as the default language.
+        let is_custom_client_default_lang = k == keys::OPTION_LANGUAGE && v == "default";
+        if is_custom_client_default_lang {
+            config.options.insert(k, "".to_owned());
+            config.store();
+            return;
+        }
+        let v2 = if v.is_empty() { None } else { Some(&v) };
+        if v2 != config.options.get(&k) {
+            if v2.is_none() {
+                config.options.remove(&k);
+            } else {
+                config.options.insert(k, v);
+            }
+            config.store();
+        }
+    }
+
+    pub fn get_flutter_option(k: &str) -> String {
+        get_or(
+            &OVERWRITE_LOCAL_SETTINGS,
+            &LOCAL_CONFIG.read().unwrap().ui_flutter,
+            &DEFAULT_LOCAL_SETTINGS,
+            k,
+        )
+        .unwrap_or_default()
+    }
+
+    pub fn set_flutter_option(k: String, v: String) {
+        // The Flutter UI still owns this key directly (it hasn't been
+        // migrated to the canonical favorite/group bridge calls yet), but
+        // mirror its write into canonical state under the cross-process lock
+        // so a Rust-side reader (and a verified-connection endpoint update)
+        // sees the same data instead of two diverging sources of truth.
+        if k == FAVORITE_PEER_GROUPS_OPTION_KEY && !v.is_empty() {
+            if let Err(err) = Self::sync_canonical_groups_from_legacy_json(&v) {
+                log::error!("Failed to sync canonical favorite groups from Flutter: {err}");
+            }
+        }
+        let mut config = LOCAL_CONFIG.write().unwrap();
+        let v2 = if v.is_empty() { None } else { Some(&v) };
+        if v2 != config.ui_flutter.get(&k) {
+            if v2.is_none() {
+                config.ui_flutter.remove(&k);
+            } else {
+                config.ui_flutter.insert(k, v);
+            }
+            config.store();
+        }
+    }
+}
+
+/// A discovery observation is treated as stale (no longer "Online") after
+/// this long without a fresh one.
+const DISCOVERY_ONLINE_WINDOW_MS: i64 = 45_000;
+/// A peer is only marked Offline after at least this many consecutive
+/// full-coverage scans found no observation of it.
+const DISCOVERY_OFFLINE_MIN_MISSES: u32 = 2;
+/// ...and only once those misses span at least this long, so a single fast
+/// re-scan right after the first miss can't flip a device Offline.
+const DISCOVERY_OFFLINE_MIN_MISS_SPAN_MS: i64 = 15_000;
+
+/// Discovery-derived reachability. This reflects only what LAN broadcast/mDNS
+/// observation has shown; it does not know about an active verified
+/// connection (callers that track one should treat that as Online directly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanReachability {
+    Online,
+    Unknown,
+    Offline,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct DiscoveryPeer {
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub id: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub username: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub hostname: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub platform: String,
+    #[serde(default, deserialize_with = "deserialize_bool")]
+    pub online: bool,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub endpoint: String,
+    #[serde(default, deserialize_with = "deserialize_string")]
+    pub fingerprint: String,
+    /// Milliseconds since epoch of the last successful discovery observation
+    /// (UDP pong or resolved mDNS record) of this device, 0 if never seen.
+    #[serde(default, deserialize_with = "deserialize_i64")]
+    pub last_seen_at: i64,
+    /// Completion time (ms since epoch) of the last full-coverage scan that
+    /// counted toward `consecutive_full_misses` for this peer.
+    #[serde(default, deserialize_with = "deserialize_i64")]
+    pub last_full_scan_at: i64,
+    /// Completion time (ms since epoch) of the first full-coverage scan in
+    /// the current unbroken run of misses; 0 while there is no active miss
+    /// streak. Reset to 0 by any positive observation.
+    #[serde(default, deserialize_with = "deserialize_i64")]
+    pub first_miss_at: i64,
+    /// Consecutive full-coverage scans that found no observation of this
+    /// device. Reset to 0 by any positive observation.
+    #[serde(default, deserialize_with = "deserialize_u32")]
+    pub consecutive_full_misses: u32,
+    // TOML tables must follow scalar values when serialized by toml 0.5.
+    // Legacy, unauthenticated historical addresses; retained for old readers.
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    pub ip_mac: HashMap<String, String>,
+}
+
+impl DiscoveryPeer {
+    pub fn is_same_peer(&self, other: &DiscoveryPeer) -> bool {
+        if !self.fingerprint.is_empty() && !other.fingerprint.is_empty() {
+            self.fingerprint == other.fingerprint
+        } else {
+            self.id == other.id && self.username == other.username
+        }
+    }
+
+    /// A fresh positive observation: bump `last_seen_at` (never backwards)
+    /// and clear any miss streak. Applies regardless of scan generation —
+    /// an observation from an older, still-in-flight scan is still real
+    /// evidence the device was reachable at that time.
+    fn record_observation(&mut self, observed_at_ms: i64) {
+        if observed_at_ms > self.last_seen_at {
+            self.last_seen_at = observed_at_ms;
+        }
+        self.first_miss_at = 0;
+        self.consecutive_full_misses = 0;
+        self.online = self.reachability(observed_at_ms) == LanReachability::Online;
+    }
+
+    /// Records that a newest-generation, full-coverage scan completed at
+    /// `scan_completed_at_ms` without observing this device. Callers must
+    /// only call this for the newest completed full-coverage scan generation
+    /// (see [`LanPeers::merge_scan`]); an older or limited-coverage scan must
+    /// never call this.
+    fn record_full_scan_miss(&mut self, scan_completed_at_ms: i64) {
+        if self.first_miss_at == 0 {
+            self.first_miss_at = scan_completed_at_ms;
+        }
+        self.last_full_scan_at = scan_completed_at_ms;
+        self.consecutive_full_misses = self.consecutive_full_misses.saturating_add(1);
+        self.online = self.reachability(scan_completed_at_ms) == LanReachability::Online;
+    }
+
+    pub fn reachability(&self, now_ms: i64) -> LanReachability {
+        if self.last_seen_at > 0 && now_ms - self.last_seen_at <= DISCOVERY_ONLINE_WINDOW_MS {
+            return LanReachability::Online;
+        }
+        if self.first_miss_at > 0
+            && self.consecutive_full_misses >= DISCOVERY_OFFLINE_MIN_MISSES
+            && self.last_full_scan_at - self.first_miss_at >= DISCOVERY_OFFLINE_MIN_MISS_SPAN_MS
+        {
+            return LanReachability::Offline;
+        }
+        LanReachability::Unknown
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct LanPeers {
+    /// The generation of the newest completed full-coverage scan that has
+    /// already been allowed to apply negative evidence (misses) or change
+    /// preferred endpoints. A scan with a generation at or below this value
+    /// must not repeat that; it may still add positive observations.
+    #[serde(default, deserialize_with = "deserialize_u64")]
+    pub last_applied_negative_generation: u64,
+    // TOML tables must follow scalar values when serialized by toml 0.5.
+    #[serde(default, deserialize_with = "deserialize_vec_discoverypeer")]
+    pub peers: Vec<DiscoveryPeer>,
+}
+
+impl LanPeers {
+    pub fn load() -> LanPeers {
+        let _lock = CONFIG.read().unwrap();
+        match confy::load_path(Config::file_("_lan_peers")) {
+            Ok(peers) => peers,
+            Err(err) => {
+                log::error!("Failed to load lan peers: {}", err);
+                Default::default()
+            }
+        }
+    }
+
+    pub fn store(peers: &[DiscoveryPeer]) {
+        let existing = Self::load();
+        let f = LanPeers {
+            peers: peers.to_owned(),
+            last_applied_negative_generation: existing.last_applied_negative_generation,
+        };
+        if let Err(err) = store_path(Config::file_("_lan_peers"), f) {
+            log::error!("Failed to store lan peers: {}", err);
+        }
+    }
+
+    pub fn modify_time() -> crate::ResultType<u64> {
+        let p = Config::file_("_lan_peers");
+        Ok(fs::metadata(p)?
+            .modified()?
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_millis() as _)
+    }
+
+    fn lock_path() -> PathBuf {
+        Config::file_("_lan_peers").with_extension("lan_peers.lock")
+    }
+
+    /// Merges this scan's observed peers into the cross-process-shared
+    /// `_lan_peers` cache under the lock, applying the generation rules so
+    /// an older or limited-coverage scan can only add positive observations
+    /// — never negative evidence, preferred-endpoint changes, or an Offline
+    /// transition — while the newest completed full-coverage scan may do
+    /// all of that. Returns the merged, reconciled peer list.
+    pub fn merge_scan(
+        scan_generation: u64,
+        full_coverage: bool,
+        observed: Vec<DiscoveryPeer>,
+        now_ms: i64,
+    ) -> crate::ResultType<Vec<DiscoveryPeer>> {
+        let _guard = CrossProcessLock::acquire(Self::lock_path(), Duration::from_secs(5))?;
+        let mut current: LanPeers = match confy::load_path(Config::file_("_lan_peers")) {
+            Ok(value) => value,
+            Err(err) => {
+                log::error!("Failed to load lan peers for merge: {err}");
+                Default::default()
+            }
+        };
+
+        let apply_negative =
+            full_coverage && scan_generation > current.last_applied_negative_generation;
+
+        fn peer_key(peer: &DiscoveryPeer) -> String {
+            if !peer.fingerprint.is_empty() {
+                peer.fingerprint.to_ascii_lowercase()
+            } else {
+                format!("{}|{}", peer.id, peer.username)
+            }
+        }
+
+        let mut observed_keys = HashSet::new();
+        for mut peer in observed {
+            observed_keys.insert(peer_key(&peer));
+            if let Some(pos) = current.peers.iter().position(|x| x.is_same_peer(&peer)) {
+                let mut existing = current.peers.remove(pos);
+                // Discovery addresses are observations, not verified history.
+                // Keep only addresses seen in this scan so a device moving to
+                // another network does not retain obsolete candidates.
+                existing.ip_mac = peer.ip_mac;
+                existing.hostname = peer.hostname;
+                existing.platform = peer.platform;
+                existing.username = peer.username;
+                existing.endpoint = peer.endpoint;
+                existing.id = peer.id;
+                existing.record_observation(now_ms);
+                current.peers.insert(0, existing);
+            } else {
+                peer.record_observation(now_ms);
+                current.peers.insert(0, peer);
+            }
+        }
+
+        if apply_negative {
+            for peer in current.peers.iter_mut() {
+                if !observed_keys.contains(&peer_key(peer)) {
+                    peer.record_full_scan_miss(now_ms);
+                }
+            }
+            current.last_applied_negative_generation = scan_generation;
+        }
+
+        if let Err(err) = store_path(Config::file_("_lan_peers"), current.clone()) {
+            return Err(anyhow!("Failed to persist merged lan peers: {err}"));
+        }
+        Ok(current.peers)
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct UserDefaultConfig {
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    options: HashMap<String, String>,
+}
+
+impl UserDefaultConfig {
+    fn read(key: &str) -> String {
+        let mut cfg = USER_DEFAULT_CONFIG.write().unwrap();
+        // we do so, because default config may changed in another process, but we don't sync it
+        // but no need to read every time, give a small interval to avoid too many redundant read waste
+        if cfg.1.elapsed() > Duration::from_secs(1) {
+            *cfg = (Self::load(), Instant::now());
+        }
+        cfg.0.get(key)
+    }
+
+    pub fn load() -> UserDefaultConfig {
+        Config::load_::<UserDefaultConfig>("_default")
+    }
+
+    #[inline]
+    fn store(&self) {
+        Config::store_(self, "_default");
+    }
+
+    pub fn get(&self, key: &str) -> String {
+        match key {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            keys::OPTION_VIEW_STYLE => self.get_string(key, "adaptive", vec!["original"]),
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            keys::OPTION_VIEW_STYLE => self.get_string(key, "original", vec!["adaptive"]),
+            keys::OPTION_SCROLL_STYLE => {
+                self.get_string(key, "scrollauto", vec!["scrolledge", "scrollbar"])
+            }
+            keys::OPTION_IMAGE_QUALITY => {
+                self.get_string(key, "custom", vec!["best", "balanced", "low"])
+            }
+            keys::OPTION_CODEC_PREFERENCE => {
+                self.get_string(key, "auto", vec!["vp8", "vp9", "av1", "h264", "h265"])
+            }
+            keys::OPTION_CUSTOM_IMAGE_QUALITY => {
+                self.get_num_string(key, 100.0, 10.0, 0xFFF as f64)
+            }
+            keys::OPTION_CUSTOM_FPS => self.get_num_string(key, 60.0, 5.0, 120.0),
+            keys::OPTION_ENABLE_FILE_COPY_PASTE => self.get_string(key, "Y", vec!["", "N"]),
+            keys::OPTION_EDGE_SCROLL_EDGE_THICKNESS => self.get_num_string(key, 100, 20, 150),
+            keys::OPTION_TRACKPAD_SPEED => self.get_num_string(key, 100, 10, 1000),
+            _ => self
+                .get_after(key)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn set(&mut self, key: String, value: String) {
+        if !is_option_can_save(
+            &OVERWRITE_DISPLAY_SETTINGS,
+            &key,
+            &DEFAULT_DISPLAY_SETTINGS,
+            &value,
+        ) {
+            if self.options.remove(&key).is_some() {
+                self.store();
+            }
+            return;
+        }
+        if value.is_empty() {
+            self.options.remove(&key);
+        } else {
+            self.options.insert(key, value);
+        }
+        self.store();
+    }
+
+    #[inline]
+    fn get_string(&self, key: &str, default: &str, others: Vec<&str>) -> String {
+        match self.get_after(key) {
+            Some(option) => {
+                if others.contains(&option.as_str()) {
+                    option.to_owned()
+                } else {
+                    default.to_owned()
+                }
+            }
+            None => default.to_owned(),
+        }
+    }
+
+    #[inline]
+    fn get_num_string<T>(&self, key: &str, default: T, min: T, max: T) -> String
+    where
+        T: ToString + std::str::FromStr + std::cmp::PartialOrd + std::marker::Copy,
+    {
+        match self.get_after(key) {
+            Some(option) => {
+                let v: T = option.parse().unwrap_or(default);
+                if v >= min && v <= max {
+                    v.to_string()
+                } else {
+                    default.to_string()
+                }
+            }
+            None => default.to_string(),
+        }
+    }
+
+    fn get_after(&self, k: &str) -> Option<String> {
+        get_or(
+            &OVERWRITE_DISPLAY_SETTINGS,
+            &self.options,
+            &DEFAULT_DISPLAY_SETTINGS,
+            k,
+        )
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct AbPeer {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub id: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub hash: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub username: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub hostname: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub platform: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub alias: String,
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct AbEntry {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub guid: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub name: String,
+    #[serde(default, deserialize_with = "deserialize_vec_abpeer")]
+    pub peers: Vec<AbPeer>,
+    #[serde(default, deserialize_with = "deserialize_vec_string")]
+    pub tags: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub tag_colors: String,
+}
+
+impl AbEntry {
+    pub fn personal(&self) -> bool {
+        self.name == "My address book" || self.name == "Legacy address book"
+    }
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct Ab {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub access_token: String,
+    #[serde(default, deserialize_with = "deserialize_vec_abentry")]
+    pub ab_entries: Vec<AbEntry>,
+}
+
+impl Ab {
+    fn path() -> PathBuf {
+        let filename = format!("{}_ab", APP_NAME.read().unwrap().clone());
+        Config::path(filename)
+    }
+
+    pub fn store(json: String) {
+        if let Ok(mut file) = std::fs::File::create(Self::path()) {
+            let data = compress(json.as_bytes());
+            let max_len = 64 * 1024 * 1024;
+            if data.len() > max_len {
+                // maxlen of function decompress
+                log::error!("ab data too large, {} > {}", data.len(), max_len);
+                return;
+            }
+            if let Ok(data) = symmetric_crypt(&data, true) {
+                file.write_all(&data).ok();
+            }
+        };
+    }
+
+    pub fn load() -> Ab {
+        if let Ok(mut file) = std::fs::File::open(Self::path()) {
+            let mut data = vec![];
+            if file.read_to_end(&mut data).is_ok() {
+                if let Ok(data) = symmetric_crypt(&data, false) {
+                    let data = decompress(&data);
+                    if let Ok(ab) = serde_json::from_str::<Ab>(&String::from_utf8_lossy(&data)) {
+                        return ab;
+                    }
+                }
+            }
+        };
+        Self::remove();
+        Ab::default()
+    }
+
+    pub fn remove() {
+        std::fs::remove_file(Self::path()).ok();
+    }
+}
+
+// use default value when field type is wrong
+macro_rules! deserialize_default {
+    ($func_name:ident, $return_type:ty) => {
+        fn $func_name<'de, D>(deserializer: D) -> Result<$return_type, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            Ok(de::Deserialize::deserialize(deserializer).unwrap_or_default())
+        }
+    };
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct GroupPeer {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub id: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub username: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub hostname: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub platform: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub login_name: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct GroupUser {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub name: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub display_name: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct DeviceGroup {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub name: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct Group {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_string",
+        skip_serializing_if = "String::is_empty"
+    )]
+    pub access_token: String,
+    #[serde(default, deserialize_with = "deserialize_vec_groupuser")]
+    pub users: Vec<GroupUser>,
+    #[serde(default, deserialize_with = "deserialize_vec_grouppeer")]
+    pub peers: Vec<GroupPeer>,
+    #[serde(default, deserialize_with = "deserialize_vec_devicegroup")]
+    pub device_groups: Vec<DeviceGroup>,
+}
+
+impl Group {
+    fn path() -> PathBuf {
+        let filename = format!("{}_group", APP_NAME.read().unwrap().clone());
+        Config::path(filename)
+    }
+
+    pub fn store(json: String) {
+        if let Ok(mut file) = std::fs::File::create(Self::path()) {
+            let data = compress(json.as_bytes());
+            let max_len = 64 * 1024 * 1024;
+            if data.len() > max_len {
+                // maxlen of function decompress
+                return;
+            }
+            if let Ok(data) = symmetric_crypt(&data, true) {
+                file.write_all(&data).ok();
+            }
+        };
+    }
+
+    pub fn load() -> Self {
+        if let Ok(mut file) = std::fs::File::open(Self::path()) {
+            let mut data = vec![];
+            if file.read_to_end(&mut data).is_ok() {
+                if let Ok(data) = symmetric_crypt(&data, false) {
+                    let data = decompress(&data);
+                    if let Ok(group) = serde_json::from_str::<Self>(&String::from_utf8_lossy(&data))
+                    {
+                        return group;
+                    }
+                }
+            }
+        };
+        Self::remove();
+        Self::default()
+    }
+
+    pub fn remove() {
+        std::fs::remove_file(Self::path()).ok();
+    }
+}
+
+deserialize_default!(deserialize_string, String);
+deserialize_default!(deserialize_bool, bool);
+deserialize_default!(deserialize_i32, i32);
+deserialize_default!(deserialize_i64, i64);
+deserialize_default!(deserialize_u32, u32);
+deserialize_default!(deserialize_u64, u64);
+deserialize_default!(deserialize_vec_u8, Vec<u8>);
+deserialize_default!(deserialize_vec_string, Vec<String>);
+deserialize_default!(deserialize_vec_i32_string_i32, Vec<(i32, String, i32)>);
+deserialize_default!(deserialize_vec_discoverypeer, Vec<DiscoveryPeer>);
+deserialize_default!(deserialize_vec_abpeer, Vec<AbPeer>);
+deserialize_default!(deserialize_vec_abentry, Vec<AbEntry>);
+deserialize_default!(deserialize_vec_groupuser, Vec<GroupUser>);
+deserialize_default!(deserialize_vec_grouppeer, Vec<GroupPeer>);
+deserialize_default!(deserialize_vec_devicegroup, Vec<DeviceGroup>);
+deserialize_default!(deserialize_keypair, KeyPair);
+deserialize_default!(deserialize_size, Size);
+deserialize_default!(deserialize_hashmap_string_string, HashMap<String, String>);
+deserialize_default!(deserialize_hashmap_string_bool,  HashMap<String, bool>);
+deserialize_default!(deserialize_hashmap_resolutions, HashMap<String, Resolution>);
+
+#[inline]
+fn get_or(
+    a: &RwLock<HashMap<String, String>>,
+    b: &HashMap<String, String>,
+    c: &RwLock<HashMap<String, String>>,
+    k: &str,
+) -> Option<String> {
+    a.read()
+        .unwrap()
+        .get(k)
+        .or(b.get(k))
+        .or(c.read().unwrap().get(k))
+        .cloned()
+}
+
+#[inline]
+fn is_option_can_save(
+    overwrite: &RwLock<HashMap<String, String>>,
+    k: &str,
+    defaults: &RwLock<HashMap<String, String>>,
+    v: &str,
+) -> bool {
+    if overwrite.read().unwrap().contains_key(k)
+        || defaults.read().unwrap().get(k).map_or(false, |x| x == v)
+    {
+        return false;
+    }
+    true
+}
+
+#[inline]
+pub fn is_incoming_only() -> bool {
+    if HARD_SETTINGS
+        .read()
+        .unwrap()
+        .get("conn-type")
+        .map_or(false, |x| x == ("incoming"))
+    {
+        return true;
+    }
+    #[cfg(windows)]
+    if Config::get_option("incoming-only-scope") == "device" { return Config::get_option("incoming-only") == "Y"; }
+    #[cfg(windows)]
+    if let Some(epoch) = helper_profile::install_epoch() {
+        // A process surviving MSI repair must not retain its old outgoing grant.
+        if CONFIG2.read().unwrap().options.get("receiver-install-id") != Some(&epoch) {
+            return true;
+        }
+    }
+    let state = Config::get_option("incoming-only-initialized");
+    if state == "locked" {
+        return true;
+    }
+    if !Config::get_option("incoming-only-password").is_empty() {
+        return true;
+    }
+    Config::get_option("incoming-only") == "Y"
+}
+
+/// Apply installation defaults once at startup, never while querying mode.
+pub fn initialize_receiver_only() {
+    let mut options = Config::get_options();
+    #[cfg(windows)]
+    if let Some(epoch) = helper_profile::install_epoch() {
+        helper_profile::apply_install_lock(&mut options, &epoch);
+    }
+    helper_profile::apply_default_lock(&mut options);
+    Config::set_options(options);
+}
+
+pub fn relock_managed_receiver_policy(policy: serde_json::Value) -> Result<serde_json::Value> {
+    helper_profile::relock_machine_policy(policy)
+}
+
+#[cfg(windows)]
+pub fn initialize_installed_helper() {
+    if helper_profile::installed_profile().is_some() { initialize_receiver_only(); }
+}
+
+#[inline]
+pub fn is_outgoing_only() -> bool {
+    HARD_SETTINGS
+        .read()
+        .unwrap()
+        .get("conn-type")
+        .map_or(false, |x| x == ("outgoing"))
+}
+
+#[inline]
+fn is_some_hard_opton(name: &str) -> bool {
+    HARD_SETTINGS
+        .read()
+        .unwrap()
+        .get(name)
+        .map_or(false, |x| x == ("Y"))
+}
+
+#[inline]
+pub fn is_disable_tcp_listen() -> bool {
+    is_some_hard_opton("disable-tcp-listen")
+}
+
+#[inline]
+pub fn is_disable_settings() -> bool {
+    is_some_hard_opton("disable-settings")
+}
+
+#[inline]
+pub fn is_disable_ab() -> bool {
+    is_some_hard_opton("disable-ab")
+}
+
+#[inline]
+pub fn is_disable_account() -> bool {
+    is_some_hard_opton("disable-account")
+}
+
+#[inline]
+pub fn is_disable_installation() -> bool {
+    is_some_hard_opton("disable-installation")
+}
+
+// This function must be kept the same as the one in flutter and sciter code.
+// flutter: flutter/lib/common.dart -> option2bool()
+// sciter: Does not have the function, but it should be kept the same.
+pub fn option2bool(option: &str, value: &str) -> bool {
+    if option.starts_with("enable-") {
+        value != "N"
+    } else if option.starts_with("allow-")
+        || option == "stop-service"
+        || option == keys::OPTION_DIRECT_SERVER
+        || option == "force-always-relay"
+    {
+        value == "Y"
+    } else {
+        value != "N"
+    }
+}
+
+pub fn use_ws() -> bool {
+    let option = keys::OPTION_ALLOW_WEBSOCKET;
+    option2bool(option, &Config::get_option(option))
+}
+
+pub fn allow_insecure_tls_fallback() -> bool {
+    let option = keys::OPTION_ALLOW_INSECURE_TLS_FALLBACK;
+    option2bool(option, &Config::get_option(option))
+}
+
+pub mod keys {
+    pub const OPTION_VIEW_ONLY: &str = "view_only";
+    pub const OPTION_SHOW_MONITORS_TOOLBAR: &str = "show_monitors_toolbar";
+    pub const OPTION_COLLAPSE_TOOLBAR: &str = "collapse_toolbar";
+    pub const OPTION_SHOW_REMOTE_CURSOR: &str = "show_remote_cursor";
+    pub const OPTION_FOLLOW_REMOTE_CURSOR: &str = "follow_remote_cursor";
+    pub const OPTION_FOLLOW_REMOTE_WINDOW: &str = "follow_remote_window";
+    pub const OPTION_ZOOM_CURSOR: &str = "zoom-cursor";
+    pub const OPTION_SHOW_QUALITY_MONITOR: &str = "show_quality_monitor";
+    pub const OPTION_DISABLE_AUDIO: &str = "disable_audio";
+    pub const OPTION_ENABLE_REMOTE_PRINTER: &str = "enable-remote-printer";
+    pub const OPTION_ENABLE_FILE_COPY_PASTE: &str = "enable-file-copy-paste";
+    pub const OPTION_DISABLE_CLIPBOARD: &str = "disable_clipboard";
+    pub const OPTION_LOCK_AFTER_SESSION_END: &str = "lock_after_session_end";
+    pub const OPTION_PRIVACY_MODE: &str = "privacy_mode";
+    pub const OPTION_TOUCH_MODE: &str = "touch-mode";
+    pub const OPTION_I444: &str = "i444";
+    pub const OPTION_REVERSE_MOUSE_WHEEL: &str = "reverse_mouse_wheel";
+    pub const OPTION_SWAP_LEFT_RIGHT_MOUSE: &str = "swap-left-right-mouse";
+    pub const OPTION_DISPLAYS_AS_INDIVIDUAL_WINDOWS: &str = "displays_as_individual_windows";
+    pub const OPTION_USE_ALL_MY_DISPLAYS_FOR_THE_REMOTE_SESSION: &str =
+        "use_all_my_displays_for_the_remote_session";
+    pub const OPTION_VIEW_STYLE: &str = "view_style";
+    pub const OPTION_SCROLL_STYLE: &str = "scroll_style";
+    pub const OPTION_EDGE_SCROLL_EDGE_THICKNESS: &str = "edge-scroll-edge-thickness";
+    pub const OPTION_IMAGE_QUALITY: &str = "image_quality";
+    pub const OPTION_CUSTOM_IMAGE_QUALITY: &str = "custom_image_quality";
+    pub const OPTION_CUSTOM_FPS: &str = "custom-fps";
+    pub const OPTION_CODEC_PREFERENCE: &str = "codec-preference";
+    pub const OPTION_SYNC_INIT_CLIPBOARD: &str = "sync-init-clipboard";
+    pub const OPTION_THEME: &str = "theme";
+    pub const OPTION_LANGUAGE: &str = "lang";
+    pub const OPTION_REMOTE_MENUBAR_DRAG_LEFT: &str = "remote-menubar-drag-left";
+    pub const OPTION_REMOTE_MENUBAR_DRAG_RIGHT: &str = "remote-menubar-drag-right";
+    pub const OPTION_HIDE_AB_TAGS_PANEL: &str = "hideAbTagsPanel";
+    pub const OPTION_ENABLE_CONFIRM_CLOSING_TABS: &str = "enable-confirm-closing-tabs";
+    pub const OPTION_ENABLE_OPEN_NEW_CONNECTIONS_IN_TABS: &str =
+        "enable-open-new-connections-in-tabs";
+    pub const OPTION_TEXTURE_RENDER: &str = "use-texture-render";
+    pub const OPTION_ALLOW_D3D_RENDER: &str = "allow-d3d-render";
+    pub const OPTION_ENABLE_CHECK_UPDATE: &str = "enable-check-update";
+    pub const OPTION_ALLOW_AUTO_UPDATE: &str = "allow-auto-update";
+    pub const OPTION_SYNC_AB_WITH_RECENT_SESSIONS: &str = "sync-ab-with-recent-sessions";
+    pub const OPTION_SYNC_AB_TAGS: &str = "sync-ab-tags";
+    pub const OPTION_FILTER_AB_BY_INTERSECTION: &str = "filter-ab-by-intersection";
+    pub const OPTION_ACCESS_MODE: &str = "access-mode";
+    pub const OPTION_ENABLE_KEYBOARD: &str = "enable-keyboard";
+    pub const OPTION_ENABLE_CLIPBOARD: &str = "enable-clipboard";
+    pub const OPTION_ENABLE_FILE_TRANSFER: &str = "enable-file-transfer";
+    pub const OPTION_ENABLE_CAMERA: &str = "enable-camera";
+    pub const OPTION_ENABLE_TERMINAL: &str = "enable-terminal";
+    pub const OPTION_TERMINAL_PERSISTENT: &str = "terminal-persistent";
+    pub const OPTION_ENABLE_AUDIO: &str = "enable-audio";
+    pub const OPTION_ENABLE_TUNNEL: &str = "enable-tunnel";
+    pub const OPTION_ENABLE_REMOTE_RESTART: &str = "enable-remote-restart";
+    pub const OPTION_ENABLE_RECORD_SESSION: &str = "enable-record-session";
+    pub const OPTION_ENABLE_BLOCK_INPUT: &str = "enable-block-input";
+    pub const OPTION_ENABLE_PRIVACY_MODE: &str = "enable-privacy-mode";
+    pub const OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW: &str =
+        "enable-perm-change-in-accept-window";
+    pub const OPTION_ALLOW_SCOPE_VIOLATION_CLOSE: &str = "allow-scope-violation-close";
+    pub const OPTION_ALLOW_SCOPE_VIOLATION_ALARM: &str = "allow-scope-violation-alarm";
+    pub const OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION: &str = "allow-remote-config-modification";
+    pub const OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD: &str = "allow-numeric-one-time-password";
+    pub const OPTION_ENABLE_LAN_DISCOVERY: &str = "lan-discovery-enabled";
+    pub const OPTION_WEB_ACCESS_ENABLED: &str = "web-access-enabled";
+    pub const OPTION_WEB_LISTEN_PORT: &str = "web-listen-port";
+    pub const OPTION_WEB_HTTPS_ENABLED: &str = "web-https-enabled";
+    pub const OPTION_WEB_CERTIFICATE_PATH: &str = "web-certificate-path";
+    pub const OPTION_WEB_PRIVATE_KEY_PATH: &str = "web-private-key-path";
+    pub const OPTION_DIRECT_SERVER: &str = "direct-server";
+    pub const OPTION_DIRECT_ACCESS_PORT: &str = "direct-access-port";
+    pub const OPTION_WHITELIST: &str = "whitelist";
+    pub const OPTION_ID_WHITELIST: &str = "id-whitelist";
+    pub const OPTION_ALLOW_AUTO_DISCONNECT: &str = "allow-auto-disconnect";
+    pub const OPTION_AUTO_DISCONNECT_TIMEOUT: &str = "auto-disconnect-timeout";
+    pub const OPTION_ALLOW_ONLY_CONN_WINDOW_OPEN: &str = "allow-only-conn-window-open";
+    pub const OPTION_ALLOW_AUTO_RECORD_INCOMING: &str = "allow-auto-record-incoming";
+    pub const OPTION_ALLOW_AUTO_RECORD_OUTGOING: &str = "allow-auto-record-outgoing";
+    pub const OPTION_VIDEO_SAVE_DIRECTORY: &str = "video-save-directory";
+    pub const OPTION_ENABLE_ABR: &str = "enable-abr";
+    pub const OPTION_ALLOW_REMOVE_WALLPAPER: &str = "allow-remove-wallpaper";
+    pub const OPTION_ALLOW_ALWAYS_SOFTWARE_RENDER: &str = "allow-always-software-render";
+    pub const OPTION_ALLOW_LINUX_HEADLESS: &str = "allow-linux-headless";
+    pub const OPTION_ENABLE_HWCODEC: &str = "enable-hwcodec";
+    pub const OPTION_APPROVE_MODE: &str = "approve-mode";
+    pub const OPTION_VERIFICATION_METHOD: &str = "verification-method";
+    pub const OPTION_TEMPORARY_PASSWORD_LENGTH: &str = "temporary-password-length";
+    pub const OPTION_CUSTOM_RENDEZVOUS_SERVER: &str = "custom-rendezvous-server";
+    pub const OPTION_API_SERVER: &str = "api-server";
+    pub const OPTION_KEY: &str = "key";
+    pub const OPTION_ALLOW_WEBSOCKET: &str = "allow-websocket";
+    pub const OPTION_PRESET_ADDRESS_BOOK_NAME: &str = "preset-address-book-name";
+    pub const OPTION_PRESET_ADDRESS_BOOK_TAG: &str = "preset-address-book-tag";
+    pub const OPTION_PRESET_ADDRESS_BOOK_ALIAS: &str = "preset-address-book-alias";
+    pub const OPTION_PRESET_ADDRESS_BOOK_PASSWORD: &str = "preset-address-book-password";
+    pub const OPTION_PRESET_ADDRESS_BOOK_NOTE: &str = "preset-address-book-note";
+    pub const OPTION_PRESET_DEVICE_USERNAME: &str = "preset-device-username";
+    pub const OPTION_PRESET_DEVICE_NAME: &str = "preset-device-name";
+    pub const OPTION_PRESET_NOTE: &str = "preset-note";
+    pub const OPTION_ENABLE_DIRECTX_CAPTURE: &str = "enable-directx-capture";
+    pub const OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE: &str =
+        "enable-android-software-encoding-half-scale";
+    pub const OPTION_ENABLE_TRUSTED_DEVICES: &str = "enable-trusted-devices";
+    pub const OPTION_AV1_TEST: &str = "av1-test";
+    pub const OPTION_TRACKPAD_SPEED: &str = "trackpad-speed";
+    pub const OPTION_REGISTER_DEVICE: &str = "register-device";
+    pub const OPTION_RELAY_SERVER: &str = "relay-server";
+    pub const OPTION_ICE_SERVERS: &str = "ice-servers";
+    /// Maximum number of files allowed during a single file transfer request.
+    ///
+    /// Key: `file-transfer-max-files`.
+    /// Unit: number of files (not bytes).
+    ///
+    /// Behaviour:
+    /// - If set to a positive integer N, at most N files are allowed.
+    /// - If set to 0, a safe built-in default is used (see DEFAULT_MAX_VALIDATED_FILES).
+    /// - If unset, negative, or non-integer, no explicit limit is enforced for backward compatibility.
+    pub const OPTION_FILE_TRANSFER_MAX_FILES: &str = "file-transfer-max-files";
+    pub const OPTION_DISABLE_UDP: &str = "disable-udp";
+    pub const OPTION_ALLOW_INSECURE_TLS_FALLBACK: &str = "allow-insecure-tls-fallback";
+    pub const OPTION_SHOW_VIRTUAL_MOUSE: &str = "show-virtual-mouse";
+    // joystick is the virtual mouse.
+    // So `OPTION_SHOW_VIRTUAL_MOUSE` should also be set if `OPTION_SHOW_VIRTUAL_JOYSTICK` is set.
+    pub const OPTION_SHOW_VIRTUAL_JOYSTICK: &str = "show-virtual-joystick";
+    pub const OPTION_ENABLE_FLUTTER_HTTP_ON_RUST: &str = "enable-flutter-http-on-rust";
+    pub const OPTION_ALLOW_ASK_FOR_NOTE: &str = "allow-ask-for-note";
+
+    // built-in options
+    pub const OPTION_DISPLAY_NAME: &str = "display-name";
+    pub const OPTION_AVATAR: &str = "avatar";
+    pub const OPTION_PRESET_DEVICE_GROUP_NAME: &str = "preset-device-group-name";
+    pub const OPTION_PRESET_USERNAME: &str = "preset-user-name";
+    pub const OPTION_PRESET_STRATEGY_NAME: &str = "preset-strategy-name";
+    pub const OPTION_REMOVE_PRESET_PASSWORD_WARNING: &str = "remove-preset-password-warning";
+    pub const OPTION_HIDE_SECURITY_SETTINGS: &str = "hide-security-settings";
+    pub const OPTION_HIDE_NETWORK_SETTINGS: &str = "hide-network-settings";
+    pub const OPTION_HIDE_SERVER_SETTINGS: &str = "hide-server-settings";
+    pub const OPTION_HIDE_PROXY_SETTINGS: &str = "hide-proxy-settings";
+    pub const OPTION_HIDE_REMOTE_PRINTER_SETTINGS: &str = "hide-remote-printer-settings";
+    pub const OPTION_HIDE_WEBSOCKET_SETTINGS: &str = "hide-websocket-settings";
+    pub const OPTION_HIDE_STOP_SERVICE: &str = "hide-stop-service";
+    pub const OPTION_ALLOW_COMMAND_LINE_SETTINGS_WHEN_SETTINGS_DISABLED: &str =
+        "allow-command-line-settings-when-settings-disabled";
+
+    // Connection punch-through options
+    pub const OPTION_ENABLE_UDP_PUNCH: &str = "enable-udp-punch";
+    pub const OPTION_ENABLE_IPV6_PUNCH: &str = "enable-ipv6-punch";
+    pub const OPTION_HIDE_USERNAME_ON_CARD: &str = "hide-username-on-card";
+    pub const OPTION_HIDE_HELP_CARDS: &str = "hide-help-cards";
+    pub const OPTION_DEFAULT_CONNECT_PASSWORD: &str = "default-connect-password";
+    pub const OPTION_HIDE_TRAY: &str = "hide-tray";
+    pub const OPTION_ONE_WAY_CLIPBOARD_REDIRECTION: &str = "one-way-clipboard-redirection";
+    pub const OPTION_ALLOW_LOGON_SCREEN_PASSWORD: &str = "allow-logon-screen-password";
+    pub const OPTION_ALLOW_DEEP_LINK_PASSWORD: &str = "allow-deep-link-password";
+    pub const OPTION_ALLOW_DEEP_LINK_SERVER_SETTINGS: &str = "allow-deep-link-server-settings";
+    pub const OPTION_ONE_WAY_FILE_TRANSFER: &str = "one-way-file-transfer";
+    pub const OPTION_ALLOW_HTTPS_21114: &str = "allow-https-21114";
+    pub const OPTION_USE_RAW_TCP_FOR_API: &str = "use-raw-tcp-for-api";
+    pub const OPTION_ALLOW_HOSTNAME_AS_ID: &str = "allow-hostname-as-id";
+    pub const OPTION_HIDE_POWERED_BY_ME: &str = "hide-powered-by-me";
+    pub const OPTION_MAIN_WINDOW_ALWAYS_ON_TOP: &str = "main-window-always-on-top";
+    pub const OPTION_DISABLE_CHANGE_PERMANENT_PASSWORD: &str = "disable-change-permanent-password";
+    pub const OPTION_DISABLE_CHANGE_ID: &str = "disable-change-id";
+    pub const OPTION_DISABLE_UNLOCK_PIN: &str = "disable-unlock-pin";
+
+    // flutter local options
+    pub const OPTION_FLUTTER_REMOTE_MENUBAR_STATE: &str = "remoteMenubarState";
+    pub const OPTION_FLUTTER_PEER_SORTING: &str = "peer-sorting";
+    pub const OPTION_FLUTTER_PEER_TAB_INDEX: &str = "peer-tab-index";
+    pub const OPTION_FLUTTER_PEER_TAB_ORDER: &str = "peer-tab-order";
+    pub const OPTION_FLUTTER_PEER_TAB_VISIBLE: &str = "peer-tab-visible";
+    pub const OPTION_FLUTTER_PEER_CARD_UI_TYLE: &str = "peer-card-ui-type";
+    pub const OPTION_FLUTTER_CURRENT_AB_NAME: &str = "current-ab-name";
+    pub const OPTION_ALLOW_REMOTE_CM_MODIFICATION: &str = "allow-remote-cm-modification";
+
+    pub const OPTION_PRINTER_INCOMING_JOB_ACTION: &str = "printer-incomming-job-action";
+    pub const OPTION_PRINTER_ALLOW_AUTO_PRINT: &str = "allow-printer-auto-print";
+    pub const OPTION_PRINTER_SELECTED_NAME: &str = "printer-selected-name";
+
+    // android floating window options
+    pub const OPTION_DISABLE_FLOATING_WINDOW: &str = "disable-floating-window";
+    pub const OPTION_FLOATING_WINDOW_SIZE: &str = "floating-window-size";
+    pub const OPTION_FLOATING_WINDOW_UNTOUCHABLE: &str = "floating-window-untouchable";
+    pub const OPTION_FLOATING_WINDOW_TRANSPARENCY: &str = "floating-window-transparency";
+    pub const OPTION_FLOATING_WINDOW_SVG: &str = "floating-window-svg";
+
+    // android keep screen on
+    pub const OPTION_KEEP_SCREEN_ON: &str = "keep-screen-on";
+
+    // Server-side: keep host system awake during incoming sessions (Security setting)
+    pub const OPTION_KEEP_AWAKE_DURING_INCOMING_SESSIONS: &str =
+        "keep-awake-during-incoming-sessions";
+
+    // Client-side: keep client system awake during outgoing sessions (General setting)
+    pub const OPTION_KEEP_AWAKE_DURING_OUTGOING_SESSIONS: &str =
+        "keep-awake-during-outgoing-sessions";
+
+    pub const OPTION_DISABLE_GROUP_PANEL: &str = "disable-group-panel";
+    pub const OPTION_DISABLE_DISCOVERY_PANEL: &str = "disable-discovery-panel";
+    pub const OPTION_PRE_ELEVATE_SERVICE: &str = "pre-elevate-service";
+
+    // proxy settings
+    // The following options are not real keys, they are just used for custom client advanced settings.
+    // The real keys are in Config2::socks.
+    pub const OPTION_PROXY_URL: &str = "proxy-url";
+    pub const OPTION_PROXY_USERNAME: &str = "proxy-username";
+    pub const OPTION_PROXY_PASSWORD: &str = "proxy-password";
+
+    // DEFAULT_DISPLAY_SETTINGS, OVERWRITE_DISPLAY_SETTINGS
+    pub const KEYS_DISPLAY_SETTINGS: &[&str] = &[
+        OPTION_VIEW_ONLY,
+        OPTION_SHOW_MONITORS_TOOLBAR,
+        OPTION_COLLAPSE_TOOLBAR,
+        OPTION_SHOW_REMOTE_CURSOR,
+        OPTION_FOLLOW_REMOTE_CURSOR,
+        OPTION_FOLLOW_REMOTE_WINDOW,
+        OPTION_ZOOM_CURSOR,
+        OPTION_SHOW_QUALITY_MONITOR,
+        OPTION_DISABLE_AUDIO,
+        OPTION_ENABLE_FILE_COPY_PASTE,
+        OPTION_DISABLE_CLIPBOARD,
+        OPTION_LOCK_AFTER_SESSION_END,
+        OPTION_PRIVACY_MODE,
+        OPTION_TOUCH_MODE,
+        OPTION_I444,
+        OPTION_REVERSE_MOUSE_WHEEL,
+        OPTION_SWAP_LEFT_RIGHT_MOUSE,
+        OPTION_DISPLAYS_AS_INDIVIDUAL_WINDOWS,
+        OPTION_USE_ALL_MY_DISPLAYS_FOR_THE_REMOTE_SESSION,
+        OPTION_VIEW_STYLE,
+        OPTION_TERMINAL_PERSISTENT,
+        OPTION_SCROLL_STYLE,
+        OPTION_EDGE_SCROLL_EDGE_THICKNESS,
+        OPTION_IMAGE_QUALITY,
+        OPTION_CUSTOM_IMAGE_QUALITY,
+        OPTION_CUSTOM_FPS,
+        OPTION_CODEC_PREFERENCE,
+        OPTION_SYNC_INIT_CLIPBOARD,
+        OPTION_TRACKPAD_SPEED,
+    ];
+    // DEFAULT_LOCAL_SETTINGS, OVERWRITE_LOCAL_SETTINGS
+    pub const KEYS_LOCAL_SETTINGS: &[&str] = &[
+        OPTION_THEME,
+        OPTION_LANGUAGE,
+        OPTION_ENABLE_CONFIRM_CLOSING_TABS,
+        OPTION_ENABLE_OPEN_NEW_CONNECTIONS_IN_TABS,
+        OPTION_TEXTURE_RENDER,
+        OPTION_ALLOW_D3D_RENDER,
+        OPTION_SYNC_AB_WITH_RECENT_SESSIONS,
+        OPTION_SYNC_AB_TAGS,
+        OPTION_FILTER_AB_BY_INTERSECTION,
+        OPTION_REMOTE_MENUBAR_DRAG_LEFT,
+        OPTION_REMOTE_MENUBAR_DRAG_RIGHT,
+        OPTION_HIDE_AB_TAGS_PANEL,
+        OPTION_FLUTTER_REMOTE_MENUBAR_STATE,
+        OPTION_FLUTTER_PEER_SORTING,
+        OPTION_FLUTTER_PEER_TAB_INDEX,
+        OPTION_FLUTTER_PEER_TAB_ORDER,
+        OPTION_FLUTTER_PEER_TAB_VISIBLE,
+        OPTION_FLUTTER_PEER_CARD_UI_TYLE,
+        OPTION_FLUTTER_CURRENT_AB_NAME,
+        OPTION_DISABLE_FLOATING_WINDOW,
+        OPTION_FLOATING_WINDOW_SIZE,
+        OPTION_FLOATING_WINDOW_UNTOUCHABLE,
+        OPTION_FLOATING_WINDOW_TRANSPARENCY,
+        OPTION_FLOATING_WINDOW_SVG,
+        OPTION_KEEP_SCREEN_ON,
+        // Client-side: keep client system awake during outgoing sessions (General setting)
+        OPTION_KEEP_AWAKE_DURING_OUTGOING_SESSIONS,
+        OPTION_DISABLE_GROUP_PANEL,
+        OPTION_DISABLE_DISCOVERY_PANEL,
+        OPTION_PRE_ELEVATE_SERVICE,
+        OPTION_ALLOW_REMOTE_CM_MODIFICATION,
+        OPTION_ALLOW_AUTO_RECORD_OUTGOING,
+        OPTION_VIDEO_SAVE_DIRECTORY,
+        OPTION_ENABLE_UDP_PUNCH,
+        OPTION_ENABLE_IPV6_PUNCH,
+        OPTION_TOUCH_MODE,
+        OPTION_SHOW_VIRTUAL_MOUSE,
+        OPTION_SHOW_VIRTUAL_JOYSTICK,
+        OPTION_ENABLE_FLUTTER_HTTP_ON_RUST,
+        OPTION_ALLOW_ASK_FOR_NOTE,
+    ];
+    // DEFAULT_SETTINGS, OVERWRITE_SETTINGS
+    pub const KEYS_SETTINGS: &[&str] = &[
+        OPTION_ACCESS_MODE,
+        OPTION_ENABLE_KEYBOARD,
+        OPTION_ENABLE_CLIPBOARD,
+        OPTION_ENABLE_FILE_TRANSFER,
+        OPTION_ENABLE_CAMERA,
+        OPTION_ENABLE_TERMINAL,
+        OPTION_ENABLE_REMOTE_PRINTER,
+        OPTION_ENABLE_AUDIO,
+        OPTION_ENABLE_TUNNEL,
+        OPTION_ENABLE_REMOTE_RESTART,
+        OPTION_ENABLE_RECORD_SESSION,
+        OPTION_ENABLE_BLOCK_INPUT,
+        OPTION_ENABLE_PRIVACY_MODE,
+        OPTION_ALLOW_SCOPE_VIOLATION_CLOSE,
+        OPTION_ALLOW_SCOPE_VIOLATION_ALARM,
+        OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION,
+        OPTION_ALLOW_NUMERNIC_ONE_TIME_PASSWORD,
+        OPTION_ENABLE_LAN_DISCOVERY,
+        OPTION_WEB_ACCESS_ENABLED,
+        OPTION_WEB_LISTEN_PORT,
+        OPTION_WEB_HTTPS_ENABLED,
+        OPTION_DIRECT_SERVER,
+        OPTION_DIRECT_ACCESS_PORT,
+        OPTION_WHITELIST,
+        OPTION_ID_WHITELIST,
+        OPTION_ALLOW_AUTO_DISCONNECT,
+        OPTION_AUTO_DISCONNECT_TIMEOUT,
+        OPTION_ALLOW_ONLY_CONN_WINDOW_OPEN,
+        OPTION_ALLOW_AUTO_RECORD_INCOMING,
+        OPTION_ENABLE_ABR,
+        OPTION_ALLOW_REMOVE_WALLPAPER,
+        OPTION_ALLOW_ALWAYS_SOFTWARE_RENDER,
+        OPTION_ALLOW_LINUX_HEADLESS,
+        OPTION_ENABLE_HWCODEC,
+        OPTION_APPROVE_MODE,
+        OPTION_VERIFICATION_METHOD,
+        OPTION_TEMPORARY_PASSWORD_LENGTH,
+        OPTION_PROXY_URL,
+        OPTION_PROXY_USERNAME,
+        OPTION_PROXY_PASSWORD,
+        OPTION_CUSTOM_RENDEZVOUS_SERVER,
+        OPTION_API_SERVER,
+        OPTION_KEY,
+        OPTION_ALLOW_WEBSOCKET,
+        OPTION_PRESET_ADDRESS_BOOK_NAME,
+        OPTION_PRESET_ADDRESS_BOOK_TAG,
+        OPTION_PRESET_ADDRESS_BOOK_ALIAS,
+        OPTION_PRESET_ADDRESS_BOOK_PASSWORD,
+        OPTION_PRESET_ADDRESS_BOOK_NOTE,
+        OPTION_PRESET_DEVICE_USERNAME,
+        OPTION_PRESET_DEVICE_NAME,
+        OPTION_PRESET_NOTE,
+        OPTION_ENABLE_DIRECTX_CAPTURE,
+        OPTION_ENABLE_ANDROID_SOFTWARE_ENCODING_HALF_SCALE,
+        OPTION_ENABLE_TRUSTED_DEVICES,
+        OPTION_RELAY_SERVER,
+        OPTION_ICE_SERVERS,
+        OPTION_DISABLE_UDP,
+        OPTION_ALLOW_INSECURE_TLS_FALLBACK,
+        OPTION_KEEP_AWAKE_DURING_INCOMING_SESSIONS,
+        OPTION_ALLOW_AUTO_UPDATE,
+    ];
+
+    // BUILDIN_SETTINGS
+    pub const KEYS_BUILDIN_SETTINGS: &[&str] = &[
+        OPTION_DISPLAY_NAME,
+        OPTION_AVATAR,
+        OPTION_PRESET_DEVICE_GROUP_NAME,
+        OPTION_PRESET_USERNAME,
+        OPTION_PRESET_STRATEGY_NAME,
+        OPTION_REMOVE_PRESET_PASSWORD_WARNING,
+        OPTION_HIDE_SECURITY_SETTINGS,
+        OPTION_HIDE_NETWORK_SETTINGS,
+        OPTION_HIDE_SERVER_SETTINGS,
+        OPTION_HIDE_PROXY_SETTINGS,
+        OPTION_HIDE_REMOTE_PRINTER_SETTINGS,
+        OPTION_HIDE_WEBSOCKET_SETTINGS,
+        OPTION_HIDE_STOP_SERVICE,
+        OPTION_HIDE_USERNAME_ON_CARD,
+        OPTION_HIDE_HELP_CARDS,
+        OPTION_DEFAULT_CONNECT_PASSWORD,
+        OPTION_HIDE_TRAY,
+        OPTION_ONE_WAY_CLIPBOARD_REDIRECTION,
+        OPTION_ALLOW_LOGON_SCREEN_PASSWORD,
+        OPTION_ALLOW_DEEP_LINK_PASSWORD,
+        OPTION_ALLOW_DEEP_LINK_SERVER_SETTINGS,
+        OPTION_ONE_WAY_FILE_TRANSFER,
+        OPTION_ALLOW_HTTPS_21114,
+        OPTION_ALLOW_HOSTNAME_AS_ID,
+        OPTION_REGISTER_DEVICE,
+        OPTION_HIDE_POWERED_BY_ME,
+        OPTION_MAIN_WINDOW_ALWAYS_ON_TOP,
+        OPTION_FILE_TRANSFER_MAX_FILES,
+        OPTION_DISABLE_CHANGE_PERMANENT_PASSWORD,
+        OPTION_DISABLE_CHANGE_ID,
+        OPTION_DISABLE_UNLOCK_PIN,
+        OPTION_USE_RAW_TCP_FOR_API,
+        OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW,
+        OPTION_ALLOW_COMMAND_LINE_SETTINGS_WHEN_SETTINGS_DISABLED,
+    ];
+}
+
+pub fn common_load<
+    T: serde::Serialize + serde::de::DeserializeOwned + Default + std::fmt::Debug,
+>(
+    suffix: &str,
+) -> T {
+    Config::load_::<T>(suffix)
+}
+
+pub fn common_store<T: serde::Serialize>(config: &T, suffix: &str) {
+    Config::store_(config, suffix);
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct Status {
+    #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
+    values: HashMap<String, String>,
+}
+
+impl Status {
+    fn load() -> Status {
+        Config::load_::<Status>("_status")
+    }
+
+    fn store(&self) {
+        Config::store_(self, "_status");
+    }
+
+    pub fn get(k: &str) -> String {
+        STATUS
+            .read()
+            .unwrap()
+            .values
+            .get(k)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set(k: &str, v: String) {
+        if Self::get(k) == v {
+            return;
+        }
+
+        let mut st = STATUS.write().unwrap();
+        st.values.insert(k.to_owned(), v);
+        st.store();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{permanent_password::PERMANENT_PASSWORD_ENC_VERSION, *};
+
+    static CONFIG_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn manual_approval_defaults_on_and_invalid_preferences_fail_closed() {
+        let mut config = Config2::default();
+        assert_eq!(config.lan_manual_approval_enabled().unwrap(), true);
+        for (value, enabled) in [("Y", false), ("N", true)] {
+            config.options.insert("lan-manual-approval-disabled".into(), value.into());
+            assert_eq!(config.lan_manual_approval_enabled().unwrap(), enabled);
+        }
+        for value in ["", "true", "unknown"] {
+            config.options.insert("lan-manual-approval-disabled".into(), value.into());
+            assert!(config.lan_manual_approval_enabled().is_err());
+        }
+    }
+
+    #[test]
+    fn manual_approval_failed_write_preserves_saved_choice_and_other_config() {
+        let mut config = Config2 { unlock_pin: "synthetic-pin-marker".into(),
+            options: HashMap::from([("view_style".into(), "original".into())]), ..Default::default() };
+        let original = config.clone();
+        assert!(config.update_lan_manual_approval(false, |updated| {
+            assert!(!updated.lan_manual_approval_enabled().unwrap());
+            assert_eq!(updated.unlock_pin, original.unlock_pin);
+            assert_eq!(updated.options.get("view_style"), original.options.get("view_style"));
+            Err(anyhow!("Synthetic write failure"))
+        }).is_err());
+        assert_eq!(config, original);
+    }
+
+    #[test]
+    fn manual_approval_saved_on_off_round_trip_preserves_unrelated_options() {
+        let path = std::env::temp_dir().join(format!("subnetdesk-manual-preference-{}-{}.toml",
+            std::process::id(), crate::get_time()));
+        let mut config = Config2 { options: HashMap::from([("view_style".into(), "original".into())]),
+            ..Default::default() };
+        for enabled in [false, true, false] {
+            config.update_lan_manual_approval(enabled, |updated| store_path(path.clone(), updated)).unwrap();
+            let restored: Config2 = confy::load_path(&path).unwrap();
+            assert_eq!(restored.lan_manual_approval_enabled().unwrap(), enabled);
+            assert_eq!(restored.options.get("view_style").unwrap(), "original");
+            assert_eq!(restored.options.len(), 2);
+        }
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn password_only_requires_actual_hash_and_enabled_method_not_an_account() {
+        let hash = hash_lan_password(b"synthetic-test-password").unwrap();
+        assert!(Config::verify_lan_password_against(&hash, b"synthetic-test-password", true).unwrap());
+        assert!(!Config::verify_lan_password_against(&hash, b"wrong", true).unwrap());
+        assert!(!Config::verify_lan_password_against(&hash, b"synthetic-test-password", false).unwrap());
+        assert!(!Config::verify_lan_password_against("", b"synthetic-test-password", true).unwrap());
+        assert!(Config::verify_lan_password_against(&hash, b"", true).is_err());
+        assert!(Config::verify_lan_password_against(&hash, b"bad\npassword", true).is_err());
+        let mut legacy = Config { access_username: "legacy-account".into(), access_password_hash: hash,
+            ..Default::default() };
+        legacy.sanitize_lan_only();
+        assert!(Config::verify_lan_password_against(&legacy.access_password_hash, b"synthetic-test-password", true).unwrap());
+        assert_eq!(legacy.access_username, "legacy-account");
+    }
+
+    #[test]
+    fn lan_only_sanitizer_removes_legacy_identity_and_authentication() {
+        let mut config = Config {
+            id: "123456789".to_owned(),
+            enc_id: "legacy-id".to_owned(),
+            password: "legacy-password".to_owned(),
+            salt: "legacy-salt".to_owned(),
+            key_confirmed: true,
+            keys_confirmed: HashMap::from([("server".to_owned(), true)]),
+            ..Default::default()
+        };
+        assert!(config.sanitize_lan_only());
+        assert!(config.id.is_empty());
+        assert!(config.enc_id.is_empty());
+        assert!(config.password.is_empty());
+        assert!(config.salt.is_empty());
+        assert!(!config.key_confirmed);
+        assert!(config.keys_confirmed.is_empty());
+        assert_eq!(config.lan_schema_version, LAN_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn lan_only_sanitizer_removes_public_network_options() {
+        let mut config = Config2 {
+            rendezvous_server: "public.example".to_owned(),
+            nat_type: 2,
+            trusted_devices: "legacy".to_owned(),
+            socks: Some(Socks5Server::default()),
+            options: HashMap::from([
+                ("relay-server".to_owned(), "relay.example".to_owned()),
+                ("view_style".to_owned(), "original".to_owned()),
+            ]),
+            ..Default::default()
+        };
+        assert!(config.sanitize_lan_only());
+        assert!(config.rendezvous_server.is_empty());
+        assert_eq!(config.nat_type, 0);
+        assert!(config.trusted_devices.is_empty());
+        assert!(config.socks.is_none());
+        assert!(!config.options.contains_key("relay-server"));
+        assert_eq!(
+            config.options.get("view_style").map(String::as_str),
+            Some("original")
+        );
+    }
+
+    #[test]
+    fn lan_argon2_hash_accepts_only_the_original_password() {
+        let hash = hash_lan_password(b"correct horse battery staple").unwrap();
+        assert!(hash.starts_with("$argon2id$v=19$"));
+        assert!(verify_lan_password_hash(&hash, b"correct horse battery staple").unwrap());
+        assert!(!verify_lan_password_hash(&hash, b"wrong password").unwrap());
+        assert!(verify_lan_password_hash("not-a-phc-hash", b"password").is_err());
+        assert!(Config::verify_lan_credentials_against(
+            "operator",
+            &hash,
+            "operator",
+            b"correct horse battery staple"
+        )
+        .unwrap());
+        assert!(!Config::verify_lan_credentials_against(
+            "operator",
+            &hash,
+            "other-user",
+            b"correct horse battery staple"
+        )
+        .unwrap());
+        assert!(
+            Config::verify_lan_credentials_against("operator", &hash, "", b"password").is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lan_credentials_store_hash_only_with_owner_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marker = "lan-storage-plaintext-marker";
+        let mut config = Config::default();
+        config.access_username = "operator".to_owned();
+        config.access_password_hash = hash_lan_password(marker.as_bytes()).unwrap();
+        config.credential_revision = 1;
+        config.lan_schema_version = LAN_SCHEMA_VERSION;
+        let path = std::env::temp_dir().join(format!(
+            "rustdesk-lan-config-{}-{}.toml",
+            std::process::id(),
+            crate::get_time()
+        ));
+
+        store_path(path.clone(), &config).unwrap();
+        let stored = fs::read_to_string(&path).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        fs::remove_file(&path).unwrap();
+
+        assert!(!stored.contains(marker));
+        assert!(stored.contains("$argon2id$v=19$"));
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn recent_lan_endpoints_follow_stable_fingerprint_when_address_changes() {
+        let fingerprint = "a".repeat(64);
+        let mut config = LocalConfig::default();
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.20:21118".to_owned(),
+            username: "operator".to_owned(),
+            fingerprint: fingerprint.clone(),
+            last_connected_at: 1,
+            ..Default::default()
+        });
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.99:21118".to_owned(),
+            username: "operator".to_owned(),
+            fingerprint: fingerprint.clone(),
+            last_connected_at: 2,
+            ..Default::default()
+        });
+
+        assert_eq!(config.recent_lan_endpoints.len(), 1);
+        assert_eq!(config.remote_id, "192.168.1.99:21118");
+        assert_eq!(
+            config.recent_lan_endpoints[&fingerprint].endpoint,
+            "192.168.1.99:21118"
+        );
+    }
+
+    #[test]
+    fn recent_lan_endpoints_sort_and_remove_by_endpoint_or_fingerprint() {
+        let first_fingerprint = "a".repeat(64);
+        let second_fingerprint = "b".repeat(64);
+        let mut config = LocalConfig::default();
+        for (endpoint, fingerprint, last_connected_at) in [
+            ("host-a.lan:21118", first_fingerprint.clone(), 10),
+            ("host-b.lan:21118", second_fingerprint.clone(), 20),
+        ] {
+            config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+                endpoint: endpoint.to_owned(),
+                fingerprint,
+                last_connected_at,
+                ..Default::default()
+            });
+        }
+
+        let sorted = config.sorted_recent_lan_endpoints();
+        assert_eq!(sorted[0].endpoint, "host-b.lan:21118");
+        config
+            .lan_identity_bindings
+            .insert(first_fingerprint.clone(), "identity-a".to_owned());
+        config
+            .lan_identity_bindings
+            .insert(second_fingerprint.clone(), "identity-b".to_owned());
+        assert!(config.remove_recent_lan_endpoint_entry("host-a.lan:21118"));
+        assert!(!config
+            .lan_identity_bindings
+            .contains_key(&first_fingerprint));
+        assert!(config.remove_recent_lan_endpoint_entry(&second_fingerprint));
+        assert!(config.recent_lan_endpoints.is_empty());
+        assert!(config.lan_identity_bindings.is_empty());
+    }
+
+    #[test]
+    fn lan_identity_binding_overrides_default_and_falls_back_after_removal() {
+        let default_id = "11111111-1111-4111-8111-111111111111".to_owned();
+        let bound_id = "22222222-2222-4222-8222-222222222222".to_owned();
+        let fingerprint = "a".repeat(64);
+        let mut config = LocalConfig::default();
+        for (id, name) in [
+            (default_id.clone(), "Default operators"),
+            (bound_id.clone(), "Special operators"),
+        ] {
+            config.lan_identities.insert(
+                id.clone(),
+                LanIdentity {
+                    id,
+                    name: name.to_owned(),
+                    username: "operator".to_owned(),
+                    ..Default::default()
+                },
+            );
+        }
+        config.default_lan_identity_id = default_id.clone();
+
+        assert_eq!(config.resolve_lan_identity_entry(&fingerprint), default_id);
+        assert!(config
+            .bind_lan_identity_entry(&fingerprint, &bound_id)
+            .unwrap());
+        assert_eq!(config.resolve_lan_identity_entry(&fingerprint), bound_id);
+        assert!(config.remove_lan_identity_entry(&bound_id));
+        assert_eq!(
+            config.resolve_lan_identity_entry(&fingerprint),
+            config.default_lan_identity_id
+        );
+        assert!(config.remove_lan_identity_entry(&default_id));
+        assert!(config.resolve_lan_identity_entry(&fingerprint).is_empty());
+        assert!(config.default_lan_identity_id.is_empty());
+        assert!(config.lan_identity_bindings.is_empty());
+    }
+
+    #[test]
+    fn lan_identity_binding_rejects_invalid_targets() {
+        let mut config = LocalConfig::default();
+        assert!(config.bind_lan_identity_entry("short", "").is_err());
+        assert!(config
+            .bind_lan_identity_entry(&"b".repeat(64), "missing")
+            .is_err());
+    }
+
+    #[test]
+    fn lan_identity_metadata_roundtrip_contains_no_password_field() {
+        let identity_id = "33333333-3333-4333-8333-333333333333".to_owned();
+        let mut config = LocalConfig::default();
+        config.default_lan_identity_id = identity_id.clone();
+        config.lan_identities.insert(
+            identity_id.clone(),
+            LanIdentity {
+                id: identity_id,
+                name: "Operations".to_owned(),
+                username: "operator".to_owned(),
+                created_at: 10,
+                updated_at: 20,
+            },
+        );
+
+        let serialized = toml::to_string(&config).unwrap();
+        let decoded: LocalConfig = toml::from_str(&serialized).unwrap();
+
+        assert!(!serialized.to_lowercase().contains("password"));
+        assert_eq!(
+            decoded.default_lan_identity_id,
+            config.default_lan_identity_id
+        );
+        assert_eq!(decoded.lan_identities, config.lan_identities);
+    }
+
+    #[test]
+    fn local_config_round_trips_through_toml_with_favorites_and_groups_populated() {
+        // Regression test: a scalar field placed after a table/array-of-tables
+        // field makes toml 0.5 serialization fail at runtime (discovered live:
+        // `schema_version` was declared after `ui_flutter`, silently breaking
+        // every `_local` config save). Exercise the real `toml` crate, not
+        // just serde_json, since that's what `store_path`/`confy` actually use.
+        let mut config = LocalConfig::default();
+        config.schema_version = 1;
+        config.fav = vec!["192.168.1.5:21118".to_owned()];
+        config.saved_subnets = vec!["10.96.160.0/24".to_owned(), "10.96.39.1-254".to_owned()];
+        config.recent_lan_endpoints.insert(
+            "a".repeat(64),
+            RecentLanEndpoint {
+                endpoint: "192.168.1.5:21118".to_owned(),
+                fingerprint: "a".repeat(64),
+                ..Default::default()
+            },
+        );
+        config.favorites.push(FavoriteDevice {
+            fingerprint: "a".repeat(64),
+            endpoint: "192.168.1.5:21118".to_owned(),
+            group_id: "group-1".to_owned(),
+        });
+        config.favorite_groups.push(FavoriteGroup {
+            id: "group-1".to_owned(),
+            name: "Office".to_owned(),
+        });
+        config.ui_flutter.insert("some-ui-key".to_owned(), "value".to_owned());
+
+        let serialized =
+            toml::to_string(&config).expect("LocalConfig must serialize to TOML without error");
+        let decoded: LocalConfig =
+            toml::from_str(&serialized).expect("LocalConfig must round-trip through TOML");
+
+        assert_eq!(decoded.schema_version, 1);
+        assert_eq!(decoded.fav, config.fav);
+        assert_eq!(decoded.saved_subnets, config.saved_subnets);
+        assert_eq!(decoded.recent_lan_endpoints.len(), 1);
+        assert_eq!(decoded.favorites, config.favorites);
+        assert_eq!(decoded.favorite_groups, config.favorite_groups);
+    }
+
+    #[test]
+    fn migration_assigns_fingerprint_only_for_unambiguous_verified_recent_endpoint() {
+        let fingerprint = "a".repeat(64);
+        let mut config = LocalConfig::default();
+        config.fav = vec![
+            "192.168.1.20:21118".to_owned(),
+            "192.168.1.99:21118".to_owned(),
+        ];
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.20:21118".to_owned(),
+            fingerprint: fingerprint.clone(),
+            last_connected_at: 1,
+            ..Default::default()
+        });
+        // Two different fingerprints both recently seen at the same endpoint:
+        // migration must not guess, and must leave this entry unmatched.
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.99:21118".to_owned(),
+            fingerprint: "b".repeat(64),
+            last_connected_at: 2,
+            ..Default::default()
+        });
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.99:21118".to_owned(),
+            fingerprint: "c".repeat(64),
+            last_connected_at: 3,
+            ..Default::default()
+        });
+
+        assert!(config.migrate_legacy_favorites_if_needed());
+        assert_eq!(config.schema_version, 1);
+        assert_eq!(config.favorites.len(), 2);
+        assert_eq!(config.favorites[0].endpoint, "192.168.1.20:21118");
+        assert_eq!(config.favorites[0].fingerprint, fingerprint);
+        assert_eq!(config.favorites[1].endpoint, "192.168.1.99:21118");
+        assert!(
+            config.favorites[1].fingerprint.is_empty(),
+            "ambiguous endpoint must not be auto-assigned a fingerprint"
+        );
+        // Legacy projection round-trips the same order.
+        assert_eq!(config.fav, vec![
+            "192.168.1.20:21118".to_owned(),
+            "192.168.1.99:21118".to_owned(),
+        ]);
+        // Migration only runs once.
+        assert!(!config.migrate_legacy_favorites_if_needed());
+    }
+
+    #[test]
+    fn legacy_favorite_added_after_initial_migration_is_still_reconciled() {
+        // Regression test for a live bug found via real-device testing: the
+        // Flutter UI still adds favorites directly to the legacy endpoint-
+        // keyed `fav` list (it hasn't been switched to canonical bridge
+        // calls). If that happens *after* the one-time schema migration has
+        // already run (the common case — a user favorites a device well
+        // after first installing the app), the new entry must still be
+        // picked up on the next load, or it can never gain a fingerprint and
+        // the atomic reconnect-at-new-endpoint update can never find it.
+        let fingerprint = "d".repeat(64);
+        let mut config = LocalConfig::default();
+        // Simulate migration having already run with nothing to migrate.
+        assert!(config.migrate_legacy_favorites_if_needed());
+        assert!(config.favorites.is_empty());
+
+        // Simulate a verified connection (populates recent_lan_endpoints)
+        // followed by the legacy UI adding it straight to `fav`.
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.12:21118".to_owned(),
+            fingerprint: fingerprint.clone(),
+            last_connected_at: 1,
+            ..Default::default()
+        });
+        config.fav = vec!["192.168.1.12:21118".to_owned()];
+
+        assert!(config.migrate_legacy_favorites_if_needed());
+        assert_eq!(config.favorites.len(), 1);
+        assert_eq!(config.favorites[0].fingerprint, fingerprint);
+        assert_eq!(config.favorites[0].endpoint, "192.168.1.12:21118");
+
+        // The atomic fingerprint-based endpoint update (used after a saved
+        // device reconnects at a new address) must now be able to find it.
+        assert!(config.update_favorite_endpoint_entry(&fingerprint, "192.168.1.12:21218"));
+        assert_eq!(config.favorites[0].endpoint, "192.168.1.12:21218");
+        assert_eq!(config.fav, vec!["192.168.1.12:21218".to_owned()]);
+    }
+
+    /// Regression test for the actual root cause of a reported real-world
+    /// bug: LAN favorites and recent-session entries disappear after closing
+    /// and reopening the app, even on an unchanged, single-process,
+    /// non-elevated launch. The on-disk writer used by `LocalConfig::store`/
+    /// `store_checked` is `confy::store_path`, which serializes through the
+    /// `toml` 0.5 crate (pulled in transitively by the vendored `confy`
+    /// fork) -- a *different* TOML implementation than the `toml = "0.7"`
+    /// crate `hbb_common` depends on directly and uses in its own
+    /// `toml::to_string`-based round-trip tests. toml 0.5's serializer
+    /// additionally requires every array-of-tables field (`Vec<Struct>`,
+    /// emitted as `[[field]]`) to be declared *before* any plain-table field
+    /// (`HashMap`, emitted as `[field]`): once a `HashMap` field has been
+    /// emitted, the struct's internal "table emitted" flag is set, and a
+    /// later array-of-tables field is then rejected with `ValueAfterTable`
+    /// ("values must be emitted before tables") even though both are
+    /// "table" category and the ordering is valid TOML. `LocalConfig`
+    /// declared `favorites`/`favorite_groups` (`Vec<Struct>`) *after*
+    /// `options`/`recent_lan_endpoints`/`lan_identities`/
+    /// `lan_identity_bindings`/`ui_flutter` (all `HashMap`s), which is
+    /// exactly this broken combination: every single `_local.toml` save
+    /// failed, silently, because the plain `LocalConfig::store` /
+    /// `Config::store_` path only logs the error (`log::error!`) and
+    /// otherwise swallows it. This reproduces the failure directly against
+    /// `confy::store_path` (the exact function the production code calls),
+    /// not just `toml::to_string` (which the existing round-trip tests use
+    /// and which does not hit this bug), and proves the fix.
+    #[test]
+    fn local_config_persists_through_confy_store_path_with_favorites_and_recent_endpoints(
+    ) {
+        let mut config = LocalConfig::default();
+        config.fav = vec!["192.168.1.50:21118".to_owned()];
+        config.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.50:21118".to_owned(),
+            fingerprint: "a".repeat(64),
+            last_connected_at: 1,
+            ..Default::default()
+        });
+        config.upsert_favorite_entry(&"a".repeat(64), "192.168.1.50:21118", None);
+        config.favorite_groups.push(FavoriteGroup {
+            id: "group-1".to_owned(),
+            name: "Office".to_owned(),
+        });
+
+        let temp_file = std::env::temp_dir().join(format!(
+            "subnetdesk_local_config_confy_test_{}.toml",
+            crate::get_time()
+        ));
+        let _ = fs::remove_file(&temp_file);
+
+        store_path(temp_file.clone(), &config)
+            .expect("confy::store_path must serialize LocalConfig without a TOML ordering error");
+        let reloaded: LocalConfig =
+            confy::load_path(&temp_file).expect("must read back what was just written");
+
+        assert_eq!(reloaded.fav, config.fav);
+        assert_eq!(reloaded.recent_lan_endpoints, config.recent_lan_endpoints);
+        assert_eq!(reloaded.favorites, config.favorites);
+        assert_eq!(reloaded.favorite_groups, config.favorite_groups);
+
+        let _ = fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn stale_process_overwrite_clobbers_favorites_and_recent_endpoints() {
+        // Regression test for a second, independent contributor to the same
+        // reported bug once the TOML serialization failure above is fixed:
+        // `--server`, `--tray`, `--cm` and the GUI are all separate OS
+        // processes that each cache their own `LOCAL_CONFIG` snapshot once,
+        // at process start (see the `LOCAL_CONFIG` lazy_static above).
+        // `set_fav`/`record_recent_lan_endpoint`/`set_size`/etc. all persist
+        // through the plain, unlocked `LocalConfig::store`, which blindly
+        // serializes the *entire* in-memory struct to disk with no
+        // read-merge and no cross-process lock. If a second, longer-lived
+        // process cached its snapshot before a favorite was added elsewhere,
+        // the next unrelated local-config write from that stale process
+        // overwrites the whole file, silently erasing the favorite. Only the
+        // canonical `favorites`/`favorite_groups` mutations were hardened
+        // against this (see `with_favorites_locked`); the legacy `fav` list
+        // and `recent_lan_endpoints` were not.
+        let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let original_app_name = APP_NAME.read().unwrap().clone();
+        *APP_NAME.write().unwrap() = format!("SubnetDeskClobberTest{}", crate::get_time());
+        let cleanup = || {
+            let _ = fs::remove_file(Config::file_("_local"));
+        };
+        cleanup();
+
+        // Process B (e.g. the background `--server`/`--tray`/`--cm` process)
+        // starts first and caches an empty snapshot.
+        let mut process_b = LocalConfig::load();
+
+        // Process A (the GUI) starts around the same time, also from an
+        // empty file, then the user adds a favorite and connects over LAN.
+        let mut process_a = LocalConfig::load();
+        process_a.fav = vec!["192.168.1.50:21118".to_owned()];
+        process_a.upsert_recent_lan_endpoint(RecentLanEndpoint {
+            endpoint: "192.168.1.50:21118".to_owned(),
+            fingerprint: "a".repeat(64),
+            last_connected_at: 1,
+            ..Default::default()
+        });
+        process_a.store();
+
+        // Sanity check: process A's write actually landed on disk.
+        let reloaded = LocalConfig::load();
+        assert_eq!(reloaded.fav, vec!["192.168.1.50:21118".to_owned()]);
+        assert_eq!(reloaded.recent_lan_endpoints.len(), 1);
+
+        // Process B later persists an unrelated local setting (e.g. its
+        // window size) through the same plain `store()` path, using the
+        // stale, favorite-less snapshot it cached at startup.
+        process_b.size = (0, 0, 800, 600);
+        process_b.store();
+
+        // The favorite and recent connection added by process A are gone,
+        // clobbered by process B's stale snapshot.
+        let after = LocalConfig::load();
+        assert!(
+            after.fav.is_empty() && after.recent_lan_endpoints.is_empty(),
+            "expected process B's unrelated write to clobber process A's \
+             favorite, demonstrating the cross-process persistence bug; got \
+             fav={:?} recent={:?}",
+            after.fav,
+            after.recent_lan_endpoints
+        );
+
+        cleanup();
+        *APP_NAME.write().unwrap() = original_app_name;
+    }
+
+    #[test]
+    fn favorite_entry_mutations_stay_fingerprint_keyed_and_project_to_legacy_list() {
+        let fingerprint_a = "a".repeat(64);
+        let fingerprint_b = "b".repeat(64);
+        let mut config = LocalConfig::default();
+        config.upsert_favorite_entry(&fingerprint_a, "10.0.0.5:21118", None);
+        config.upsert_favorite_entry(&fingerprint_b, "10.0.0.6:21118", Some("group-1"));
+        assert_eq!(config.fav, vec![
+            "10.0.0.5:21118".to_owned(),
+            "10.0.0.6:21118".to_owned(),
+        ]);
+
+        // A mismatched device taking over the old IP must not silently merge
+        // into the existing favorite; it's a distinct fingerprint.
+        assert!(config.update_favorite_endpoint_entry(&fingerprint_a, "10.0.0.50:21118"));
+        assert_eq!(config.favorites[0].endpoint, "10.0.0.50:21118");
+        assert!(!config.update_favorite_endpoint_entry(&"c".repeat(64), "10.0.0.60:21118"));
+
+        config.reorder_favorites_entries(&[fingerprint_b.clone(), fingerprint_a.clone()]);
+        assert_eq!(config.favorites[0].fingerprint, fingerprint_b);
+        assert_eq!(config.favorites[1].fingerprint, fingerprint_a);
+
+        config.remove_favorite_entry(&fingerprint_b);
+        assert_eq!(config.favorites.len(), 1);
+        assert_eq!(config.fav, vec!["10.0.0.50:21118".to_owned()]);
+    }
+
+    #[test]
+    fn legacy_group_json_round_trips_through_canonical_state() {
+        let mut config = LocalConfig::default();
+        config.upsert_favorite_entry(&"a".repeat(64), "10.0.0.5:21118", None);
+        config.favorite_groups.push(FavoriteGroup {
+            id: "group-1".to_owned(),
+            name: "Workstations".to_owned(),
+        });
+        config.favorites[0].group_id = "group-1".to_owned();
+
+        let projected = config.project_legacy_group_json();
+        let mut restored = LocalConfig::default();
+        restored.upsert_favorite_entry(&"a".repeat(64), "10.0.0.5:21118", None);
+        restored
+            .ui_flutter
+            .insert(FAVORITE_PEER_GROUPS_OPTION_KEY.to_owned(), projected);
+        let (groups, peer_groups) = restored.parse_legacy_group_json().unwrap();
+        assert_eq!(groups, vec![FavoriteGroup {
+            id: "group-1".to_owned(),
+            name: "Workstations".to_owned(),
+        }]);
+        assert_eq!(
+            peer_groups.get("10.0.0.5:21118"),
+            Some(&"group-1".to_owned())
+        );
+    }
+
+    #[test]
+    fn removing_favorite_group_ungroups_members_but_keeps_favorites() {
+        let mut config = LocalConfig::default();
+        config.upsert_favorite_entry(&"a".repeat(64), "10.0.0.5:21118", Some("group-1"));
+        config.favorite_groups.push(FavoriteGroup {
+            id: "group-1".to_owned(),
+            name: "Workstations".to_owned(),
+        });
+
+        config.remove_favorite_group_entry("group-1");
+        assert!(config.favorite_groups.is_empty());
+        assert_eq!(config.favorites.len(), 1);
+        assert!(config.favorites[0].group_id.is_empty());
+    }
+
+    struct ConfigStateTestGuard {
+        original_config: Config,
+        original_hard_settings: HashMap<String, String>,
+    }
+
+    struct ConfigFileRestoreGuard {
+        path: PathBuf,
+        original_content: Option<Vec<u8>>,
+    }
+
+    impl ConfigStateTestGuard {
+        fn new(config: Config, hard_settings: HashMap<String, String>) -> Self {
+            let original_config = Config::get();
+            let original_hard_settings = HARD_SETTINGS.read().unwrap().clone();
+            *CONFIG.write().unwrap() = config;
+            *HARD_SETTINGS.write().unwrap() = hard_settings;
+            Self {
+                original_config,
+                original_hard_settings,
+            }
+        }
+    }
+
+    impl Drop for ConfigStateTestGuard {
+        fn drop(&mut self) {
+            *CONFIG.write().unwrap() = self.original_config.clone();
+            *HARD_SETTINGS.write().unwrap() = self.original_hard_settings.clone();
+        }
+    }
+
+    impl ConfigFileRestoreGuard {
+        fn new(path: PathBuf) -> Self {
+            let original_content = fs::read(&path).ok();
+            Self {
+                path,
+                original_content,
+            }
+        }
+    }
+
+    impl Drop for ConfigFileRestoreGuard {
+        fn drop(&mut self) {
+            if let Some(content) = &self.original_content {
+                if let Some(parent) = self.path.parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+                fs::write(&self.path, content).ok();
+            } else {
+                fs::remove_file(&self.path).ok();
+            }
+        }
+    }
+
+    fn with_config_and_hard_settings<R>(
+        config: Config,
+        hard_settings: HashMap<String, String>,
+        test: impl FnOnce() -> R,
+    ) -> R {
+        let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let _state_guard = ConfigStateTestGuard::new(config, hard_settings);
+        test()
+    }
+
+    #[test]
+    fn test_serialize() {
+        let cfg: Config = Default::default();
+        let res = toml::to_string_pretty(&cfg);
+        assert!(res.is_ok());
+        let cfg: PeerConfig = Default::default();
+        let res = toml::to_string_pretty(&cfg);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn lan_user_defaults_favor_full_quality_and_sixty_fps() {
+        let cfg = UserDefaultConfig::default();
+
+        assert_eq!(cfg.get(keys::OPTION_IMAGE_QUALITY), "custom");
+        assert_eq!(cfg.get(keys::OPTION_CUSTOM_IMAGE_QUALITY), "100");
+        assert_eq!(cfg.get(keys::OPTION_CUSTOM_FPS), "60");
+    }
+
+    #[test]
+    fn test_hbbs_00_hashed_preset_password_storage_matches_plain_with_salt() {
+        let salt = "salt123";
+        let h1 = compute_permanent_password_h1("p@ssw0rd", salt);
+        let storage = "00".to_owned() + &base64::encode(h1, base64::Variant::Original);
+        let hard_settings = HashMap::from([
+            ("password".to_owned(), storage),
+            ("salt".to_owned(), salt.to_owned()),
+        ]);
+
+        with_config_and_hard_settings(Config::default(), hard_settings, || {
+            assert!(Config::has_permanent_password());
+            assert!(Config::has_usable_preset_password());
+            assert!(Config::is_using_preset_password());
+            assert_eq!(Config::get_effective_permanent_password_salt(), salt);
+        });
+    }
+
+    #[test]
+    fn test_legacy_plain_preset_password_with_00_hash_shape_without_salt_keeps_old_behavior() {
+        let h1 = compute_permanent_password_h1("p@ssw0rd", "salt123");
+        let storage = "00".to_owned() + &base64::encode(h1, base64::Variant::Original);
+        let hard_settings = HashMap::from([("password".to_owned(), storage.clone())]);
+
+        let mut config = Config::default();
+        config.salt = "local1".to_owned();
+
+        with_config_and_hard_settings(config, hard_settings, || {
+            assert!(Config::has_permanent_password());
+            assert!(Config::has_usable_preset_password());
+            assert!(Config::is_using_preset_password());
+            assert_eq!(Config::get_effective_permanent_password_salt(), "local1");
+        });
+    }
+
+    #[test]
+    fn test_local_hashed_permanent_password_without_salt_is_not_reported_as_set() {
+        let h1 = compute_permanent_password_h1("p@ssw0rd", "salt123");
+        let mut config = Config::default();
+        config.password = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+
+        with_config_and_hard_settings(config, HashMap::new(), || {
+            assert!(!Config::has_permanent_password());
+            assert!(!Config::has_local_permanent_password());
+            assert!(!Config::is_using_preset_password());
+        });
+    }
+
+    #[test]
+    fn test_invalid_local_hashed_password_does_not_generate_effective_salt() {
+        let h1 = compute_permanent_password_h1("p@ssw0rd", "salt123");
+        let mut config = Config::default();
+        config.password = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+
+        with_config_and_hard_settings(config, HashMap::new(), || {
+            assert_eq!(Config::get_effective_permanent_password_salt(), "");
+            assert_eq!(
+                Config::get_local_permanent_password_storage_and_salt().1,
+                ""
+            );
+        });
+    }
+
+    #[test]
+    fn test_legacy_plain_preset_password_uses_local_salt_for_challenge() {
+        let mut config = Config::default();
+        config.salt = "local1".to_owned();
+        let hard_settings = HashMap::from([("password".to_owned(), "legacy-password".to_owned())]);
+
+        with_config_and_hard_settings(config, hard_settings, || {
+            assert_eq!(Config::get_effective_permanent_password_salt(), "local1");
+            assert!(Config::has_permanent_password());
+            assert!(Config::is_using_preset_password());
+        });
+    }
+
+    #[test]
+    fn test_malformed_preset_password_with_salt_is_not_usable() {
+        for storage in ["01secret", "00not-a-valid-hash"] {
+            let hard_settings = HashMap::from([
+                ("password".to_owned(), storage.to_owned()),
+                ("salt".to_owned(), "preset-salt".to_owned()),
+            ]);
+
+            with_config_and_hard_settings(Config::default(), hard_settings, || {
+                assert_eq!(Config::get_effective_permanent_password_salt(), "");
+                assert_eq!(
+                    Config::get_local_permanent_password_storage_and_salt().1,
+                    ""
+                );
+                assert!(!Config::has_permanent_password());
+                assert!(!Config::is_using_preset_password());
+            });
+        }
+    }
+
+    #[test]
+    fn test_validate_or_decrypt_keeps_plaintext_permanent_password_unchanged() {
+        let mut cfg = Config::default();
+        cfg.password = "p@ssw0rd".to_owned();
+        cfg.salt = "".to_owned();
+        Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap();
+        assert_eq!(cfg.password, "p@ssw0rd");
+        assert!(cfg.salt.is_empty());
+    }
+
+    #[test]
+    fn test_validate_or_decrypt_decrypts_00_permanent_password_without_forcing_store() {
+        let mut cfg = Config::default();
+        let legacy_storage =
+            encrypt_str_or_original("legacy-secret", PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+        cfg.password = legacy_storage;
+        cfg.salt = "".to_owned();
+        Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap();
+        assert_eq!(cfg.password, "legacy-secret");
+        assert!(cfg.salt.is_empty());
+    }
+
+    #[test]
+    fn test_validate_or_decrypt_rejects_corrupted_00_permanent_password_storage() {
+        let legacy_storage =
+            encrypt_str_or_original("legacy-secret", PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+        let mut invalid_payload = base64::decode(
+            &legacy_storage.as_bytes()[PASSWORD_ENC_VERSION.len()..],
+            base64::Variant::Original,
+        )
+        .unwrap();
+        *invalid_payload.last_mut().unwrap() ^= 1;
+
+        let mut cfg = Config::default();
+        cfg.password = PASSWORD_ENC_VERSION.to_owned()
+            + &base64::encode(invalid_payload, base64::Variant::Original);
+        cfg.salt = "salt123".to_owned();
+
+        assert!(Config::validate_or_decrypt_permanent_password_storage(&mut cfg).is_err());
+    }
+
+    #[test]
+    fn test_validate_or_decrypt_rejects_encrypted_hashed_permanent_password_without_salt() {
+        let mut cfg = Config::default();
+        let h1 = compute_permanent_password_h1("p@ssw0rd", "salt123");
+        cfg.password = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+        let original_password = cfg.password.clone();
+
+        assert!(Config::validate_or_decrypt_permanent_password_storage(&mut cfg).is_err());
+        assert_eq!(cfg.password, original_password);
+        assert!(cfg.salt.is_empty());
+    }
+
+    #[test]
+    fn test_config2_store_keeps_existing_unlock_pin_when_pin_is_unchanged() {
+        let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let _file_guard = ConfigFileRestoreGuard::new(Config::file_("2"));
+        let pin = "123456";
+        let original_unlock_pin =
+            encrypt_str_or_original(pin, PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+        let mut cfg = Config2 {
+            unlock_pin: original_unlock_pin.clone(),
+            ..Default::default()
+        };
+        Config::store_(&cfg, "2");
+        let (unlock_pin, decrypted, _) =
+            decrypt_str_or_original(&cfg.unlock_pin, PASSWORD_ENC_VERSION);
+        assert!(decrypted);
+        cfg.unlock_pin = unlock_pin;
+        cfg.nat_type = 1;
+
+        cfg.store();
+
+        let stored = Config::load_::<Config2>("2");
+        assert_eq!(stored.unlock_pin, original_unlock_pin);
+    }
+
+    #[test]
+    fn test_validate_or_decrypt_keeps_plaintext_permanent_password_with_current_prefix_and_long_base64(
+    ) {
+        let mut cfg = Config::default();
+        let plain = "01".to_owned() + &base64::encode([42u8; 24], base64::Variant::Original);
+        cfg.password = plain.clone();
+        cfg.salt = "".to_owned();
+
+        Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap();
+        assert_eq!(cfg.password, plain);
+        assert!(cfg.salt.is_empty());
+    }
+
+    #[test]
+    fn test_permanent_password_sync_treats_same_encrypted_hash_as_unchanged() {
+        let mut cfg = Config::default();
+        cfg.salt = "salt123".to_owned();
+        let h1 = compute_permanent_password_h1("p@ssw0rd", &cfg.salt);
+        let encrypted_hash_storage =
+            encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+        cfg.password = encrypted_hash_storage.clone();
+        Config::validate_or_decrypt_permanent_password_storage(&mut cfg).unwrap();
+
+        assert!(!Config::apply_permanent_password_storage_for_sync(
+            &mut cfg,
+            &encrypted_hash_storage,
+            "salt123"
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn test_permanent_password_sync_stores_incoming_encrypted_hash_when_local_empty() {
+        let salt = "salt123";
+        let h1 = compute_permanent_password_h1("p@ssw0rd", salt);
+        let incoming = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+        let mut cfg = Config::default();
+
+        assert!(
+            Config::apply_permanent_password_storage_for_sync(&mut cfg, &incoming, salt).unwrap()
+        );
+        assert_eq!(cfg.password, incoming);
+        assert_eq!(cfg.salt, salt);
+    }
+
+    #[test]
+    fn test_permanent_password_sync_rejects_non_current_storage_payloads() {
+        let invalid_payload = vec![42u8; sodiumoxide::crypto::secretbox::MACBYTES + 1];
+        let invalid_storage = PERMANENT_PASSWORD_ENC_VERSION.to_owned()
+            + &base64::encode(invalid_payload, base64::Variant::Original);
+        let encrypted_legacy_plaintext =
+            encrypt_str_or_original("legacy-secret", PASSWORD_ENC_VERSION, ENCRYPT_MAX_LEN);
+
+        let encrypted = crate::password_security::symmetric_crypt(b"not-a-hash", true).unwrap();
+        let encrypted_non_hash = PERMANENT_PASSWORD_ENC_VERSION.to_owned()
+            + &base64::encode(encrypted, base64::Variant::Original);
+        for storage in [
+            "00secret",
+            &encrypted_legacy_plaintext,
+            &invalid_storage,
+            "01invalid",
+            &encrypted_non_hash,
+        ] {
+            let mut cfg = Config::default();
+            assert!(Config::apply_permanent_password_storage_for_sync(
+                &mut cfg, storage, "salt123"
+            )
+            .is_err());
+            assert!(cfg.password.is_empty());
+            assert!(cfg.salt.is_empty());
+        }
+
+        let mut cfg = Config::default();
+        cfg.password = invalid_storage.clone();
+        cfg.salt = "salt123".to_owned();
+        assert!(Config::apply_permanent_password_storage_for_sync(
+            &mut cfg,
+            &invalid_storage,
+            "salt123"
+        )
+        .is_err());
+        assert_eq!(cfg.password, invalid_storage);
+        assert_eq!(cfg.salt, "salt123");
+    }
+
+    #[test]
+    fn test_permanent_password_sync_rejects_non_empty_storage_without_salt() {
+        let mut cfg = Config::default();
+        let h1 = compute_permanent_password_h1("p@ssw0rd", "salt123");
+        let incoming = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+
+        assert!(
+            Config::apply_permanent_password_storage_for_sync(&mut cfg, &incoming, "").is_err()
+        );
+        assert!(cfg.password.is_empty());
+        assert!(cfg.salt.is_empty());
+    }
+
+    #[test]
+    fn test_permanent_password_sync_empty_storage_clears_existing_password() {
+        let salt = "salt123";
+        let h1 = compute_permanent_password_h1("p@ssw0rd", salt);
+        let mut cfg = Config::default();
+        cfg.password = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+        cfg.salt = salt.to_owned();
+
+        assert!(Config::apply_permanent_password_storage_for_sync(&mut cfg, "", "").unwrap());
+        assert!(cfg.password.is_empty());
+        assert_eq!(cfg.salt, salt);
+    }
+
+    #[test]
+    fn test_permanent_password_sync_empty_storage_uses_incoming_salt() {
+        let old_salt = "old-salt";
+        let h1 = compute_permanent_password_h1("p@ssw0rd", old_salt);
+        let mut cfg = Config::default();
+        cfg.password = encode_permanent_password_encrypted_storage_from_h1(&h1).unwrap();
+        cfg.salt = old_salt.to_owned();
+
+        assert!(
+            Config::apply_permanent_password_storage_for_sync(&mut cfg, "", "new-salt").unwrap()
+        );
+        assert!(cfg.password.is_empty());
+        assert_eq!(cfg.salt, "new-salt");
+    }
+
+    #[test]
+    fn test_overwrite_settings() {
+        DEFAULT_SETTINGS
+            .write()
+            .unwrap()
+            .insert("b".to_string(), "a".to_string());
+        DEFAULT_SETTINGS
+            .write()
+            .unwrap()
+            .insert("c".to_string(), "a".to_string());
+        CONFIG2
+            .write()
+            .unwrap()
+            .options
+            .insert("a".to_string(), "b".to_string());
+        CONFIG2
+            .write()
+            .unwrap()
+            .options
+            .insert("b".to_string(), "b".to_string());
+        OVERWRITE_SETTINGS
+            .write()
+            .unwrap()
+            .insert("b".to_string(), "c".to_string());
+        OVERWRITE_SETTINGS
+            .write()
+            .unwrap()
+            .insert("c".to_string(), "f".to_string());
+        OVERWRITE_SETTINGS
+            .write()
+            .unwrap()
+            .insert("d".to_string(), "c".to_string());
+        let mut res: HashMap<String, String> = Default::default();
+        res.insert("b".to_owned(), "c".to_string());
+        res.insert("d".to_owned(), "c".to_string());
+        res.insert("c".to_owned(), "a".to_string());
+        Config::purify_options(&mut res);
+        assert!(res.len() == 0);
+        res.insert("b".to_owned(), "c".to_string());
+        res.insert("d".to_owned(), "c".to_string());
+        res.insert("c".to_owned(), "a".to_string());
+        res.insert("f".to_owned(), "a".to_string());
+        Config::purify_options(&mut res);
+        assert!(res.len() == 1);
+        res.insert("b".to_owned(), "c".to_string());
+        res.insert("d".to_owned(), "c".to_string());
+        res.insert("c".to_owned(), "a".to_string());
+        res.insert("f".to_owned(), "a".to_string());
+        res.insert("e".to_owned(), "d".to_string());
+        Config::purify_options(&mut res);
+        assert!(res.len() == 2);
+        res.insert("b".to_owned(), "c".to_string());
+        res.insert("d".to_owned(), "c".to_string());
+        res.insert("c".to_owned(), "a".to_string());
+        res.insert("f".to_owned(), "a".to_string());
+        res.insert("c".to_owned(), "d".to_string());
+        res.insert("d".to_owned(), "cc".to_string());
+        Config::purify_options(&mut res);
+        DEFAULT_SETTINGS
+            .write()
+            .unwrap()
+            .insert("f".to_string(), "c".to_string());
+        Config::purify_options(&mut res);
+        assert!(res.len() == 2);
+        DEFAULT_SETTINGS
+            .write()
+            .unwrap()
+            .insert("f".to_string(), "a".to_string());
+        Config::purify_options(&mut res);
+        assert!(res.len() == 1);
+        let res = Config::get_options();
+        assert!(res["a"] == "b");
+        assert!(res["c"] == "f");
+        assert!(res["b"] == "c");
+        assert!(res["d"] == "c");
+        assert!(Config::get_option("a") == "b");
+        assert!(Config::get_option("c") == "f");
+        assert!(Config::get_option("b") == "c");
+        assert!(Config::get_option("d") == "c");
+        DEFAULT_SETTINGS.write().unwrap().clear();
+        OVERWRITE_SETTINGS.write().unwrap().clear();
+        CONFIG2.write().unwrap().options.clear();
+
+        DEFAULT_LOCAL_SETTINGS
+            .write()
+            .unwrap()
+            .insert("b".to_string(), "a".to_string());
+        DEFAULT_LOCAL_SETTINGS
+            .write()
+            .unwrap()
+            .insert("c".to_string(), "a".to_string());
+        LOCAL_CONFIG
+            .write()
+            .unwrap()
+            .options
+            .insert("a".to_string(), "b".to_string());
+        LOCAL_CONFIG
+            .write()
+            .unwrap()
+            .options
+            .insert("b".to_string(), "b".to_string());
+        OVERWRITE_LOCAL_SETTINGS
+            .write()
+            .unwrap()
+            .insert("b".to_string(), "c".to_string());
+        OVERWRITE_LOCAL_SETTINGS
+            .write()
+            .unwrap()
+            .insert("d".to_string(), "c".to_string());
+        assert!(LocalConfig::get_option("a") == "b");
+        assert!(LocalConfig::get_option("c") == "a");
+        assert!(LocalConfig::get_option("b") == "c");
+        assert!(LocalConfig::get_option("d") == "c");
+        DEFAULT_LOCAL_SETTINGS.write().unwrap().clear();
+        OVERWRITE_LOCAL_SETTINGS.write().unwrap().clear();
+        LOCAL_CONFIG.write().unwrap().options.clear();
+
+        DEFAULT_DISPLAY_SETTINGS
+            .write()
+            .unwrap()
+            .insert("b".to_string(), "a".to_string());
+        DEFAULT_DISPLAY_SETTINGS
+            .write()
+            .unwrap()
+            .insert("c".to_string(), "a".to_string());
+        USER_DEFAULT_CONFIG
+            .write()
+            .unwrap()
+            .0
+            .options
+            .insert("a".to_string(), "b".to_string());
+        USER_DEFAULT_CONFIG
+            .write()
+            .unwrap()
+            .0
+            .options
+            .insert("b".to_string(), "b".to_string());
+        OVERWRITE_DISPLAY_SETTINGS
+            .write()
+            .unwrap()
+            .insert("b".to_string(), "c".to_string());
+        OVERWRITE_DISPLAY_SETTINGS
+            .write()
+            .unwrap()
+            .insert("d".to_string(), "c".to_string());
+        assert!(UserDefaultConfig::read("a") == "b");
+        assert!(UserDefaultConfig::read("c") == "a");
+        assert!(UserDefaultConfig::read("b") == "c");
+        assert!(UserDefaultConfig::read("d") == "c");
+        DEFAULT_DISPLAY_SETTINGS.write().unwrap().clear();
+        OVERWRITE_DISPLAY_SETTINGS.write().unwrap().clear();
+        LOCAL_CONFIG.write().unwrap().options.clear();
+    }
+
+    #[test]
+    fn test_config_deserialize() {
+        let wrong_type_str = r#"
+        id = true
+        enc_id = []
+        password = 1
+        salt = "123456"
+        key_pair = {}
+        key_confirmed = "1"
+        keys_confirmed = 1
+        "#;
+        let cfg = toml::from_str::<Config>(wrong_type_str);
+        assert_eq!(
+            cfg,
+            Ok(Config {
+                salt: "123456".to_string(),
+                ..Default::default()
+            })
+        );
+
+        let wrong_field_str = r#"
+        hello = "world"
+        key_confirmed = true
+        "#;
+        let cfg = toml::from_str::<Config>(wrong_field_str);
+        assert_eq!(
+            cfg,
+            Ok(Config {
+                key_confirmed: true,
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn test_peer_config_deserialize() {
+        let default_peer_config = toml::from_str::<PeerConfig>("").unwrap();
+        // test custom_resolution
+        {
+            let wrong_type_str = r#"
+            view_style = "adaptive"
+            scroll_style = "scrollbar"
+            custom_resolutions = true
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.view_style = "adaptive".to_string();
+            cfg_to_compare.scroll_style = "scrollbar".to_string();
+            let cfg = toml::from_str::<PeerConfig>(wrong_type_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_type_str");
+
+            let wrong_type_str = r#"
+            view_style = "adaptive"
+            scroll_style = "scrollbar"
+            [custom_resolutions.0]
+            w = "1920"
+            h = 1080
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.view_style = "adaptive".to_string();
+            cfg_to_compare.scroll_style = "scrollbar".to_string();
+            let cfg = toml::from_str::<PeerConfig>(wrong_type_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_type_str");
+
+            let wrong_field_str = r#"
+            [custom_resolutions.0]
+            w = 1920
+            h = 1080
+            hello = "world"
+            [ui_flutter]
+            "#;
+            let mut cfg_to_compare = default_peer_config.clone();
+            cfg_to_compare.custom_resolutions =
+                HashMap::from([("0".to_string(), Resolution { w: 1920, h: 1080 })]);
+            let cfg = toml::from_str::<PeerConfig>(wrong_field_str);
+            assert_eq!(cfg, Ok(cfg_to_compare), "Failed to test wrong_field_str");
+        }
+    }
+
+    #[test]
+    fn test_store_load() {
+        let peerconfig_id = "123456789";
+        let cfg: PeerConfig = Default::default();
+        cfg.store(&peerconfig_id);
+        assert_eq!(PeerConfig::load(&peerconfig_id), cfg);
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                // ignore file type information by masking with 0o777 (see https://stackoverflow.com/a/50045872)
+                fs::metadata(PeerConfig::path(&peerconfig_id))
+                    .expect("reading metadata failed")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn test_uinput_ipc_path_is_shared_across_uids() {
+        const ROOT_UID: u32 = 0;
+        const USER_UID: u32 = 1000;
+
+        let path_root = Config::ipc_path_for_uid(ROOT_UID, "_uinput_keyboard");
+        let path_user = Config::ipc_path_for_uid(USER_UID, "_uinput_keyboard");
+        assert_eq!(path_root, path_user);
+
+        let app_name = APP_NAME.read().unwrap().clone();
+        assert!(
+            path_root.starts_with(&format!("/tmp/{app_name}-service/")),
+            "unexpected uinput ipc path: {}",
+            path_root
+        );
+
+        let non_service_root = Config::ipc_path_for_uid(ROOT_UID, "");
+        let non_service_user = Config::ipc_path_for_uid(USER_UID, "");
+        assert_ne!(non_service_root, non_service_user);
+    }
+
+    #[test]
+    fn discovery_peer_reachability_requires_two_spaced_full_scan_misses_to_go_offline() {
+        let mut peer = DiscoveryPeer {
+            fingerprint: "a".repeat(64),
+            ..Default::default()
+        };
+        assert_eq!(peer.reachability(0), LanReachability::Unknown);
+
+        peer.record_observation(1_000);
+        assert_eq!(peer.reachability(1_000), LanReachability::Online);
+        assert_eq!(peer.reachability(1_000 + DISCOVERY_ONLINE_WINDOW_MS), LanReachability::Online);
+        assert_eq!(
+            peer.reachability(1_000 + DISCOVERY_ONLINE_WINDOW_MS + 1),
+            LanReachability::Unknown
+        );
+
+        // One full-coverage miss: still Unknown, not Offline yet.
+        peer.record_full_scan_miss(60_000);
+        assert_eq!(peer.reachability(60_000), LanReachability::Unknown);
+
+        // A second miss too soon after the first (< 15s span) stays Unknown.
+        peer.record_full_scan_miss(65_000);
+        assert_eq!(peer.reachability(65_000), LanReachability::Unknown);
+
+        // A second miss at least 15s after the first qualifies as Offline.
+        peer.record_full_scan_miss(60_000 + DISCOVERY_OFFLINE_MIN_MISS_SPAN_MS);
+        assert_eq!(
+            peer.reachability(60_000 + DISCOVERY_OFFLINE_MIN_MISS_SPAN_MS),
+            LanReachability::Offline
+        );
+
+        // Any positive observation immediately clears the miss streak.
+        peer.record_observation(70_000);
+        assert_eq!(peer.reachability(70_000), LanReachability::Online);
+        assert_eq!(peer.consecutive_full_misses, 0);
+        assert_eq!(peer.first_miss_at, 0);
+    }
+
+    #[test]
+    fn lan_peers_merge_scan_generation_rules() {
+        let _guard = CONFIG_STATE_TEST_LOCK.lock().unwrap();
+        let _file_guard = ConfigFileRestoreGuard::new(Config::file_("_lan_peers"));
+        fs::remove_file(Config::file_("_lan_peers")).ok();
+        fs::remove_file(LanPeers::lock_path()).ok();
+
+        let fingerprint = "a".repeat(64);
+        let make_peer = |endpoint: &str| DiscoveryPeer {
+            id: endpoint.to_owned(),
+            endpoint: endpoint.to_owned(),
+            fingerprint: fingerprint.clone(),
+            ip_mac: HashMap::from([(endpoint.split(':').next().unwrap().to_owned(), String::new())]),
+            ..Default::default()
+        };
+
+        // Generation 1: full-coverage scan observes the device.
+        let merged = LanPeers::merge_scan(1, true, vec![make_peer("192.168.1.10:21118")], 1_000)
+            .unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].last_seen_at, 1_000);
+
+        // Generation 2 (newest), full coverage, no observation: this is the
+        // first qualifying miss.
+        let merged = LanPeers::merge_scan(2, true, vec![], 60_000).unwrap();
+        assert_eq!(merged[0].consecutive_full_misses, 1);
+        assert_eq!(merged[0].reachability(60_000), LanReachability::Unknown);
+
+        // An OLDER generation (1, already applied) reporting another miss
+        // must NOT be allowed to advance the miss streak or mark Offline,
+        // even though it's also "full coverage" on its own terms.
+        let merged = LanPeers::merge_scan(1, true, vec![], 60_000 + DISCOVERY_OFFLINE_MIN_MISS_SPAN_MS)
+            .unwrap();
+        assert_eq!(
+            merged[0].consecutive_full_misses, 1,
+            "an older generation must not apply negative evidence"
+        );
+
+        // The newest generation (3) completing a second full-coverage miss,
+        // spaced out enough, finally marks it Offline.
+        let now = 60_000 + DISCOVERY_OFFLINE_MIN_MISS_SPAN_MS;
+        let merged = LanPeers::merge_scan(3, true, vec![], now).unwrap();
+        assert_eq!(merged[0].consecutive_full_misses, 2);
+        assert_eq!(merged[0].reachability(now), LanReachability::Offline);
+
+        // A later, LIMITED-coverage scan must not clear the Offline miss
+        // streak just by not observing the device, but a positive
+        // observation in it still counts and resets the streak.
+        let merged = LanPeers::merge_scan(4, false, vec![], now + 1_000).unwrap();
+        assert_eq!(
+            merged[0].consecutive_full_misses, 2,
+            "a limited-coverage scan must not touch negative evidence"
+        );
+        let merged =
+            LanPeers::merge_scan(5, false, vec![make_peer("192.168.1.11:21118")], now + 2_000)
+                .unwrap();
+        assert_eq!(merged[0].consecutive_full_misses, 0);
+        assert_eq!(merged[0].endpoint, "192.168.1.11:21118");
+        assert!(merged[0].ip_mac.contains_key("192.168.1.11"));
+        assert!(!merged[0].ip_mac.contains_key("192.168.1.10"));
+        assert_eq!(merged[0].reachability(now + 2_000), LanReachability::Online);
+    }
+}

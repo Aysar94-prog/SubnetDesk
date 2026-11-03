@@ -19,7 +19,7 @@ use hbb_common::{
 };
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -32,6 +32,7 @@ const LAN_DISCOVERY_PORT: u16 = 21_119;
 pub(crate) const LAN_DEVICE_NAME_OPTION: &str = "lan-device-name";
 
 type Message = RendezvousMessage;
+pub(crate) type LocalNetwork = (Ipv4Addr, Ipv4Addr, u8);
 
 pub(crate) fn connectable_local_address(address: IpAddr) -> bool {
     if address.is_loopback() || address.is_unspecified() || address.is_multicast() {
@@ -43,30 +44,76 @@ pub(crate) fn connectable_local_address(address: IpAddr) -> bool {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn interface_priority(index: u32) -> Option<u8> {
+    use winapi::shared::{
+        ifdef::IfOperStatusUp,
+        netioapi::{GetIfEntry2, MIB_IF_ROW2},
+    };
+    // Windows requires a zero-initialized row with its interface index set.
+    let mut row: MIB_IF_ROW2 = unsafe { std::mem::zeroed() };
+    row.InterfaceIndex = index;
+    let status = unsafe { GetIfEntry2(&mut row) };
+    if status != 0 {
+        log::warn!("Could not read interface {index} status: {status}");
+        return Some(1);
+    }
+    if row.OperStatus != IfOperStatusUp {
+        return None;
+    }
+    Some(physical_adapter_priority(row.InterfaceAndOperStatusFlags.HardwareInterface() != 0, row.Type))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn interface_priority(_index: u32) -> Option<u8> {
+    Some(1)
+}
+
+fn physical_adapter_priority(hardware: bool, interface_type: u32) -> u8 {
+    // Windows interface types 6 and 71 are Ethernet and Wi-Fi.
+    if hardware && matches!(interface_type, 6 | 71) {
+        0
+    } else {
+        1
+    }
+}
+
 #[cfg(not(target_os = "ios"))]
-pub(crate) fn local_connectable_addresses() -> Vec<IpAddr> {
-    let mut addresses = default_net::get_interfaces()
-        .into_iter()
-        .flat_map(|interface| {
-            interface
-                .ipv4
-                .into_iter()
-                .map(|network| IpAddr::V4(network.addr))
-                .chain(
-                    interface
-                        .ipv6
-                        .into_iter()
-                        .map(|network| IpAddr::V6(network.addr)),
-                )
-        })
-        .filter(|address| connectable_local_address(*address))
-        .collect::<BTreeSet<_>>();
-    if let Some(address) = get_ipaddr_by_peer((Ipv4Addr::new(192, 0, 2, 1), 9)) {
-        if connectable_local_address(address) {
-            addresses.insert(address);
+pub(crate) struct LocalAddress {
+    pub address: IpAddr,
+    pub adapter: String,
+}
+
+#[cfg(not(target_os = "ios"))]
+pub(crate) fn local_connectable_address_details() -> Vec<LocalAddress> {
+    let mut addresses = BTreeMap::new();
+    for interface in default_net::get_interfaces() {
+        let Some(priority) = interface_priority(interface.index) else { continue };
+        let adapter = interface.friendly_name.unwrap_or(interface.name);
+        for address in interface.ipv4.into_iter().map(|network| IpAddr::V4(network.addr))
+            .chain(interface.ipv6.into_iter().map(|network| IpAddr::V6(network.addr))) {
+            if connectable_local_address(address) {
+                addresses.entry(address)
+                    .and_modify(|existing: &mut (u8, String)| {
+                        if priority < existing.0 { *existing = (priority, adapter.clone()); }
+                    })
+                    .or_insert_with(|| (priority, adapter.clone()));
+            }
         }
     }
-    addresses.into_iter().collect()
+    if let Some(address) = get_ipaddr_by_peer((Ipv4Addr::new(192, 0, 2, 1), 9)) {
+        if connectable_local_address(address) {
+            addresses.entry(address).or_insert_with(|| (1, String::new()));
+        }
+    }
+    let mut ordered = addresses.into_iter().map(|(address, (priority, adapter))| (priority, address, adapter)).collect::<Vec<_>>();
+    ordered.sort_unstable();
+    ordered.into_iter().map(|(_, address, adapter)| LocalAddress { address, adapter }).collect()
+}
+
+#[cfg(not(target_os = "ios"))]
+pub(crate) fn local_connectable_addresses() -> Vec<IpAddr> {
+    local_connectable_address_details().into_iter().map(|item| item.address).collect()
 }
 
 #[cfg(target_os = "ios")]
@@ -180,9 +227,10 @@ const DISCOVERY_QUIET_PERIOD: Duration = Duration::from_millis(500);
 /// stops for this reason is reported as successful-with-limited-coverage
 /// rather than failed, since the data collected so far is still usable.
 const DISCOVERY_HARD_CAP: Duration = Duration::from_secs(6);
-/// Overall budget for one scan, including collection plus worker join,
-/// reconciliation, and the checked commit to disk. The gap between this and
-/// `DISCOVERY_HARD_CAP` is reserved for that cleanup.
+const DISCOVERY_SETUP_BUDGET: Duration = Duration::from_secs(10);
+/// Collection and reconciliation budget after transport setup. The gap
+/// above `DISCOVERY_HARD_CAP` allows the workers to finish and results to be
+/// committed.
 const DISCOVERY_OVERALL_BUDGET: Duration = Duration::from_secs(8);
 
 /// Outcome of one discovery scan, shared with every caller that joined it.
@@ -194,8 +242,8 @@ pub(crate) enum DiscoveryOutcome {
     /// observations collected so far are still committed and usable; a
     /// limited scan must never be allowed to apply negative evidence.
     LimitedCoverage,
-    /// The overall budget elapsed before the scan could reconcile and commit.
-    /// No result was published for this scan.
+    /// The collection budget elapsed before final reconciliation. Earlier
+    /// positive observations may already have been published.
     Timeout,
     /// No discovery transport could even start.
     TransportFailure,
@@ -219,55 +267,52 @@ fn discovery_coordinator() -> &'static StdMutex<Option<broadcast::Sender<Discove
 /// A caller may wrap this in its own timeout without affecting the scan
 /// itself or other joined callers — only this caller's own wait ends early.
 pub(crate) async fn discover_coordinated() -> DiscoveryOutcome {
-    let mut joined = None;
-    {
-        let mut coordinator = discovery_coordinator().lock().unwrap();
-        match coordinator.as_ref() {
-            Some(sender) => joined = Some(sender.subscribe()),
-            None => {
-                let (sender, _receiver) = broadcast::channel(1);
-                *coordinator = Some(sender);
-            }
-        }
+    if config::is_incoming_only() {
+        return DiscoveryOutcome::Timeout;
     }
-    if let Some(mut receiver) = joined {
-        return receiver.recv().await.unwrap_or(DiscoveryOutcome::TransportFailure);
-    }
-
-    let outcome = run_discovery_scan().await;
-
-    let sender = discovery_coordinator().lock().unwrap().take();
-    if let Some(sender) = sender {
-        // No other receivers is not an error: it just means nobody joined.
-        let _ = sender.send(outcome);
-    }
-    outcome
+    crate::discovery_coordinator::run(discovery_coordinator(), run_discovery_scan)
+        .await.unwrap_or(DiscoveryOutcome::TransportFailure)
 }
 
 async fn run_discovery_scan() -> DiscoveryOutcome {
-    let scan_start = Instant::now();
+    if config::is_incoming_only() {
+        return DiscoveryOutcome::Timeout;
+    }
     let generation = SCAN_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     let hit_hard_cap = Arc::new(AtomicBool::new(false));
 
     let (tx, rx) = unbounded_channel::<_>();
     let mut udp_ok = false;
+    let mut local_networks = Vec::new();
     let mut udp_handles = Vec::new();
-    match send_query() {
-        Ok(sockets) => {
-            udp_handles = spawn_wait_responses(sockets, tx.clone(), scan_start, hit_hard_cap.clone());
+    let query = match tokio::time::timeout(
+        DISCOVERY_SETUP_BUDGET,
+        tokio::task::spawn_blocking(send_query),
+    ).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => Err(hbb_common::anyhow::anyhow!("LAN discovery setup failed: {err}")),
+        Err(_) => Err(hbb_common::anyhow::anyhow!("LAN discovery setup timed out")),
+    };
+    // Interface enumeration and broadcast setup can take several seconds on
+    // multi-adapter Windows hosts. Give responses a full collection window.
+    let scan_start = Instant::now();
+    match query {
+        Ok((sockets, networks, fingerprint)) => {
+            local_networks = networks;
+            udp_handles = spawn_wait_responses(sockets, tx.clone(), scan_start, hit_hard_cap.clone(), &fingerprint);
             udp_ok = true;
         }
         Err(err) => log::warn!("UDP LAN discovery unavailable: {err}"),
     }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let mdns_ok = match crate::lan_mdns::spawn_browse(tx.clone()) {
+    #[cfg(not(target_os = "ios"))]
+    let mdns_ok = match crate::lan_mdns::spawn_browse(tx.clone(), local_networks.clone()) {
         Ok(()) => true,
         Err(err) => {
             log::warn!("mDNS discovery unavailable: {err}");
             false
         }
     };
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
     let mdns_ok = true; // Not an enabled transport on this platform.
 
     drop(tx);
@@ -275,9 +320,11 @@ async fn run_discovery_scan() -> DiscoveryOutcome {
         return DiscoveryOutcome::TransportFailure;
     }
 
-    let deadline = scan_start + DISCOVERY_OVERALL_BUDGET;
+    // Transport setup is blocking and happens before collection. Do not
+    // consume the response budget while discovering local interfaces.
+    let deadline = Instant::now() + DISCOVERY_OVERALL_BUDGET;
     let remaining = deadline.saturating_duration_since(Instant::now());
-    let processing = handle_received_peers(rx, generation, udp_ok, mdns_ok, hit_hard_cap.clone());
+    let processing = handle_received_peers(rx, generation, udp_ok, mdns_ok, hit_hard_cap.clone(), &local_networks);
     let processing_result = tokio::time::timeout(remaining, processing).await;
 
     // Join the raw UDP worker threads (bounded by the hard cap, so this
@@ -323,6 +370,9 @@ pub(crate) async fn discover_async() -> ResultType<()> {
 
 #[tokio::main(flavor = "current_thread")]
 pub async fn discover() -> ResultType<()> {
+    if hbb_common::config::is_incoming_only() {
+        return Ok(());
+    }
     discover_async().await
 }
 
@@ -540,16 +590,19 @@ fn get_ipaddr_by_peer<A: ToSocketAddrs>(peer: A) -> Option<IpAddr> {
     };
 }
 
-fn create_broadcast_sockets() -> Vec<(UdpSocket, Ipv4Addr)> {
+fn create_broadcast_sockets() -> (Vec<(UdpSocket, Ipv4Addr)>, Vec<LocalNetwork>) {
     let mut ipv4s = Vec::new();
+    let mut local_networks = Vec::new();
     // TODO: maybe we should use a better way to get ipv4 addresses.
     // But currently, it's ok to use `[Ipv4Addr::UNSPECIFIED]` for discovery.
     // `default_net::get_interfaces()` causes undefined symbols error when `flutter build` on iOS simulator x86_64
     #[cfg(not(any(target_os = "ios")))]
     for interface in default_net::get_interfaces() {
+        let Some(priority) = interface_priority(interface.index) else { continue };
         for ipv4 in &interface.ipv4 {
             if connectable_local_address(IpAddr::V4(ipv4.addr)) {
                 ipv4s.push((ipv4.addr, directed_broadcast(ipv4.addr, ipv4.netmask)));
+                local_networks.push((ipv4.addr, ipv4.netmask, priority));
             }
         }
     }
@@ -571,11 +624,11 @@ fn create_broadcast_sockets() -> Vec<(UdpSocket, Ipv4Addr)> {
             }
         }
     }
-    sockets
+    (sockets, local_networks)
 }
 
-fn send_query() -> ResultType<Vec<UdpSocket>> {
-    let sockets = create_broadcast_sockets();
+fn send_query() -> ResultType<(Vec<UdpSocket>, Vec<LocalNetwork>, String)> {
+    let (sockets, local_networks) = create_broadcast_sockets();
     if sockets.is_empty() {
         bail!("Found no bindable ipv4 addresses");
     }
@@ -584,7 +637,7 @@ fn send_query() -> ResultType<Vec<UdpSocket>> {
     let id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
     let peer = PeerDiscovery {
         cmd: "ping".to_owned(),
-        id,
+        id: id.clone(),
         ..Default::default()
     };
     msg_out.set_peer_discovery(peer);
@@ -598,7 +651,7 @@ fn send_query() -> ResultType<Vec<UdpSocket>> {
         }
     }
     log::info!("discover ping sent");
-    Ok(sockets.into_iter().map(|(socket, _)| socket).collect())
+    Ok((sockets.into_iter().map(|(socket, _)| socket).collect(), local_networks, id))
 }
 
 fn wait_response(
@@ -606,19 +659,13 @@ fn wait_response(
     scan_start: Instant,
     hit_hard_cap: Arc<AtomicBool>,
     tx: UnboundedSender<config::DiscoveryPeer>,
+    local_fingerprint: &str,
 ) -> ResultType<()> {
     // A valid pong resets the quiet timer; pings and malformed/nonmatching
     // packets must not, or continuous LAN traffic could keep a scan open
     // indefinitely. `None` means "no valid pong yet", so the quiet period is
     // measured from `scan_start` until the first one arrives.
     let mut last_valid_pong: Option<Instant> = None;
-
-    let local_addr = socket.local_addr();
-    let try_get_ip_by_peer = match local_addr.as_ref() {
-        Err(..) => true,
-        Ok(addr) => addr.ip().is_unspecified(),
-    };
-    let mut mac: Option<String> = None;
 
     socket.set_read_timeout(Some(Duration::from_millis(10)))?;
     loop {
@@ -635,56 +682,33 @@ fn wait_response(
                                     "Ignoring LAN discovery response from {} with invalid fingerprint",
                                     addr
                                 );
-                                continue;
-                            }
-                            last_valid_pong = Some(Instant::now());
+                            } else if !p.id.eq_ignore_ascii_case(local_fingerprint) {
+                                last_valid_pong = Some(Instant::now());
 
-                            let misc = serde_json::from_str::<serde_json::Value>(&p.misc)
-                                .unwrap_or_default();
-                            let port = misc
-                                .get("port")
-                                .and_then(|value| value.as_u64())
-                                .and_then(|value| u16::try_from(value).ok())
-                                .filter(|value| *value > 0)
-                                .unwrap_or(hbb_common::lan::DEFAULT_PORT);
-                            let endpoint = if addr.ip().is_ipv6() {
-                                format!("[{}]:{}", addr.ip(), port)
-                            } else {
-                                format!("{}:{}", addr.ip(), port)
-                            };
-
-                            let local_mac = if try_get_ip_by_peer {
-                                if let Some(self_addr) = get_ipaddr_by_peer(&addr) {
-                                    get_mac(&self_addr)
+                                let misc = serde_json::from_str::<serde_json::Value>(&p.misc)
+                                    .unwrap_or_default();
+                                let port = misc
+                                    .get("port")
+                                    .and_then(|value| value.as_u64())
+                                    .and_then(|value| u16::try_from(value).ok())
+                                    .filter(|value| *value > 0)
+                                    .unwrap_or(hbb_common::lan::DEFAULT_PORT);
+                                let endpoint = if addr.ip().is_ipv6() {
+                                    format!("[{}]:{}", addr.ip(), port)
                                 } else {
-                                    "".to_owned()
-                                }
-                            } else {
-                                match mac.as_ref() {
-                                    Some(m) => m.clone(),
-                                    None => {
-                                        let m = if let Ok(local_addr) = local_addr {
-                                            get_mac(&local_addr.ip())
-                                        } else {
-                                            "".to_owned()
-                                        };
-                                        mac = Some(m.clone());
-                                        m
-                                    }
-                                }
-                            };
+                                    format!("{}:{}", addr.ip(), port)
+                                };
 
-                            if local_mac.is_empty() && p.mac.is_empty() || local_mac != p.mac {
                                 allow_err!(tx.send(config::DiscoveryPeer {
                                     id: endpoint.clone(),
                                     endpoint,
-                                    fingerprint: p.id.clone(),
+                                    fingerprint: p.id,
                                     ip_mac: HashMap::from([
-                                        (addr.ip().to_string(), p.mac.clone(),)
+                                        (addr.ip().to_string(), p.mac,)
                                     ]),
-                                    username: p.username.clone(),
-                                    hostname: p.hostname.clone(),
-                                    platform: p.platform.clone(),
+                                    username: p.username,
+                                    hostname: p.hostname,
+                                    platform: p.platform,
                                     online: true,
                                     ..Default::default()
                                 }));
@@ -713,14 +737,17 @@ fn spawn_wait_responses(
     tx: UnboundedSender<config::DiscoveryPeer>,
     scan_start: Instant,
     hit_hard_cap: Arc<AtomicBool>,
+    local_fingerprint: &str,
 ) -> Vec<std::thread::JoinHandle<()>> {
+    let local_fingerprint: Arc<str> = Arc::from(local_fingerprint);
     sockets
         .into_iter()
         .map(|socket| {
             let tx_clone = tx.clone();
             let hit_hard_cap = hit_hard_cap.clone();
+            let local_fingerprint = local_fingerprint.clone();
             std::thread::spawn(move || {
-                allow_err!(wait_response(socket, scan_start, hit_hard_cap, tx_clone));
+                allow_err!(wait_response(socket, scan_start, hit_hard_cap, tx_clone, &local_fingerprint));
             })
         })
         .collect()
@@ -732,6 +759,7 @@ async fn handle_received_peers(
     udp_ok: bool,
     mdns_ok: bool,
     hit_hard_cap: Arc<AtomicBool>,
+    local_networks: &[LocalNetwork],
 ) -> ResultType<()> {
     let mut observed: Vec<config::DiscoveryPeer> = Vec::new();
     let mut last_publish_time: Option<Instant> = None;
@@ -741,6 +769,12 @@ async fn handle_received_peers(
                 Some(mut peer) => {
                     if let Some(pos) = observed.iter().position(|x| x.is_same_peer(&peer)) {
                         let peer1 = observed.remove(pos);
+                        if observed_endpoint_priority(&peer1.endpoint, local_networks)
+                            < observed_endpoint_priority(&peer.endpoint, local_networks)
+                        {
+                            peer.id = peer1.id.clone();
+                            peer.endpoint = peer1.endpoint.clone();
+                        }
                         if let Ok(endpoint) = hbb_common::lan::Endpoint::parse(&peer1.endpoint) {
                             if endpoint.host().parse::<IpAddr>().is_ok() {
                                 peer.ip_mac
@@ -775,6 +809,18 @@ async fn handle_received_peers(
     let full_coverage = udp_ok && mdns_ok && !hit_hard_cap.load(Ordering::Relaxed);
     publish_observed(&observed, generation, full_coverage);
     Ok(())
+}
+
+fn observed_endpoint_priority(endpoint: &str, local_networks: &[LocalNetwork]) -> u8 {
+    #[cfg(not(target_os = "ios"))]
+    if let Ok(endpoint) = hbb_common::lan::Endpoint::parse(endpoint) {
+        if let Ok(address) = endpoint.host().parse::<IpAddr>() {
+            return crate::lan_mdns::address_priority(address, local_networks);
+        }
+    }
+    #[cfg(target_os = "ios")]
+    let _ = (endpoint, local_networks);
+    u8::MAX
 }
 
 fn publish_observed(observed: &[config::DiscoveryPeer], generation: u64, full_coverage: bool) {
@@ -872,7 +918,7 @@ fn probe_unicast(targets: &[IpAddr]) -> Vec<config::DiscoveryPeer> {
     let id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
     let peer = PeerDiscovery {
         cmd: "ping".to_owned(),
-        id,
+        id: id.clone(),
         ..Default::default()
     };
     msg_out.set_peer_discovery(peer);
@@ -887,7 +933,7 @@ fn probe_unicast(targets: &[IpAddr]) -> Vec<config::DiscoveryPeer> {
     let (tx, mut rx) = unbounded_channel::<config::DiscoveryPeer>();
     let scan_start = Instant::now();
     let hit_hard_cap = Arc::new(AtomicBool::new(false));
-    allow_err!(wait_response(socket, scan_start, hit_hard_cap, tx));
+    allow_err!(wait_response(socket, scan_start, hit_hard_cap, tx, &id));
 
     let mut observed = Vec::new();
     while let Ok(peer) = rx.try_recv() {
@@ -902,7 +948,7 @@ fn probe_unicast(targets: &[IpAddr]) -> Vec<config::DiscoveryPeer> {
 /// observations, never mark an unanswering address Offline (it may simply be
 /// outside this probe's target list, not actually gone).
 pub(crate) fn probe_ips_async(targets: Vec<IpAddr>) {
-    if targets.is_empty() {
+    if targets.is_empty() || config::is_incoming_only() {
         return;
     }
     std::thread::spawn(move || {
@@ -915,6 +961,9 @@ pub(crate) fn probe_ips_async(targets: Vec<IpAddr>) {
 /// Entry point for a user-initiated manual IP range scan, bypassing
 /// broadcast/mDNS entirely. `range` is parsed by [`parse_ip_range`].
 pub(crate) fn discover_range_async(range: String) -> ResultType<usize> {
+    if config::is_incoming_only() {
+        return Ok(0);
+    }
     let targets = parse_ip_range(&range)?;
     let count = targets.len();
     probe_ips_async(targets);
@@ -1088,5 +1137,61 @@ mod tests {
         assert!(!connectable_local_address("127.0.0.1".parse().unwrap()));
         assert!(!connectable_local_address("fe80::20".parse().unwrap()));
         assert!(!connectable_local_address("ff02::fb".parse().unwrap()));
+    }
+
+    #[test]
+    fn physical_ethernet_and_wifi_rank_ahead_of_virtual_adapters() {
+        assert_eq!(physical_adapter_priority(true, 6), 0);
+        assert_eq!(physical_adapter_priority(true, 71), 0);
+        assert_eq!(physical_adapter_priority(false, 6), 1);
+        assert_eq!(physical_adapter_priority(false, 71), 1);
+        assert_eq!(physical_adapter_priority(true, 24), 1);
+    }
+
+    #[test]
+    fn udp_discovery_ignores_own_fingerprint_and_accepts_another_device() {
+        let local = "a".repeat(64);
+        for (fingerprint, expected) in [(local.clone(), false), ("b".repeat(64), true)] {
+            let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let mut message = Message::new();
+            message.set_peer_discovery(PeerDiscovery {
+                cmd: "pong".to_owned(), id: fingerprint, ..Default::default()
+            });
+            sender.send_to(&message.write_to_bytes().unwrap(), receiver.local_addr().unwrap()).unwrap();
+            let (tx, mut rx) = unbounded_channel();
+            wait_response(receiver, Instant::now() - Duration::from_secs(7), Arc::new(AtomicBool::new(false)), tx, &local).unwrap();
+            assert_eq!(rx.try_recv().is_ok(), expected);
+        }
+    }
+
+    #[test]
+    fn malformed_udp_responses_cannot_bypass_the_scan_deadline() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let remaining = receiver.try_clone().unwrap();
+        remaining.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut message = Message::new();
+        message.set_peer_discovery(PeerDiscovery {
+            cmd: "pong".to_owned(), id: "invalid".to_owned(), ..Default::default()
+        });
+        let bytes = message.write_to_bytes().unwrap();
+        for _ in 0..2 {
+            sender.send_to(&bytes, receiver.local_addr().unwrap()).unwrap();
+        }
+        let (tx, _rx) = unbounded_channel();
+        wait_response(receiver, Instant::now() - Duration::from_secs(7), Arc::new(AtomicBool::new(false)), tx, &"a".repeat(64)).unwrap();
+        assert!(remaining.recv_from(&mut [0; 2048]).is_ok());
+    }
+
+    #[cfg(not(target_os = "ios"))]
+    #[test]
+    fn observations_on_physical_networks_rank_ahead_of_virtual_ones() {
+        let networks = [
+            ("10.0.0.1".parse().unwrap(), "255.255.255.0".parse().unwrap(), 1),
+            ("192.168.50.2".parse().unwrap(), "255.255.255.0".parse().unwrap(), 0),
+        ];
+        assert!(observed_endpoint_priority("192.168.50.101:21118", &networks)
+            < observed_endpoint_priority("10.0.0.20:21118", &networks));
     }
 }

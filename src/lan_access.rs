@@ -35,6 +35,9 @@ fn issue_random_code(policy: &mut AccessPolicy, now: Instant) -> Result<(), &'st
 
 /// Called by the listener lifecycle, not by a UI checkbox/polling side effect.
 pub(crate) fn maintain() {
+    #[cfg(windows)] {
+        process_shared_request();
+    }
     let available = available();
     let now = Instant::now();
     let mut policy = POLICY.lock().unwrap();
@@ -45,14 +48,44 @@ pub(crate) fn maintain() {
             hbb_common::log::warn!("{error}");
         }
     }
+    drop(policy);
+    #[cfg(windows)] {
+        let _ = std::fs::write(shared_state_path(), state_json_local());
+    }
+}
+
+#[cfg(windows)]
+fn process_shared_request() {
+    let Ok(request) = std::fs::read_to_string(shared_request_path()) else { return; };
+    let request = request.trim();
+    if request == "regenerate" {
+        let _ = regenerate_code_local();
+    } else if let Some(rest) = request.strip_prefix("set:") {
+        let mut parts = rest.splitn(2, ':');
+        let code = parts.next().unwrap_or("false") == "true";
+        let manual = parts.next().unwrap_or("true") == "true";
+        let _ = configure_local(code, manual);
+    }
+    let _ = std::fs::remove_file(shared_request_path());
 }
 
 pub(crate) fn available() -> bool {
     #[cfg(windows)]
     {
-        crate::lan_server::LanServer::is_running()
-            && !hbb_common::config::option2bool("stop-service", &hbb_common::config::Config::get_option("stop-service"))
-            && crate::platform::optional_lan_access_available()
+        if crate::lan_server::LanServer::is_running() {
+            !hbb_common::config::option2bool("stop-service", &hbb_common::config::Config::get_option("stop-service"))
+        } else {
+            if let Ok(content) = std::fs::read_to_string(shared_state_path()) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(available) = value.get("available").and_then(|value| value.as_bool()) {
+                        return available;
+                    }
+                }
+            }
+            let (state, _) = crate::ui_interface::get_lan_server_runtime_status();
+            state == "listening"
+                && !hbb_common::config::option2bool("stop-service", &hbb_common::config::Config::get_option("stop-service"))
+        }
     }
     #[cfg(not(windows))]
     {
@@ -67,7 +100,7 @@ pub(crate) fn capabilities() -> (bool, bool) {
     POLICY.lock().unwrap().capabilities()
 }
 
-pub(crate) fn state_json() -> String {
+fn state_json_local() -> String {
     let available = available();
     #[cfg(windows)]
     let preference_error = hbb_common::config::Config::lan_manual_approval_enabled()
@@ -89,6 +122,33 @@ pub(crate) fn state_json() -> String {
 }
 
 pub(crate) fn configure(code: bool, manual: bool) -> Result<(), &'static str> {
+    #[cfg(windows)] {
+        if !crate::lan_server::LanServer::is_running() {
+            let _ = std::fs::create_dir_all(std::path::PathBuf::from(r"C:\ProgramData\SubnetDesk"));
+            std::fs::write(shared_request_path(), format!("set:{}:{}", code, manual))
+                .map_err(|_| "Unable to update optional access")?;
+            return Ok(());
+        }
+    }
+    configure_local(code, manual)
+}
+
+#[cfg(windows)]
+fn configure_local(code: bool, manual: bool) -> Result<(), &'static str> {
+    let available = available();
+    POLICY.lock().unwrap().configure_saved(code, manual, available, |enabled| {
+        #[cfg(windows)]
+        { hbb_common::config::Config::set_lan_manual_approval_enabled(enabled).map_err(|_| {
+            if enabled { "Unable to save manual approval. Please retry." }
+            else { "Unable to save manual approval. Disabled for this run only; please retry." }
+        }) }
+        #[cfg(not(windows))]
+        { let _ = enabled; Ok(()) }
+    })
+}
+
+#[cfg(not(windows))]
+fn configure_local(code: bool, manual: bool) -> Result<(), &'static str> {
     let available = available();
     POLICY.lock().unwrap().configure_saved(code, manual, available, |enabled| {
         #[cfg(windows)]
@@ -102,6 +162,27 @@ pub(crate) fn configure(code: bool, manual: bool) -> Result<(), &'static str> {
 }
 
 pub(crate) fn regenerate_code() -> Result<(), &'static str> {
+    #[cfg(windows)] {
+        if !crate::lan_server::LanServer::is_running() {
+            let _ = std::fs::create_dir_all(std::path::PathBuf::from(r"C:\ProgramData\SubnetDesk"));
+            std::fs::write(shared_request_path(), "regenerate")
+                .map_err(|_| "Unable to request a temporary code")?;
+            return Ok(());
+        }
+    }
+    regenerate_code_local()
+}
+
+#[cfg(windows)]
+fn regenerate_code_local() -> Result<(), &'static str> {
+    if !available() {
+        return Err("Optional access is unavailable while locked or service-backed");
+    }
+    issue_random_code(&mut POLICY.lock().unwrap(), Instant::now())
+}
+
+#[cfg(not(windows))]
+fn regenerate_code_local() -> Result<(), &'static str> {
     if !available() {
         return Err("Optional access is unavailable while locked or service-backed");
     }
@@ -167,4 +248,39 @@ pub(crate) fn manual_pending(id: i32) -> bool {
 }
 pub(crate) fn cancel(id: i32) {
     POLICY.lock().unwrap().cancel(id);
+}
+
+#[cfg(windows)]
+fn shared_state_path() -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(r"C:\ProgramData\SubnetDesk");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("lan-optional-access.json")
+}
+
+#[cfg(windows)]
+fn shared_request_path() -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(r"C:\ProgramData\SubnetDesk");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("lan-optional-access.request")
+}
+
+#[cfg(windows)]
+fn persist_shared_state() {
+    let _ = std::fs::write(shared_state_path(), state_json_local());
+}
+
+pub(crate) fn state_json() -> String {
+    #[cfg(windows)] {
+        if crate::lan_server::LanServer::is_running() {
+            let json = state_json_local();
+            let _ = std::fs::write(shared_state_path(), &json);
+            return json;
+        }
+        if let Ok(content) = std::fs::read_to_string(shared_state_path()) {
+            if !content.trim().is_empty() {
+                return content;
+            }
+        }
+    }
+    state_json_local()
 }

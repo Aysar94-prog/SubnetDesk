@@ -1,0 +1,20 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="SubnetDesk Agent" Manufacturer="SubnetDesk" Version="$(var.Version)" UpgradeCode="7a1073b8-8d46-49d3-bfdc-3c222d62a3f6" Scope="perMachine" InstallerVersion="500">
+    <SummaryInformation Description="SubnetDesk outbound deployment Agent" />
+    <MajorUpgrade DowngradeErrorMessage="A newer SubnetDesk Agent is installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="AGENTFOLDER" Name="SubnetDesk Agent">
+        <Component Id="AgentService" Guid="*">
+          <File Id="AgentExe" Source="$(var.Bundle)\SubnetDeskAgent.exe" KeyPath="yes" />
+          <ServiceInstall Id="InstallAgent" Name="SubnetDeskAgent" DisplayName="SubnetDesk Deployment Agent" Description="Receives authenticated Helper installation jobs over outbound HTTPS." Type="ownProcess" Start="auto" ErrorControl="normal" Account="LocalSystem" />
+          <ServiceControl Id="ControlAgent" Name="SubnetDeskAgent" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+        </Component>
+        <Component Id="AgentSetup" Guid="*">
+          <File Source="$(var.Bundle)\Configure-Agent.ps1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Agent" Title="SubnetDesk Agent" Level="1"><ComponentRef Id="AgentService" /><ComponentRef Id="AgentSetup" /></Feature>
+  </Package>
+</Wix>

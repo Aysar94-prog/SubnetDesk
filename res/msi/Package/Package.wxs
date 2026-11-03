@@ -26,6 +26,7 @@
 		</InstallUISequence>
 
 		<InstallExecuteSequence>
+			<Custom Action="GenerateHelperProfileId" Before="InstallInitialize" Condition="NOT HELPER_PROFILE_ID OR (NOT Installed AND NOT WIX_UPGRADE_DETECTED)" />
 			<InstallExecute After="RemoveExistingProducts" />
 
 			<!--Only do InstallValidate if is not Uninstall-->
@@ -39,6 +40,7 @@
 
 		<Feature Id="App" Level="1" AllowAdvertise="no" Display="expand" Title="!(loc.F_App)" Description="!(loc.F_App_Desc)" AllowAbsent="no">
 			<ComponentGroupRef Id="Components" />
+			<ComponentRef Id="Helper.InstallationProfile" />
 
 			<ComponentRef Id="Product.Registry.InstallFolder" />
 			<ComponentRef Id="Product.Registry.DefaultIcon" />

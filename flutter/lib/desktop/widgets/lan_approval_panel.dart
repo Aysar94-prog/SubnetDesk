@@ -20,9 +20,9 @@ class LanApprovalPanel extends StatefulWidget {
 class _LanApprovalPanelState extends State<LanApprovalPanel> {
   bool _busy = false;
   String _error = '';
-  bool _control = false;
-  bool _clipboard = false;
-  bool _file = false;
+  bool _control = true;
+  bool _clipboard = true;
+  bool _file = true;
   bool get _fileOnly => widget.scope == 'File transfer';
   bool get _advanced => widget.scope == 'Terminal' || widget.scope == 'Port forwarding';
   String t(String text) => widget.translateText?.call(text) ?? translate(text);

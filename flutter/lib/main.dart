@@ -10,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
+import 'package:flutter_hbb/desktop/pages/management_console_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_view_camera_screen.dart';
@@ -38,6 +39,9 @@ import 'package:flutter_hbb/plugin/handlers.dart'
 int? kWindowId;
 WindowType? kWindowType;
 late List<String> kBootArgs;
+const _deploymentUtilityBuild = bool.fromEnvironment(
+  'SUBNETDESK_DEPLOYMENT_UTILITY',
+);
 
 Future<void> main(List<String> args) async {
   earlyAssert();
@@ -101,7 +105,10 @@ Future<void> main(List<String> args) async {
     desktopType = DesktopType.cm;
     await windowManager.ensureInitialized();
     runConnectionManagerScreen();
-  } else if (args.contains('--install')) {
+  } else if (_deploymentUtilityBuild &&
+      (args.isEmpty || args.contains('--deploy-helper'))) {
+    runRemoteDeploymentPage();
+  } else if (!_deploymentUtilityBuild && args.contains('--install')) {
     runInstallPage();
   } else {
     desktopType = DesktopType.main;
@@ -431,6 +438,25 @@ void runInstallPage() async {
     windowManager.focus();
     windowManager.setOpacity(1);
     windowManager.setAlignment(Alignment.center); // ensure
+  });
+}
+
+void runRemoteDeploymentPage() async {
+  await windowManager.ensureInitialized();
+  await initEnv(kAppTypeMain);
+  await windowManager.setTitle('SubnetDesk Deploy');
+  await windowManager.setPreventClose(true);
+  await windowManager.setMinimumSize(const Size(1000, 700));
+  _runApp('', const ManagementConsolePage(), MyTheme.currentThemeMode());
+  final windowOptions = getHiddenTitleBarWindowOptions(
+    size: const Size(1360, 900),
+    center: true,
+  );
+  windowManager.waitUntilReadyToShow(windowOptions, () async {
+    windowManager.show();
+    windowManager.focus();
+    windowManager.setOpacity(1);
+    windowManager.setAlignment(Alignment.center);
   });
 }
 

@@ -48,7 +48,7 @@ Future<String> submitWindowsFileAccessPayload(
   if (method is! int || data['lan_version'] is! int) {
     return 'Invalid file transfer access request';
   }
-  if (method == 1 || method == 2) {
+  if (method == 1 || method == 2 || method == 4) {
     if (data.keys.any(
       (key) =>
           !{'lan_version', 'access_method', 'temporary_code'}.contains(key),

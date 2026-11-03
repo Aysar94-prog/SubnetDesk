@@ -1,6 +1,7 @@
 LIBRARY "CustomActions"
 
 EXPORTS
+    GenerateHelperProfileId
     CustomActionHello
     RemoveRuntimeGeneratedFiles
     TerminateProcesses
@@ -14,3 +15,5 @@ EXPORTS
     RemoveAmyuniIdd
     InstallPrinter
     UninstallPrinter
+    PrepareUnattendedPassword
+    SetUnattendedPassword

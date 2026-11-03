@@ -2634,6 +2634,10 @@ connect(
   String? username,
   bool lanAccessSelected = false,
 }) async {
+  if (bind.isIncomingOnly()) {
+    showToast(translate('This device is receiver-only and cannot connect to other devices'));
+    return;
+  }
   if (id == '') return;
   if (isViewCamera) {
     showToast('Camera access is disabled in this private build');

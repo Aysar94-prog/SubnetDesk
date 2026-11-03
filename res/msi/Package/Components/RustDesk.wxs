@@ -5,13 +5,15 @@
 		<?include ../Includes.wxi?>
 
 		<DirectoryRef Id="INSTALLFOLDER_INNER" FileSource="$(var.BuildDir)">
-			<Component Id="App.exe" Guid="620F0F69-4C17-4320-A619-495E329712A4">
+			<Component Id="App.exe" Guid="4aec4d60-8008-477b-bb19-586a85bacdfc">
 				<File Id="App.exe" Name="$(var.Product).exe" KeyPath="yes" Checksum="yes">
 					<!--<fire:FirewallException Id="AppEx" Name="$(var.Product) Service" Scope="any" IgnoreFailure="yes" />-->
 				</File>
 			</Component>
 		</DirectoryRef>
 
+		<Property Id="SetUnattendedPassword" Hidden="yes" />
+		<CustomAction Id="ResetReceiverOnlyForInstall" FileRef="App.exe" ExeCommand="--reset-receiver-only-for-install" Execute="deferred" Impersonate="no" Return="check" />
 		<CustomAction Id="RemoveRuntimeGeneratedFiles.SetParam" Return="check" Property="RemoveRuntimeGeneratedFiles" Value="[INSTALLFOLDER_INNER]" />
 		<CustomAction Id="AddFirewallRules.SetParam" Return="check" Property="AddFirewallRules" Value="1[INSTALLFOLDER_INNER]$(var.Product).exe" />
 		<CustomAction Id="RemoveFirewallRules.SetParam" Return="check" Property="RemoveFirewallRules" Value="0[INSTALLFOLDER_INNER]$(var.Product).exe" />
@@ -31,7 +33,11 @@
 		<CustomAction Id="TryDeleteStartupShortcut.SetParam" Return="check" Property="ShortcutName" Value="$(var.Product) Tray" />
 		<CustomAction Id="RemoveAmyuniIdd.SetParam" Return="check" Property="RemoveAmyuniIdd" Value="[INSTALLFOLDER_INNER]" />
 		<CustomAction Id="InstallPrinter.SetParam" Return="check" Property="InstallPrinter" Value="[INSTALLFOLDER_INNER]" />
+		<SetProperty Id="SET_UNATTENDED_PASSWORD" Value="1" Before="InstallInitialize" Sequence="execute" Condition="ENABLE_UNATTENDED=1" />
 		<InstallExecuteSequence>
+			<Custom Action="ResetReceiverOnlyForInstall" Before="CreateStartService" Condition="NOT (REMOVE=&quot;ALL&quot;)" />
+			<Custom Action="UnattendedPasswordRequired" Before="InstallInitialize" Condition="SET_UNATTENDED_PASSWORD=1 AND UNATTENDED_PASSWORD=&quot;&quot; AND UNATTENDED_PASSWORD_B64=&quot;&quot;" />
+			<Custom Action="UnattendedPasswordConfirmation" Before="InstallInitialize" Condition="SET_UNATTENDED_PASSWORD=1 AND UILevel&gt;=5 AND (UNATTENDED_PASSWORD_CONFIRM=&quot;&quot; OR UNATTENDED_PASSWORD&lt;&gt;UNATTENDED_PASSWORD_CONFIRM)" />
 
 			<Custom Action="SetPropertyIsServiceRunning" After="InstallInitialize" Condition="Installed" />
 			<Custom Action="SetPropertyIsServiceRunning.SetParam.AppName" Before="SetPropertyIsServiceRunning" Condition="Installed" />
@@ -74,6 +80,8 @@
 			<!--ExecFirewallExceptions: Error 0x80070057: failed to add app to the authorized apps list-->
 			<Custom Action="AddFirewallRules" Before="InstallFinalize" Condition="NOT (Installed AND REMOVE AND NOT UPGRADINGPRODUCTCODE)"/>
 			<Custom Action="AddFirewallRules.SetParam" Before="AddFirewallRules" Condition="NOT (Installed AND REMOVE AND NOT UPGRADINGPRODUCTCODE)"/>
+			<Custom Action="PrepareUnattendedPassword" Before="SetUnattendedPassword" Condition="SET_UNATTENDED_PASSWORD=1 AND (UNATTENDED_PASSWORD &lt;&gt; &quot;&quot; OR UNATTENDED_PASSWORD_B64 &lt;&gt; &quot;&quot;)" />
+			<Custom Action="SetUnattendedPassword" Before="InstallFinalize" Condition="SET_UNATTENDED_PASSWORD=1 AND (UNATTENDED_PASSWORD &lt;&gt; &quot;&quot; OR UNATTENDED_PASSWORD_B64 &lt;&gt; &quot;&quot;)" />
 
 			<Custom Action="AddRegSoftwareSASGeneration" Before="InstallFinalize" Condition="NOT (Installed AND REMOVE AND NOT UPGRADINGPRODUCTCODE) AND (NOT CC_CONNECTION_TYPE=&quot;outgoing&quot;)"/>
 
@@ -97,14 +105,14 @@
 
 		<!-- Shortcuts -->
 		<DirectoryRef Id="App.StartMenu">
-			<Component Id="App.StartMenu" Guid="30F6D57A-B805-4DA4-A071-05A3B22400CA">
+			<Component Id="App.StartMenu" Guid="0138b8a8-e1a9-4bb5-8b88-964c17964bb6">
 				<RegistryValue Root="HKCU" Key="Software\$(var.Product)" Name="App.StartMenu" Type="string" Value="1" KeyPath="yes" />
 				<RemoveFolder Id="Remove.App.StartMenu" On="uninstall" />
 			</Component>
 		</DirectoryRef>
 
 		<DirectoryRef Id="App.StartMenu">
-			<Component Id="App.StartMenu.Shortcut" Guid="43ABCAC7-E47D-42D8-A408-25EC70DBB993" Condition="STARTMENUSHORTCUTS = 1 OR STARTMENUSHORTCUTS = &quot;Y&quot; OR STARTMENUSHORTCUTS = &quot;y&quot;">
+			<Component Id="App.StartMenu.Shortcut" Guid="3fe6ddb7-2e4b-420d-a985-593ca1418067" Condition="STARTMENUSHORTCUTS = 1 OR STARTMENUSHORTCUTS = &quot;Y&quot; OR STARTMENUSHORTCUTS = &quot;y&quot;">
 				<Shortcut Id="App.StartMenu.Shortcut" Name="!(loc.SC_Client)" Description="!(loc.SC_Client_Desc)" Target="[!App.exe]" Icon="AppIcon" WorkingDirectory="INSTALLFOLDER_INNER" />
 				<!--
 					Fix ICE 38 by adding a dummy registry key that is the key for this shortcut.
@@ -113,26 +121,26 @@
 				<RegistryValue Root="HKCU" Key="Software\$(var.Product)" Name="App.StartMenu.Shortcut" Type="string" Value="1" KeyPath="yes" />
 			</Component>
 
-			<Component Id="App.StartMenu.ShortcutUninstall" Guid="E100D7F8-D607-4513-28DA-2C95E5EA698E" Condition="STARTMENUSHORTCUTS = 1 OR STARTMENUSHORTCUTS = &quot;Y&quot; OR STARTMENUSHORTCUTS = &quot;y&quot;">
+			<Component Id="App.StartMenu.ShortcutUninstall" Guid="8ab7edfb-a4c6-4419-b8da-061b6a11aa9d" Condition="STARTMENUSHORTCUTS = 1 OR STARTMENUSHORTCUTS = &quot;Y&quot; OR STARTMENUSHORTCUTS = &quot;y&quot;">
 				<Shortcut Id="App.StartMenu.ShortcutUninstall" Name="!(loc.SC_Uninstall)" Description="!(loc.SC_Uninstall_Desc)" Target="[System6432Folder]msiexec.exe" Arguments="/x [ProductCode]" Icon="AppIcon" />
 				<RegistryValue Root="HKCU" Key="Software\$(var.Product)" Name="App.StartMenu.ShortcutUninstall" Type="string" Value="1" KeyPath="yes" />
 			</Component>
 		</DirectoryRef>
 		<StandardDirectory Id="DesktopFolder">
-			<Component Id="App.Desktop.Shortcut" Guid="CA8FB7AA-17F7-4E36-A58A-5A016A303709" Condition="DESKTOPSHORTCUTS = 1 OR DESKTOPSHORTCUTS = &quot;Y&quot; OR DESKTOPSHORTCUTS = &quot;y&quot;">
+			<Component Id="App.Desktop.Shortcut" Guid="22ab0fb8-0795-48d8-b23f-cc9a5bc0a3fa" Condition="DESKTOPSHORTCUTS = 1 OR DESKTOPSHORTCUTS = &quot;Y&quot; OR DESKTOPSHORTCUTS = &quot;y&quot;">
 				<Shortcut Id="App.Desktop.Shortcut" Name="!(loc.SC_Client)" Description="!(loc.SC_Client_Desc)" Target="[!App.exe]" Icon="AppIcon" WorkingDirectory="INSTALLFOLDER_INNER" />
 				<RegistryValue Root="HKCU" Key="Software\$(var.Product)" Name="App.Desktop.Shortcut" Type="string" Value="1" KeyPath="yes" />
 			</Component>
 		</StandardDirectory>
 		<StandardDirectory Id="StartupFolder">
-			<Component Id="App.StartupFolder.ShortcutTray" Guid="B1D1E2BB-E53E-E159-DB7C-744D5C726A8C" Condition="STARTUPSHORTCUTS = 1 AND (NOT CC_CONNECTION_TYPE=&quot;outgoing&quot;)">
+			<Component Id="App.StartupFolder.ShortcutTray" Guid="19d6f357-a8ce-4df4-b96c-2cf40b55f28c" Condition="STARTUPSHORTCUTS = 1 AND (NOT CC_CONNECTION_TYPE=&quot;outgoing&quot;)">
 				<Shortcut Id="App.StartupFolder.ShortcutTray" Name="!(loc.SC_Client_Tray)" Description="!(loc.SC_Client_Tray_Desc)" Target="[!App.exe]" Arguments="--tray" Icon="AppIcon" WorkingDirectory="INSTALLFOLDER_INNER" />
 				<RegistryValue Root="HKCU" Key="Software\$(var.Product)" Name="App.StartupFolder.ShortcutTray" Type="string" Value="1" KeyPath="yes" />
 			</Component>
 		</StandardDirectory>
 
 		<!--<DirectoryRef Id="INSTALLFOLDER_INNER">
-			<Component Id="App.UninstallShortcut" Guid="FB0F2AC7-2AE5-4C54-B860-5E472620B6B1">
+			<Component Id="App.UninstallShortcut" Guid="147ba254-b7b6-4dac-a593-8cf546b17e89">
 				<Shortcut Id="App.UninstallShortcut" Name="!(loc.SC_Uninstall)" Description="!(loc.SC_Uninstall_Desc)" Target="[System6432Folder]msiexec.exe" Arguments="/x [ProductCode]" Icon="AppIcon" />
 			</Component>
 		</DirectoryRef>-->
@@ -146,6 +154,282 @@
 			<ComponentRef Id="App.StartupFolder.ShortcutTray" />
 
 			<!--$AutoComonentStart$-->
+			<Component Guid="97f843b2-ca9b-40fa-a2e1-1f358ac87a0b" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/app_links_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="daa98197-0107-42b0-9429-02a2a252dbc9" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/desktop_drop_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="c6167386-904b-450f-9c7d-56069e46c704" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/desktop_multi_window_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="bb65200c-1e58-4bf8-95a7-96bc0d5f0f48" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/file_selector_windows_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="4e522925-45b0-4636-97d3-2de25a63c161" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/flutter_custom_cursor_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="3f033581-4a78-4de7-9247-fe18344ceaf3" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/flutter_gpu_texture_renderer_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="cb9d8a6a-71a6-4636-a078-c2cfc985b6fd" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/flutter_windows.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="7e393273-2add-40d4-a51f-be8d816be208" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/librustdesk.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="7011164f-2859-4ee4-b2bc-6604239c41df" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/native_assets.json" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="4ae1aed0-102a-4793-93ff-b3a108722f63" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/screen_retriever_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="0e005445-fc6a-452a-8031-252880c6adcf" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/texture_rgba_renderer_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="cecf180b-90cd-4b5c-805f-dddb97ebcbfc" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/url_launcher_windows_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="f235f272-d7bf-4c7c-aab0-982ea3187158" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/window_manager_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="cc08d6f6-940c-4510-81ff-a015f43fc761" >
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/window_size_plugin.dll" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="8b61a0c0-7177-4c01-b4d4-0c2c6d06f47e" Subdirectory="data">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/app.so" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="78a22b6b-de37-49d3-be99-c801edf81b3b" Subdirectory="data">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/icudtl.dat" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="14339884-decc-4261-b607-f309cb28eb5e" Subdirectory="data\flutter_assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/AssetManifest.bin" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="76a10111-0c14-4fb2-8088-c20909e9e450" Subdirectory="data\flutter_assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/FontManifest.json" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="48bc59b5-aeec-4ef3-9b4b-933d89c2f892" Subdirectory="data\flutter_assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/NativeAssetsManifest.json" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="28ac1aae-7a24-4ad4-997d-6063ad7d7deb" Subdirectory="data\flutter_assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/NOTICES.Z" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="fe8f2781-1a6d-448d-ab1a-bbf0fa7648be" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/actions.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="9b7b6b2a-633e-4fbc-af1f-64973d41514c" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/actions_mobile.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="1defcd4f-bd62-45b2-8a96-ed1fae422b1e" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/address_book.ttf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="76d2d888-532d-4418-bc12-87447142a4e0" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/android.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="2104b7aa-e40b-4441-8cda-e75247f5ee48" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/arrow.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="eea25aca-e2b1-4b18-817e-f8d30bdc068c" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-apple.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="b85079f9-8d07-4899-af1f-9f93f7c7248f" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-auth0.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="45049ce1-ee56-4ff7-b9cc-6a4de7c5d776" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-default.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="2722aab6-d888-4a50-a87f-fe0e6c00fe82" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-facebook.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="d7a8815e-7f05-473b-8d22-4ee86f3f861d" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-github.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="3d63521e-cdbc-4f93-9ba3-b7157712d715" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-gitlab.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="6d495994-9b84-40a1-8251-2dd98b1e933e" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-google.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="889a59df-b611-418a-9781-52926c12156e" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-microsoft.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="1213128c-b60a-4b84-be71-5eaa7772d2ea" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/auth-okta.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="37fb93cc-2ab8-425d-9818-af635abf18da" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/call_end.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="bc6ad696-3c9f-4e3a-b876-0376c2748754" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/call_wait.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="6d8e8a7b-3979-4b86-bd21-cfd8b9d1824d" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/chat.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="4eb3adec-ca2b-4b94-b00c-a71f5e019551" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/chat2.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="a49b8cbe-d937-4fa6-8ea2-e60c3df3df5d" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/checkbox-outline.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="0760fdca-039c-4dde-9bfc-9a091b846f39" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/chevron_up_chevron_down.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="49359b8a-dc81-4904-a797-346467cd2db6" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/close.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="e267535c-6dde-4959-8e18-c7bc495edf68" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/device_group.ttf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="22106bdd-8997-41a7-b01f-ac5e2e9148fe" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/display.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="8746ff00-74f4-4109-ba04-ec2b15956ed9" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/display_switcher.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="d0b69567-ba41-46d5-97ff-4d3b76559c39" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/dots.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="8270b78d-6b37-4d09-ba29-75f15f5fac08" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/file.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="d8095fcc-edff-4d09-9231-d0493bee916f" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/file_transfer.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="2aa4cdec-e3bc-43eb-939c-677caa090db3" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/folder.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="8bcdc406-9129-4419-927b-424e1f5f2df5" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/folder_new.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="99ee01e5-b283-46af-b1b5-5047738a4215" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/fullscreen.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="1fb9a0bb-ac2a-46e7-aff0-5cc4ec75b39f" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/fullscreen_exit.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="6e7922c7-2842-448f-aeeb-85f70506048c" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/gestures.ttf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="178dd7e5-9dae-4107-9999-40151b5838f2" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/home.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="f00d2e4d-8466-43be-95c6-ee23da1aba05" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/icon.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="a91f3e53-c5d8-4b56-ba72-b8e96b1e8475" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/icon.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="4a66a32f-f2b7-402d-8929-cd68bf5d7e4d" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/insecure.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="60298c20-149e-4391-bc1c-0375670ee52b" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/insecure_relay.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="5e986307-f721-4eea-a467-b1521b03557e" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/kb_layout_iso.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="46d45327-d88e-4714-a939-ae41b6f68878" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/kb_layout_not_iso.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="72209730-8add-4c0c-a39f-a0196de217b0" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/keyboard_mouse.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="c39774cb-481a-4dea-b40b-c474bc32fb7f" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/linux.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="e74fad44-725e-4b6e-abe3-3f3f2639ced4" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/mac.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="c751db41-42d1-4b1b-93e8-fa27b1918896" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/message_24dp_5F6368.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="f7b7f044-a5a4-441b-8676-54cb1923a22f" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/more.ttf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="d12ef3a5-6200-497f-9930-1ab203a72c19" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/peer_searchbar.ttf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="e0c7e34a-fa7c-4ae7-a84b-1b10620d1f0a" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/pinned.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="7b7ffe0e-5a20-47fc-9757-bcad62f47436" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/rec.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="611e0137-89a1-4489-9352-e1c967b9f66e" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/record_screen.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="0479b39b-e6cd-4f4a-bdfc-893f6faa2aa8" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/refresh.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="793af87e-497b-4d80-85e5-26c62e974305" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/scam.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="f5f9849c-f9c0-4f30-8340-d85f84e4479c" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/screen.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="6fcbfc09-a221-416c-a582-cd6aa6308b46" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/search.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="fe8d515c-bc4f-4df1-ac52-bd3c84d8b439" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/secure.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="3157b2b7-c915-4a2a-a2ae-30c243137a4e" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/secure_relay.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="d4b63a2f-bb70-4fcc-bdda-3b1da70d5aec" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/tabbar.ttf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="9dd9179a-db21-4a9a-a257-ef1b651022f6" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/transfer.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="b4b35b4b-882e-4b5b-b1ef-58e9d1bf151c" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/trash.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="fff3a2d8-8833-4c40-b474-8a8a1da2aaa6" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/unpinned.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="8c970906-2b38-4817-8d27-74b11b46cb72" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/voice_call.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="2a08c5e1-8f86-4a3b-8a60-39639316b4f6" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/voice_call_waiting.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="f7ddfe01-351a-46a3-81c7-3e0974530c81" Subdirectory="data\flutter_assets\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/assets/win.svg" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="efe12b83-8c4e-4185-89b3-a43861073edb" Subdirectory="data\flutter_assets\fonts">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/fonts/MaterialIcons-Regular.otf" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="c853f49a-8fdd-4300-a47a-bac2541f4b22" Subdirectory="data\flutter_assets\shaders">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/shaders/ink_sparkle.frag" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="0eaaafad-673d-4835-9a68-1df06493e7ea" Subdirectory="data\flutter_assets\shaders">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/shaders/stretch_effect.frag" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="61cc6295-f937-40f5-8385-fc84cd5c4242" Subdirectory="data\flutter_assets\packages\dash_chat_2\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/dash_chat_2/assets/placeholder.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="7f3b3fbb-509a-4466-96cc-f71ff5931ae3" Subdirectory="data\flutter_assets\packages\dash_chat_2\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/dash_chat_2/assets/profile_placeholder.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="c767941e-0d66-4b1b-8fcc-7df85781a120" Subdirectory="data\flutter_assets\packages\flex_color_picker\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/flex_color_picker/assets/opacity.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="7be44a7b-d2ce-4eb5-a743-8814af10a51a" Subdirectory="data\flutter_assets\packages\wakelock_plus\assets">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/wakelock_plus/assets/no_sleep.js" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="f5d7d028-27b1-4636-b1bb-935f1a620978" Subdirectory="data\flutter_assets\packages\window_manager\images">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/window_manager/images/ic_chrome_close.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="8ff65ac3-4eb0-48c2-a02e-1728ce15577b" Subdirectory="data\flutter_assets\packages\window_manager\images">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/window_manager/images/ic_chrome_maximize.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="17831377-c5a5-4cd9-a2d0-b4cdfb23d4f1" Subdirectory="data\flutter_assets\packages\window_manager\images">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/window_manager/images/ic_chrome_minimize.png" KeyPath="yes" Checksum="yes" />
+			</Component>
+			<Component Guid="4a409e7b-b2ff-41d7-bcdc-4d54c27f8dbf" Subdirectory="data\flutter_assets\packages\window_manager\images">
+				<File Source="D:/Projects AI/SubnetDesk-Helper/output/release-helper-1.4.5-build121/HelperBundle/data/flutter_assets/packages/window_manager/images/ic_chrome_unmaximize.png" KeyPath="yes" Checksum="yes" />
+			</Component>
 			<!--$AutoComponentEnd$-->
 
 		</ComponentGroup>

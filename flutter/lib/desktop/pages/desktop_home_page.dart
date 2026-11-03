@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart' hide Dialog;
 import 'package:flutter_hbb/consts.dart';
@@ -56,6 +57,7 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
   bool _showAllAddresses = false;
   bool _refreshing = false;
   bool _activatingRemote = false;
+  bool _unlocked = false;
   Map<String, dynamic> _info = <String, dynamic>{};
 
   int _addressPriority(String address) {
@@ -85,8 +87,12 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
     try {
       final info =
           jsonDecode(await bind.mainGetLanServerInfo()) as Map<String, dynamic>;
+      final mode = await bind.mainGetOption(key: 'incoming-only-initialized');
       if (mounted) {
-        setState(() => _info = info);
+        setState(() {
+          _info = info;
+          _unlocked = mode == 'unlocked' || mode == 'Y';
+        });
       }
     } catch (_) {
       // Keep the last successful snapshot while the host state is unavailable.
@@ -98,8 +104,14 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
   @override
   void initState() {
     super.initState();
+    _loadIncomingOnlyUnlockState();
     _refreshInfo();
     _timer = Timer.periodic(const Duration(seconds: 5), (_) => _refreshInfo());
+  }
+
+  Future<void> _loadIncomingOnlyUnlockState() async {
+    final state = await bind.mainGetOption(key: 'incoming-only-initialized');
+    if (mounted) setState(() => _unlocked = state == 'unlocked' || state == 'Y');
   }
 
   @override
@@ -147,12 +159,16 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
         (info['addresses'] as List<dynamic>? ?? const [])
             .map((value) => value.toString())
             .toSet()
-            .toList()
-          ..sort((a, b) {
-            final priority = _addressPriority(a).compareTo(_addressPriority(b));
-            return priority == 0 ? a.compareTo(b) : priority;
-          });
+            .toList();
     final port = info['port']?.toString() ?? '21118';
+    final adapterNames = <String, String>{};
+    for (final entry in info['address_details'] as List<dynamic>? ?? const []) {
+      if (entry is Map) {
+        final address = entry['address']?.toString() ?? '';
+        final adapter = entry['adapter']?.toString() ?? '';
+        if (address.isNotEmpty && adapter.isNotEmpty) adapterNames[address] = adapter;
+      }
+    }
     final preferredAddresses = addresses
         .where((address) => _addressPriority(address) < 3)
         .toList();
@@ -298,8 +314,55 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
                       icon: Icon(Icons.tune_rounded, size: 16, color: muted),
                     ),
                   ],
+                  const SizedBox(width: 4),
                 ],
               ),
+              if (!_unlocked) ...[
+                const SizedBox(height: 8),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                  final controller = TextEditingController();
+                  final password = await showDialog<String>(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Unlock receiver-only mode'),
+                      content: TextField(
+                        controller: controller,
+                        obscureText: true,
+                        decoration: const InputDecoration(labelText: 'Password'),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(context),
+                          child: const Text('Cancel'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(context, controller.text),
+                          child: const Text('Unlock'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (password == null || password.isEmpty) return;
+                  final hash = sha256.convert(utf8.encode(password)).toString();
+                  final stored = await bind.mainGetOption(key: 'incoming-only-password');
+                  final expected = stored.isEmpty
+                      ? 'b008f337c227dcb4fa0fa4b1e9b915dd24a34e698b6739236f96b29fa9d2f532'
+                      : stored;
+                  if (hash != expected) {
+                    showToast(translate('Incorrect password'));
+                    return;
+                  }
+                  await bind.mainSetOption(key: 'incoming-only', value: '');
+                  await bind.mainSetOption(key: 'incoming-only-password', value: '');
+                  await bind.mainSetOption(key: 'incoming-only-initialized', value: 'unlocked');
+                  setState(() => _unlocked = true);
+                  showToast(translate('Unlocked. Restart SubnetDesk.'));
+                },
+                icon: const Icon(Icons.lock_open_outlined, size: 16),
+                label: const Text('Unlock receiver-only'),
+              ),
+              ],
               if (runtimeError.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Align(
@@ -360,9 +423,14 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
               _buildCompactInfoRow(
                 icon: Icons.lan_outlined,
                 label: translate('Local Address'),
-                value: primaryAddress == null
+                value: addresses.isEmpty
                     ? '-'
-                    : _formatEndpoint(primaryAddress, port),
+                    : addresses.map((address) {
+                        final endpoint = _formatEndpoint(address, port);
+                        final adapter = adapterNames[address];
+                        return adapter == null ? endpoint : '$adapter · $endpoint';
+                      }).join('\n'),
+                multiline: true,
                 muted: muted,
                 trailing: hiddenAddressCount > 0
                     ? TextButton(
@@ -373,10 +441,7 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
                           minimumSize: const Size(0, 26),
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                        child: Text(
-                          '+$hiddenAddressCount',
-                          style: const TextStyle(fontSize: 11),
-                        ),
+                        child: const Icon(Icons.copy_outlined, size: 15),
                       )
                     : null,
               ),
@@ -784,6 +849,7 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
     required String label,
     required String value,
     required Color muted,
+    bool multiline = false,
     Widget? trailing,
   }) {
     return Padding(
@@ -806,8 +872,8 @@ class _LanServerInfoPanelState extends State<LanServerInfoPanel> {
                   message: value,
                   child: Text(
                     value,
-                    maxLines: _showAllAddresses ? null : 1,
-                    overflow: _showAllAddresses ? null : TextOverflow.ellipsis,
+                    maxLines: multiline || _showAllAddresses ? null : 1,
+                    overflow: multiline || _showAllAddresses ? null : TextOverflow.ellipsis,
                     style: const TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
@@ -1771,6 +1837,13 @@ class _DesktopHomePageState extends State<DesktopHomePage>
                       DesktopSettingPage.tabKeys.first,
                     ),
                   ),
+                  if (bind.isIncomingOnly())
+                    _buildSidebarItem(
+                      context,
+                      icon: Icons.lock_open_outlined,
+                      label: translate('Unlock receiver-only'),
+                      onTap: _unlockIncomingOnly,
+                    ),
                   const SizedBox(height: 18),
                   if (setupIssues.isNotEmpty)
                     Padding(
@@ -3282,6 +3355,42 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         _checkLocalNetworkPermission();
       }
     }
+  }
+
+  Future<void> _unlockIncomingOnly() async {
+    final controller = TextEditingController();
+    final password = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Unlock receiver-only mode'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          decoration: const InputDecoration(labelText: 'Password'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('Unlock'),
+          ),
+        ],
+      ),
+    );
+    if (password == null || password.isEmpty) return;
+    final hash = sha256.convert(utf8.encode(password)).toString();
+    final stored = await bind.mainGetOption(key: 'incoming-only-password');
+    final expected = stored.isEmpty
+        ? 'b008f337c227dcb4fa0fa4b1e9b915dd24a34e698b6739236f96b29fa9d2f532'
+        : stored;
+    if (hash != expected) {
+      showToast(translate('Incorrect password'));
+      return;
+    }
+    await bind.mainSetOption(key: 'incoming-only', value: '');
+    await bind.mainSetOption(key: 'incoming-only-password', value: '');
+    await bind.mainSetOption(key: 'incoming-only-initialized', value: 'unlocked');
+    showToast(translate('Unlocked. Restart SubnetDesk.'));
   }
 
   Future<void> _checkLocalNetworkPermission() async {

@@ -3,6 +3,8 @@
 #include <flutter/flutter_view_controller.h>
 #include <tchar.h>
 #include <windows.h>
+#include <shlobj.h>
+#pragma comment(lib, "shell32.lib")
 
 #include <algorithm>
 #include <iostream>
@@ -17,13 +19,31 @@ typedef void (*FUNC_RUSTDESK_FREE_ARGS)( char**, int);
 typedef int (*FUNC_RUSTDESK_GET_APP_NAME)(wchar_t*, int);
 typedef int (*FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)();
 /// Note: `--server`, `--service` are already handled in [core_main.rs].
-const std::vector<std::string> parameters_white_list = {"--install", "--cm"};
+const std::vector<std::string> parameters_white_list = {
+    "--install", "--cm", "--deploy-helper"};
 
 const wchar_t* getWindowClassName();
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command)
 {
+  wchar_t executable_path[MAX_PATH] = {0};
+  ::GetModuleFileNameW(nullptr, executable_path, MAX_PATH);
+  const wchar_t* executable_name = wcsrchr(executable_path, L'\\');
+  executable_name = executable_name ? executable_name + 1 : executable_path;
+  const bool is_deployment_utility =
+      _wcsicmp(executable_name, L"SubnetDeskDeploy.exe") == 0;
+  if (is_deployment_utility && !::IsUserAnAdmin()) {
+    SHELLEXECUTEINFOW launch = {sizeof(launch)};
+    launch.lpVerb = L"runas";
+    launch.lpFile = executable_path;
+    launch.lpParameters = command_line;
+    launch.nShow = SW_NORMAL;
+    if (!::ShellExecuteExW(&launch)) return EXIT_FAILURE;
+    return EXIT_SUCCESS;
+  }
+  if (is_deployment_utility)
+    ::SetCurrentProcessExplicitAppUserModelID(L"SubnetDesk.ManagementConsole");
   HINSTANCE hInstance = LoadLibraryA("librustdesk.dll");
   if (!hInstance)
   {
@@ -52,8 +72,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
 
   int args_len = 0;
-  char** c_args = rustdesk_core_main(&args_len);
-  if (!c_args)
+  char** c_args = is_deployment_utility ? nullptr : rustdesk_core_main(&args_len);
+  if (!c_args && !is_deployment_utility)
   {
     std::string args_str = "";
     for (const auto& argument : command_line_arguments) {
@@ -62,8 +82,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     // std::cout << "SubnetDesk [" << args_str << "], core returns false, exiting without launching Flutter app." << std::endl;
     return EXIT_SUCCESS;
   }
-  std::vector<std::string> rust_args(c_args, c_args + args_len);
-  free_c_args(c_args, args_len);
+  std::vector<std::string> rust_args;
+  if (c_args) {
+    rust_args.assign(c_args, c_args + args_len);
+    free_c_args(c_args, args_len);
+  }
   FUNC_RUSTDESK_IS_DISABLE_INSTALLATION rustdesk_is_disable_installation =
       (FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)GetProcAddress(hInstance, "rustdesk_is_disable_installation");
   bool is_disable_installation =
@@ -89,6 +112,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
       app_name = std::wstring(app_name_buffer);
     }
   }
+  if (is_deployment_utility) app_name = L"SubnetDesk Deploy";
 
   // Uri links dispatch
   HWND hwnd = ::FindWindowW(getWindowClassName(), app_name.c_str());

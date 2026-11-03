@@ -13,6 +13,7 @@ import ffi.FFI
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.net.wifi.WifiManager
 import android.provider.OpenableColumns
 import java.io.File
 import java.util.concurrent.Executors
@@ -51,6 +52,7 @@ class MainActivity : FlutterActivity() {
     private val shareExecutor = Executors.newSingleThreadExecutor()
     private val sharedFiles = mutableListOf<String>()
     private val shareErrors = mutableListOf<String>()
+    private var discoveryMulticastLock: WifiManager.MulticastLock? = null
 
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
@@ -97,6 +99,36 @@ class MainActivity : FlutterActivity() {
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // Android filters Wi-Fi multicast by default, including mDNS replies.
+        // Keep reception enabled only while the controller UI is visible.
+        try {
+            val wifi = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            if (wifi == null) {
+                Log.w(logTag, "Wi-Fi service unavailable for mDNS discovery")
+                return
+            }
+            val lock = wifi.createMulticastLock("subnetdesk-discovery")
+            lock.setReferenceCounted(false)
+            lock.acquire()
+            discoveryMulticastLock = lock
+        } catch (error: RuntimeException) {
+            Log.w(logTag, "Cannot enable mDNS multicast reception", error)
+        }
+    }
+
+    override fun onStop() {
+        try {
+            discoveryMulticastLock?.let { if (it.isHeld) it.release() }
+        } catch (error: RuntimeException) {
+            Log.w(logTag, "Cannot release mDNS multicast reception", error)
+        } finally {
+            discoveryMulticastLock = null
+            super.onStop()
         }
     }
 

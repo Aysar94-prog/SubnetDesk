@@ -2149,6 +2149,35 @@ pub fn is_win_10_or_greater() -> bool {
     unsafe { is_windows_10_or_greater() > 0 }
 }
 
+/// MSI calls this after writing the installed files/registry and before service startup.
+pub fn reset_receiver_only_for_install() -> ResultType<()> {
+    let hive = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let helper = hive.open_subkey_with_flags(
+        "SOFTWARE\\SubnetDesk\\Helper", KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)?;
+    let install: String = helper.get_value("InstallFolder")?;
+    let executable = std::env::current_exe()?;
+    let directory = executable.parent().ok_or_else(|| hbb_common::anyhow::anyhow!("Missing Helper directory"))?;
+    if !directory.to_string_lossy().trim_end_matches('\\').eq_ignore_ascii_case(install.trim_end_matches('\\')) {
+        hbb_common::bail!("Receiver installation reset must run from the registered Helper directory");
+    }
+    match hive.open_subkey_with_flags(
+        "SOFTWARE\\SubnetDesk\\DevicePolicy", KEY_READ | KEY_WRITE | KEY_WOW64_64KEY) {
+        Ok(key) => match key.get_value::<String, _>("ReceiverPolicy") {
+            Ok(raw) => {
+                let policy = config::relock_managed_receiver_policy(serde_json::from_str(&raw)?)?;
+                key.set_value("ReceiverPolicy", &serde_json::to_string(&policy)?)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    helper.set_value("ReceiverInstallId", &uuid::Uuid::new_v4().to_string())?;
+    config::initialize_installed_helper();
+    Ok(())
+}
+
 pub fn bootstrap() -> bool {
     #[cfg(debug_assertions)]
     {

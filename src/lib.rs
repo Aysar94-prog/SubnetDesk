@@ -17,10 +17,12 @@ pub mod common;
 #[cfg(not(any(target_os = "ios")))]
 pub mod ipc;
 mod lan;
+mod discovery_coordinator;
+mod cm_state_snapshot;
 mod lan_identity;
 #[cfg(any(target_os = "android", test))]
 mod android_credentials;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "ios"))]
 mod lan_mdns;
 mod lan_protocol;
 mod lan_access_policy;

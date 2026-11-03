@@ -185,7 +185,6 @@ class Peers extends ChangeNotifier {
   }
 
   void _updatePeers(Map<String, dynamic> evt) {
-    final onlineStates = _getOnlineStates();
     if (getInitPeers != null) {
       peers = getInitPeers?.call() ?? [];
     } else {
@@ -197,12 +196,6 @@ class Peers extends ChangeNotifier {
       restPeerIds = (evt['ids'] as String).split(',');
     }
 
-    if (loadEvent != 'load_lan_peers') {
-      for (var peer in peers) {
-        final state = onlineStates[peer.id];
-        peer.online = state != null && state != false;
-      }
-    }
     event = UpdateEvent.load;
     notifyListeners();
   }

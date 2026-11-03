@@ -91,6 +91,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
   @override
   void dispose() {
     windowManager.removeListener(this);
+    controller.dispose();
     super.dispose();
   }
 
@@ -208,7 +209,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
                   Obx(
                     () => ElevatedButton.icon(
                       icon: Icon(Icons.done_rounded, size: 16),
-                      label: Text(translate('Accept and Install')),
+                      label: Text(translate('Install SubnetDesk')),
                       onPressed: btnEnabled.value ? install : null,
                       style: buttonStyle,
                     ),

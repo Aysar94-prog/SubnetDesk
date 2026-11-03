@@ -586,12 +586,16 @@ extern "C"
         if (session_id == 0 || session_id == 0xFFFFFFFF) return FALSE;
         PWTSINFOEXW info = NULL;
         DWORD bytes = 0;
-        BOOL unlocked = FALSE;
+        BOOL unlocked = TRUE;
         if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id,
                 WTSSessionInfoEx, (LPWSTR *)&info, &bytes)) {
-            unlocked = info && bytes >= sizeof(WTSINFOEXW) && info->Level == 1 &&
-                info->Data.WTSInfoExLevel1.SessionState == WTSActive &&
-                info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_UNLOCK;
+            if (info && bytes >= sizeof(WTSINFOEXW) && info->Level == 1) {
+                if (info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK) {
+                    unlocked = FALSE;
+                } else if (info->Data.WTSInfoExLevel1.SessionState != WTSActive) {
+                    unlocked = FALSE;
+                }
+            }
         }
         if (info) WTSFreeMemory(info);
         return unlocked;

@@ -7,10 +7,23 @@
 #include <winternl.h>
 #include <netfw.h>
 #include <shlwapi.h>
+#include <wincrypt.h>
+#include <objbase.h>
 
 #include "./Common.h"
 
 #pragma comment(lib, "Shlwapi.lib")
+#pragma comment(lib, "Ole32.lib")
+
+UINT __stdcall GenerateHelperProfileId(__in MSIHANDLE hInstall)
+{
+    GUID id = {};
+    WCHAR text[40] = {};
+    if (FAILED(CoCreateGuid(&id)) || StringFromGUID2(id, text, 40) == 0)
+        return ERROR_INSTALL_FAILURE;
+    text[37] = L'\0';
+    return MsiSetPropertyW(hInstall, L"HELPER_PROFILE_ID", text + 1);
+}
 
 UINT __stdcall CustomActionHello(
     __in MSIHANDLE hInstall)
@@ -1062,6 +1075,174 @@ UINT __stdcall UninstallPrinter(
     WcaLog(LOGMSG_STANDARD, "Uninstall RD printer done");
 
 LExit:
+    er = SUCCEEDED(hr) ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE;
+    return WcaFinalize(er);
+}
+
+UINT __stdcall PrepareUnattendedPassword(__in MSIHANDLE hInstall)
+{
+    HRESULT hr = S_OK;
+    DWORD er = ERROR_SUCCESS;
+    LPWSTR installFolder = NULL;
+    LPWSTR password = NULL;
+    LPWSTR encodedPassword = NULL;
+    LPWSTR customActionData = NULL;
+
+    hr = WcaInitialize(hInstall, "PrepareUnattendedPassword");
+    ExitOnFailure(hr, "Failed to initialize");
+    hr = WcaGetProperty(L"INSTALLFOLDER_INNER", &installFolder);
+    ExitOnFailure(hr, "Failed to read install folder");
+    hr = WcaGetProperty(L"UNATTENDED_PASSWORD_B64", &encodedPassword);
+    ExitOnFailure(hr, "Failed to read encoded unattended password");
+    if (encodedPassword != NULL && encodedPassword[0] != L'\0') {
+        DWORD utf8Bytes = 0;
+        DWORD wideChars = 0;
+        if (!CryptStringToBinaryW(encodedPassword, 0, CRYPT_STRING_BASE64, NULL, &utf8Bytes, NULL, NULL) || utf8Bytes == 0) {
+            hr = E_INVALIDARG;
+            ExitOnFailure(hr, "Encoded unattended password is invalid");
+        }
+        BYTE* utf8Password = (BYTE*)malloc(utf8Bytes);
+        if (utf8Password == NULL || !CryptStringToBinaryW(encodedPassword, 0, CRYPT_STRING_BASE64, utf8Password, &utf8Bytes, NULL, NULL)) {
+            if (utf8Password != NULL) free(utf8Password);
+            hr = E_OUTOFMEMORY;
+            ExitOnFailure(hr, "Failed to decode unattended password");
+        }
+        wideChars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)utf8Password, (int)utf8Bytes, NULL, 0);
+        if (wideChars <= 0) {
+            SecureZeroMemory(utf8Password, utf8Bytes);
+            free(utf8Password);
+            hr = E_INVALIDARG;
+            ExitOnFailure(hr, "Decoded unattended password is not valid UTF-8");
+        }
+        password = (LPWSTR)malloc(((size_t)wideChars + 1) * sizeof(WCHAR));
+        if (password == NULL || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)utf8Password, (int)utf8Bytes, password, wideChars) != wideChars) {
+            SecureZeroMemory(utf8Password, utf8Bytes);
+            free(utf8Password);
+            if (password != NULL) free(password);
+            password = NULL;
+            hr = E_OUTOFMEMORY;
+            ExitOnFailure(hr, "Failed to convert unattended password");
+        }
+        password[wideChars] = L'\0';
+        SecureZeroMemory(utf8Password, utf8Bytes);
+        free(utf8Password);
+    } else {
+        hr = WcaGetProperty(L"UNATTENDED_PASSWORD", &password);
+        ExitOnFailure(hr, "Failed to read unattended password");
+    }
+    hr = WcaWriteStringToCaData(installFolder, &customActionData);
+    ExitOnFailure(hr, "Failed to prepare install folder data");
+    hr = WcaWriteStringToCaData(password, &customActionData);
+    ExitOnFailure(hr, "Failed to prepare unattended password data");
+    if (MsiSetPropertyW(hInstall, L"SetUnattendedPassword", customActionData) != ERROR_SUCCESS) {
+        hr = E_FAIL;
+        ExitOnFailure(hr, "Failed to set deferred action data");
+    }
+
+LExit:
+    if (password != NULL) {
+        SecureZeroMemory(password, (wcslen(password) + 1) * sizeof(WCHAR));
+        if (encodedPassword != NULL && encodedPassword[0] != L'\0') free(password);
+    }
+    ReleaseStr(installFolder);
+    if (encodedPassword == NULL || encodedPassword[0] == L'\0') ReleaseStr(password);
+    if (encodedPassword != NULL) SecureZeroMemory(encodedPassword, (wcslen(encodedPassword) + 1) * sizeof(WCHAR));
+    ReleaseStr(encodedPassword);
+    ReleaseStr(customActionData);
+    er = SUCCEEDED(hr) ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE;
+    return WcaFinalize(er);
+}
+
+UINT __stdcall SetUnattendedPassword(__in MSIHANDLE hInstall)
+{
+    HRESULT hr = S_OK;
+    DWORD er = ERROR_SUCCESS;
+    LPWSTR data = NULL;
+    LPWSTR cursor = NULL;
+    LPWSTR installFolder = NULL;
+    LPWSTR password = NULL;
+    WCHAR executable[MAX_PATH];
+    WCHAR commandLine[MAX_PATH + 80];
+    HANDLE pipeRead = NULL;
+    HANDLE pipeWrite = NULL;
+    PROCESS_INFORMATION processInfo = {};
+    STARTUPINFOW startupInfo = {};
+    SECURITY_ATTRIBUTES securityAttributes = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+    DWORD written = 0;
+    DWORD exitCode = ERROR_INSTALL_FAILURE;
+    int passwordBytes = 0;
+    char* passwordUtf8 = NULL;
+
+    hr = WcaInitialize(hInstall, "SetUnattendedPassword");
+    ExitOnFailure(hr, "Failed to initialize");
+    hr = WcaGetProperty(L"CustomActionData", &data);
+    ExitOnFailure(hr, "Failed to read deferred action data");
+    cursor = data;
+    hr = WcaReadStringFromCaData(&cursor, &installFolder);
+    ExitOnFailure(hr, "Failed to read install folder from deferred action data");
+    hr = WcaReadStringFromCaData(&cursor, &password);
+    ExitOnFailure(hr, "Failed to read password from deferred action data");
+    if (FAILED(StringCchPrintfW(executable, MAX_PATH, L"%lsSubnetDesk.exe", installFolder)) ||
+        FAILED(StringCchPrintfW(commandLine, MAX_PATH + 80, L"\"%ls\" --set-unattended-password-stdin", executable))) {
+        hr = E_INVALIDARG;
+        ExitOnFailure(hr, "Unattended password executable path is invalid");
+    }
+    passwordBytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, password, -1, NULL, 0, NULL, NULL);
+    if (passwordBytes <= 1) {
+        hr = E_INVALIDARG;
+        ExitOnFailure(hr, "Unattended password is not valid Unicode");
+    }
+    passwordUtf8 = (char*)malloc(passwordBytes);
+    if (passwordUtf8 == NULL || WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, password, -1, passwordUtf8, passwordBytes, NULL, NULL) != passwordBytes) {
+        hr = E_OUTOFMEMORY;
+        ExitOnFailure(hr, "Failed to encode unattended password");
+    }
+    if (!CreatePipe(&pipeRead, &pipeWrite, &securityAttributes, 0)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        ExitOnFailure(hr, "Failed to create password input pipe");
+    }
+    SetHandleInformation(pipeWrite, HANDLE_FLAG_INHERIT, 0);
+    startupInfo.cb = sizeof(startupInfo);
+    startupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startupInfo.hStdInput = pipeRead;
+    startupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    startupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    if (!CreateProcessW(executable, commandLine, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, installFolder, &startupInfo, &processInfo)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        ExitOnFailure(hr, "Failed to start unattended password configuration");
+    }
+    CloseHandle(pipeRead);
+    pipeRead = NULL;
+    if (!WriteFile(pipeWrite, passwordUtf8, (DWORD)(passwordBytes - 1), &written, NULL) ||
+        written != (DWORD)(passwordBytes - 1)) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        ExitOnFailure(hr, "Failed to send unattended password to the application");
+    }
+    if (!WriteFile(pipeWrite, "\n", 1, &written, NULL) || written != 1) {
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        ExitOnFailure(hr, "Failed to finish password input");
+    }
+    CloseHandle(pipeWrite);
+    pipeWrite = NULL;
+    WaitForSingleObject(processInfo.hProcess, INFINITE);
+    if (!GetExitCodeProcess(processInfo.hProcess, &exitCode) || exitCode != ERROR_SUCCESS) {
+        hr = E_FAIL;
+        ExitOnFailure(hr, "Unattended password configuration failed");
+    }
+
+LExit:
+    if (pipeRead != NULL) CloseHandle(pipeRead);
+    if (pipeWrite != NULL) CloseHandle(pipeWrite);
+    if (processInfo.hThread != NULL) CloseHandle(processInfo.hThread);
+    if (processInfo.hProcess != NULL) CloseHandle(processInfo.hProcess);
+    if (passwordUtf8 != NULL) {
+        SecureZeroMemory(passwordUtf8, passwordBytes);
+        free(passwordUtf8);
+    }
+    if (password != NULL) SecureZeroMemory(password, (wcslen(password) + 1) * sizeof(WCHAR));
+    ReleaseStr(data);
+    ReleaseStr(installFolder);
+    ReleaseStr(password);
     er = SUCCEEDED(hr) ? ERROR_SUCCESS : ERROR_INSTALL_FAILURE;
     return WcaFinalize(er);
 }

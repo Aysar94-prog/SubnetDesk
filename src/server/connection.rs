@@ -1939,6 +1939,69 @@ impl Connection {
                     }
                     return self.grant_lan_access(lr, ConnAuditPrimaryAuth::LanCode).await;
                 }
+                hbb_common::lan::ACCESS_AUTO if login.temporary_code.is_empty() => {
+                    let nonce = match crate::lan_access::request_manual(self.inner.id(), &self.ip) {
+                        Ok(nonce) => nonce,
+                        Err(_) => { self.send_login_error("Manual approval is disabled or busy").await; return false; }
+                    };
+                    self.pending_lan_approval = Some(nonce.clone());
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    self.try_start_cm_ipc();
+                    self.try_start_cm(lr.my_id.clone(), crate::lan::sanitize_lan_device_name(&lr.my_name), false);
+                    let scope = match lr.union.as_ref() {
+                        None => "Screen sharing and control",
+                        Some(login_request::Union::FileTransfer(_)) => "File transfer",
+                        Some(login_request::Union::PortForward(_)) => "Port forwarding",
+                        Some(login_request::Union::Terminal(_)) => "Terminal",
+                        _ => "Unsupported",
+                    };
+                    self.send_to_cm(ipc::Data::LanApprovalRequest { nonce, source: self.ip.clone(), scope: scope.to_owned(), timeout_seconds: 60 });
+                    let mut msg = Message::new();
+                    msg.set_lan_access_pending(LanAccessPending { version: hbb_common::lan::ACCESS_VERSION, timeout_seconds: 60, ..Default::default() });
+                    self.send(msg).await;
+                    return true;
+                }
+                hbb_common::lan::ACCESS_AUTO => {
+                    let candidate = login.temporary_code.clone();
+                    let password_verified = tokio::task::spawn_blocking(move || {
+                        Config::verify_lan_password(candidate.as_bytes()).unwrap_or(false)
+                    }).await.unwrap_or(false);
+                    if !login.temporary_code.is_empty()
+                        && password_verified
+                        && Config::lan_password_access_enabled() {
+                        return self.grant_lan_access(lr, ConnAuditPrimaryAuth::LanCredential).await;
+                    }
+                    if !login.temporary_code.is_empty()
+                        && login.temporary_code.len() == 6
+                        && login.temporary_code.bytes().all(|byte| byte.is_ascii_digit())
+                        && crate::lan_access::consume_code(&login.temporary_code).is_ok() {
+                        return self.grant_lan_access(lr, ConnAuditPrimaryAuth::LanCode).await;
+                    }
+                    if !login.temporary_code.is_empty() {
+                        self.send_login_error("Password or temporary code is incorrect").await;
+                        return false;
+                    }
+                    let nonce = match crate::lan_access::request_manual(self.inner.id(), &self.ip) {
+                        Ok(nonce) => nonce,
+                        Err(_) => { self.send_login_error("Manual approval is disabled or busy").await; return false; }
+                    };
+                    self.pending_lan_approval = Some(nonce.clone());
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    self.try_start_cm_ipc();
+                    self.try_start_cm(lr.my_id.clone(), crate::lan::sanitize_lan_device_name(&lr.my_name), false);
+                    let scope = match lr.union.as_ref() {
+                        None => "Screen sharing and control",
+                        Some(login_request::Union::FileTransfer(_)) => "File transfer",
+                        Some(login_request::Union::PortForward(_)) => "Port forwarding",
+                        Some(login_request::Union::Terminal(_)) => "Terminal",
+                        _ => "Unsupported",
+                    };
+                    self.send_to_cm(ipc::Data::LanApprovalRequest { nonce, source: self.ip.clone(), scope: scope.to_owned(), timeout_seconds: 60 });
+                    let mut msg = Message::new();
+                    msg.set_lan_access_pending(LanAccessPending { version: hbb_common::lan::ACCESS_VERSION, timeout_seconds: 60, ..Default::default() });
+                    self.send(msg).await;
+                    return true;
+                }
                 hbb_common::lan::ACCESS_MANUAL if login.temporary_code.is_empty() => {
                     let nonce = match crate::lan_access::request_manual(self.inner.id(), &self.ip) {
                         Ok(nonce) => nonce,

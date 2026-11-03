@@ -1,0 +1,20 @@
+--- a/engine/src/flutter/shell/platform/common/flutter_platform_node_delegate.cc
++++ b/engine/src/flutter/shell/platform/common/flutter_platform_node_delegate.cc
+@@ -86,9 +86,14 @@
+ 
+ gfx::NativeViewAccessible FlutterPlatformNodeDelegate::ChildAtIndex(int index) {
+   auto bridge_ptr = bridge_.lock();
+-  BASE_DCHECK(bridge_ptr);
+-  AccessibilityNodeId child = ax_node_->GetUnignoredChildAtIndex(index)->id();
+-  return bridge_ptr->GetNativeAccessibleFromId(child);
++  if (!bridge_ptr) {
++    return nullptr;
++  }
++  auto* child = ax_node_->GetUnignoredChildAtIndex(index);
++  if (!child) {
++    return nullptr;
++  }
++  return bridge_ptr->GetNativeAccessibleFromId(child->id());
+ }
+ 
+ gfx::Rect FlutterPlatformNodeDelegate::GetBoundsRect(

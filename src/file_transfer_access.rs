@@ -11,11 +11,8 @@ pub fn validate_optional_retry(
     if authenticated {
         return Err("File transfer is already authenticated");
     }
-    match method {
-        1 if code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()) => Ok(()),
-        2 if code.is_empty() => Ok(()),
-        _ => Err("Invalid file transfer access method or temporary code"),
-    }
+    hbb_common::lan::validate_optional_access(method, code)
+        .map_err(|_| "Invalid file transfer access method or temporary code")
 }
 
 #[cfg(test)]
@@ -28,6 +25,15 @@ mod tests {
     #[test]
     fn valid_manual_request_without_code() {
         assert!(validate_optional_retry(true, false, 2, "").is_ok());
+    }
+    #[test]
+    fn auto_file_retry_accepts_password_code_and_manual() {
+        for input in ["abc", "long-password-!42", " كلمة سر ", "012345", ""] {
+            assert!(validate_optional_retry(true, false, 4, input).is_ok());
+            assert!(validate_optional_retry(false, false, 4, input).is_err());
+            assert!(validate_optional_retry(true, true, 4, input).is_err());
+        }
+        assert!(validate_optional_retry(true, false, 4, "bad\npassword").is_err());
     }
     #[test]
     fn reject_bad_codes() {
@@ -45,7 +51,7 @@ mod tests {
     #[test]
     fn reject_manual_code_and_unknown_methods() {
         assert!(validate_optional_retry(true, false, 2, "123456").is_err());
-        for method in [0, 3, 4, u32::MAX] {
+        for method in [0, 3, u32::MAX] {
             assert!(validate_optional_retry(true, false, method, "").is_err());
         }
     }
