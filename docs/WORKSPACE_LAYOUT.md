@@ -18,10 +18,11 @@ On the existing Windows workstation, local directory junctions preserve source/o
 A fresh checkout can use ordinary ignored output/, target/ and outputs/ directories. Release publication follows AGENTS.md: validate first, publish under outputs/new/, archive previous versions under outputs/old/, and preserve artifact hashes.
 
 Source repository: https://github.com/Aysar94-prog/SubnetDesk
+Default branch: master (customized Helper, Deploy and Agent source).
 The shared library is included directly under libs/hbb_common/. It is an ordinary source directory; no submodule or second repository is required.
 
 Clone the source:
 
 ```sh
-git clone --branch codex/subnetdesk-visible-cm https://github.com/Aysar94-prog/SubnetDesk.git source
+git clone https://github.com/Aysar94-prog/SubnetDesk.git source
 ```
