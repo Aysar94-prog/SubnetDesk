@@ -1,10 +1,8 @@
 import 'package:debounce_throttle/debounce_throttle.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
-import 'package:flutter_hbb/common/widgets/safe_slider.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
-import 'package:get/get.dart';
 
 Widget customImageQualityWidget({
   required double initQuality,
@@ -38,11 +36,10 @@ Widget customImageQualityWidget({
           children: [
             Expanded(
               flex: 3,
-              child: SafeSlider(
+              child: Slider(
                 value: quality,
                 min: kMinQuality,
                 max: moreQuality ? kMaxMoreQuality : kMaxQuality,
-                semanticLabel: translate('Bitrate'),
                 divisions: moreQuality
                     ? ((kMaxMoreQuality - kMinQuality) / 10).round()
                     : ((kMaxQuality - kMinQuality) / 5).round(),
@@ -113,11 +110,10 @@ Widget customImageQualityWidget({
             children: [
               Expanded(
                 flex: 3,
-                child: SafeSlider(
+                child: Slider(
                   value: fps,
                   min: kMinFps,
                   max: kMaxFps,
-                  semanticLabel: translate('FPS'),
                   divisions: ((kMaxFps - kMinFps) / 5).round(),
                   onChanged: setFps == null
                       ? null
@@ -200,17 +196,11 @@ List<(String, String)> otherDefaultSettings() => [
 class TrackpadSpeedWidget extends StatefulWidget {
   final SimpleWrapper<int> value;
   final Function(int)? onDebouncer;
-  final ValueChanged<String>? onTextChanged;
-  // IME actions call TextField.onSubmitted without reaching the dialog's
-  // raw Enter handler, so the dialog needs a separate submission callback.
-  final ValueChanged<String>? onTextSubmitted;
 
   const TrackpadSpeedWidget({
     super.key,
     required this.value,
     this.onDebouncer,
-    this.onTextChanged,
-    this.onTextSubmitted,
   });
 
   @override
@@ -251,34 +241,6 @@ class _TrackpadSpeedWidgetState extends State<TrackpadSpeedWidget> {
     if (widget.onDebouncer != null) {
       _debouncer.value = value;
     }
-    widget.onTextChanged?.call(_controller.text);
-  }
-
-  void updateTextValue(String text) {
-    widget.onTextChanged?.call(text);
-    final newValue = int.tryParse(text);
-    if (newValue == null ||
-        newValue < kMinTrackpadSpeed ||
-        newValue > kMaxTrackpadSpeed) {
-      return;
-    }
-    setState(() => widget.value.value = newValue);
-  }
-
-  void submitTextValue(String text) {
-    final onTextSubmitted = widget.onTextSubmitted;
-    if (onTextSubmitted != null) {
-      onTextSubmitted(text);
-      return;
-    }
-    if (widget.onTextChanged != null) {
-      return;
-    }
-    final newValue = int.tryParse(text);
-    if (newValue == null) {
-      return;
-    }
-    updateValue(newValue);
   }
 
   @override
@@ -286,11 +248,10 @@ class _TrackpadSpeedWidgetState extends State<TrackpadSpeedWidget> {
         children: [
           Expanded(
             flex: 3,
-            child: SafeSlider(
+            child: Slider(
               value: value.toDouble(),
               min: kMinTrackpadSpeed.toDouble(),
               max: kMaxTrackpadSpeed.toDouble(),
-              semanticLabel: translate('Trackpad speed'),
               divisions: ((kMaxTrackpadSpeed - kMinTrackpadSpeed) / 10).round(),
               onChanged: (value) => updateValue(value.round()),
             ),
@@ -301,8 +262,10 @@ class _TrackpadSpeedWidgetState extends State<TrackpadSpeedWidget> {
               controller: _controller,
               keyboardType: TextInputType.number,
               textAlign: TextAlign.center,
-              onChanged: updateTextValue,
-              onSubmitted: submitTextValue,
+              onSubmitted: (text) {
+                final value = int.tryParse(text);
+                if (value != null) updateValue(value);
+              },
             ),
           ),
           const SizedBox(width: 8),

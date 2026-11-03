@@ -25,6 +25,14 @@
 		<Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
 		<!--$ArpStart$-->
+		<!--https://learn.microsoft.com/en-us/windows/win32/msi/arpsystemcomponent?redirectedfrom=MSDN-->
+		<!--<Property Id="ARPSYSTEMCOMPONENT" Value="1" />-->
+
+		<!--https://learn.microsoft.com/en-us/windows/win32/msi/property-reference-->
+		<Property Id="ARPCOMMENTS" Value="!(loc.AR_Comment)" />
+		<Property Id="ARPCONTACT" Value="https://github.com/rustdesk/rustdesk" />
+		<Property Id="ARPHELPLINK" Value="https://github.com/rustdesk/rustdesk/issues/" />
+		<Property Id="ARPREADME" Value="https://github.com/rustdesk/rustdesk" />
 		<!--$ArpEnd$-->
 
 		<!--$CustomClientPropsStart$-->

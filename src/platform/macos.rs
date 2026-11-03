@@ -20,9 +20,9 @@ use core_graphics::{
 use hbb_common::{
     anyhow::anyhow,
     bail, log,
+    message_proto::{DisplayInfo, Resolution},
     sysinfo::{Pid, Process, ProcessRefreshKind, System},
 };
-use base::message_proto::{DisplayInfo, Resolution};
 use include_dir::{include_dir, Dir};
 use objc::rc::autoreleasepool;
 use objc::{class, msg_send, sel, sel_impl};
@@ -186,7 +186,67 @@ pub fn install_service() -> bool {
 // Remember to check if `update_daemon_agent()` need to be changed if changing `is_installed_daemon()`.
 // No need to merge the existing dup code, because the code in these two functions are too critical.
 // New code should be written in a common function.
-pub fn is_installed_daemon(_prompt: bool) -> bool {
+pub fn is_installed_daemon(prompt: bool) -> bool {
+    let daemon = format!("{}_service.plist", crate::get_full_name());
+    let agent = format!("{}_server.plist", crate::get_full_name());
+    let agent_plist_file = format!("/Library/LaunchAgents/{}", agent);
+    if !prompt {
+        // in macos 13, there is new way to check if they are running or enabled, https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos#Respond-to-changes-in-System-Settings
+        if !std::path::Path::new(&format!("/Library/LaunchDaemons/{}", daemon)).exists() {
+            return false;
+        }
+        if !std::path::Path::new(&agent_plist_file).exists() {
+            return false;
+        }
+        return true;
+    }
+
+    let Some(install_script) = PRIVILEGES_SCRIPTS_DIR.get_file("install.scpt") else {
+        return false;
+    };
+    let Some(install_script_body) = install_script.contents_utf8().map(correct_app_name) else {
+        return false;
+    };
+
+    let Some(daemon_plist) = PRIVILEGES_SCRIPTS_DIR.get_file("daemon.plist") else {
+        return false;
+    };
+    let Some(daemon_plist_body) = daemon_plist.contents_utf8().map(correct_app_name) else {
+        return false;
+    };
+
+    let Some(agent_plist) = PRIVILEGES_SCRIPTS_DIR.get_file("agent.plist") else {
+        return false;
+    };
+    let Some(agent_plist_body) = agent_plist.contents_utf8().map(correct_app_name) else {
+        return false;
+    };
+
+    std::thread::spawn(move || {
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(install_script_body)
+            .arg(daemon_plist_body)
+            .arg(agent_plist_body)
+            .arg(&get_active_username())
+            .status()
+        {
+            Err(e) => {
+                log::error!("run osascript failed: {}", e);
+            }
+            _ => {
+                let installed = std::path::Path::new(&agent_plist_file).exists();
+                log::info!("Agent file {} installed: {}", agent_plist_file, installed);
+                if installed {
+                    log::info!("launch server");
+                    std::process::Command::new("launchctl")
+                        .args(&["load", "-w", &agent_plist_file])
+                        .status()
+                        .ok();
+                }
+            }
+        }
+    });
     false
 }
 

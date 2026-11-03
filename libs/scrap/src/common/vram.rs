@@ -9,11 +9,12 @@ use crate::{
     hwcodec::HwCodecConfig,
     AdapterDevice, CodecFormat, EncodeInput, EncodeYuvFormat, Pixfmt,
 };
-use base::message_proto::{EncodedVideoFrame, EncodedVideoFrames, VideoFrame};
 use hbb_common::{
     anyhow::{anyhow, bail, Context},
     bytes::Bytes,
-    log, ResultType,
+    log,
+    message_proto::{EncodedVideoFrame, EncodedVideoFrames, VideoFrame},
+    ResultType,
 };
 use hwcodec::{
     common::{DataFormat, Driver, MAX_GOP},
@@ -97,7 +98,7 @@ impl EncoderApi for VRamEncoder {
         &mut self,
         frame: EncodeInput,
         ms: i64,
-    ) -> ResultType<base::message_proto::VideoFrame> {
+    ) -> ResultType<hbb_common::message_proto::VideoFrame> {
         let (texture, rotation) = frame.texture()?;
         if rotation != 0 {
             // to-do: support rotation

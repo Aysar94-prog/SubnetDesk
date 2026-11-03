@@ -1,0 +1,27 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="SubnetDesk Deploy"
+           Manufacturer="SubnetDesk"
+           Version="$(var.Version)"
+           UpgradeCode="0df6d79d-a983-4f11-a55f-d2c3f157c72c"
+           Scope="perMachine"
+           InstallerVersion="500">
+    <SummaryInformation Description="SubnetDesk remote Helper deployment utility" />
+    <Icon Id="DeployAppIcon.exe" SourceFile="$(var.DeployIconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="DeployAppIcon.exe" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of SubnetDesk Deploy is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="DEPLOYFOLDER" Name="SubnetDesk Deploy" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="DeployStartMenuDir" Name="SubnetDesk Deploy" />
+    </StandardDirectory>
+
+    <Feature Id="DeployUtility" Title="SubnetDesk Deploy" Level="1">
+      <ComponentGroupRef Id="DeployPayload" />
+    </Feature>
+
+
+  </Package>
+</Wix>

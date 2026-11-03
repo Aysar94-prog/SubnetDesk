@@ -15,6 +15,8 @@ import '../desktop/pages/server_page.dart' as desktop;
 import '../desktop/widgets/tabbar_widget.dart';
 import '../mobile/pages/server_page.dart';
 import 'model.dart';
+import 'chat_attention_state.dart';
+import 'incoming_voice_ring.dart';
 
 const kLoginDialogTag = "LOGIN";
 
@@ -27,6 +29,9 @@ class ServerModel with ChangeNotifier {
   bool _clipboardOk = false;
   bool _showElevation = false;
   bool hideCm = false;
+  bool windowsCmCollapsed = false;
+  final chatAttention = ChatAttentionState();
+  final voiceRing = IncomingVoiceRing();
   int _zeroClientLengthCounter = 0;
 
   final tabController = DesktopTabController(tabType: DesktopTabType.cm);
@@ -58,6 +63,8 @@ class ServerModel with ChangeNotifier {
   WeakReference<FFI> parent;
 
   ServerModel(this.parent) {
+    chatAttention.addListener(notifyListeners);
+    voiceRing.addListener(notifyListeners);
     timerCallback() async {
       if (desktopType == DesktopType.cm) {
         final res = await bind.cmCheckClientsLength(length: _clients.length);
@@ -328,7 +335,7 @@ class ServerModel with ChangeNotifier {
   // force
   updateClientState([String? json]) async {
     if (isTest) return;
-    var res = await bind.cmGetClientsState();
+    var res = json ?? await bind.cmGetClientsState();
     List<dynamic> clientsJson;
     try {
       clientsJson = jsonDecode(res);
@@ -350,6 +357,9 @@ class ServerModel with ChangeNotifier {
         debugPrint("Failed to decode clientJson '$clientJson', error $e");
       }
     }
+    _syncVoiceRing();
+    parent.target?.chatModel.retainIncomingSessions(_clients
+        .where((client) => !client.disconnected).map((client) => client.id).toSet());
     if (desktopType == DesktopType.cm) {
       if (_clients.isEmpty) {
         hideCmWindow();
@@ -372,6 +382,32 @@ class ServerModel with ChangeNotifier {
         _clients.add(client);
       } else {
         _clients[index].privacyMode = client.privacyMode;
+        if (isWindows && desktopType == DesktopType.cm) {
+          _clients[index].authorized = client.authorized;
+          _clients[index].isFileTransfer = client.isFileTransfer;
+          _clients[index].isTerminal = client.isTerminal;
+          _clients[index].portForward = client.portForward;
+          _clients[index].keyboard = client.keyboard;
+          _clients[index].clipboard = client.clipboard;
+          _clients[index].audio = client.audio;
+          _clients[index].file = client.file;
+          _clients[index].restart = client.restart;
+          _clients[index].recording = client.recording;
+          _clients[index].blockInput = client.blockInput;
+          _clients[index].disconnected = client.disconnected;
+          _clients[index].inVoiceCall = client.inVoiceCall;
+          _clients[index].incomingVoiceCall = client.incomingVoiceCall;
+          _clients[index].lanApprovalNonce = client.lanApprovalNonce;
+          _clients[index].lanApprovalSource = client.lanApprovalSource;
+          _clients[index].lanApprovalScope = client.lanApprovalScope;
+          _clients[index].lanApprovalTimeoutSeconds = client.lanApprovalTimeoutSeconds;
+          if (client.lanApprovalNonce.isNotEmpty && !hideCm) {
+            windowsCmCollapsed = false;
+            jumpTo(client.id);
+            showCmWindow(restore: true);
+          }
+          _syncVoiceRing();
+        }
         notifyListeners();
         return;
       }
@@ -383,8 +419,10 @@ class ServerModel with ChangeNotifier {
         _clients.removeAt(index_disconnected);
         tabController.remove(index_disconnected);
       }
+      _syncVoiceRing();
       if (desktopType == DesktopType.cm && !hideCm) {
-        showCmWindow();
+        if (isWindows) windowsCmCollapsed = false;
+        showCmWindow(restore: isWindows);
       }
       scrollToBottom();
       notifyListeners();
@@ -402,10 +440,10 @@ class ServerModel with ChangeNotifier {
         onTap: () {},
         page: desktop.buildConnectionCard(client)));
     Future.delayed(Duration.zero, () async {
-      if (!hideCm) windowOnTop(null);
+      if (!hideCm && !isWindows) windowOnTop(null);
     });
-    // Only do the hidden task when on Desktop.
-    if (isDesktop) {
+    // Windows sessions stay visible until the user minimizes the manager.
+    if (isDesktop && !isWindows) {
       cmHiddenTimer = Timer(const Duration(seconds: 3), () {
         if (!hideCm) windowManager.minimize();
         cmHiddenTimer = null;
@@ -416,6 +454,7 @@ class ServerModel with ChangeNotifier {
   }
 
   handleVoiceCall(Client client, bool accept) {
+    if (isWindows && desktopType == DesktopType.cm) voiceRing.silence(client.id);
     parent.target?.invokeMethod("cancel_notification", client.id);
     bind.cmHandleIncomingVoiceCall(id: client.id, accept: accept);
   }
@@ -476,7 +515,6 @@ class ServerModel with ChangeNotifier {
   scrollToBottom() {
     if (isDesktop) return;
     Future.delayed(Duration(milliseconds: 200), () {
-      if (!controller.hasClients) return;
       controller.animateTo(controller.position.maxScrollExtent,
           duration: Duration(milliseconds: 200),
           curve: Curves.fastLinearToSlowEaseIn);
@@ -486,10 +524,13 @@ class ServerModel with ChangeNotifier {
   void onClientRemove(Map<String, dynamic> evt) {
     try {
       final id = int.parse(evt['id'] as String);
+      chatAttention.removeSession(id);
+      voiceRing.update(id, incoming: false);
       final close = (evt['close'] as String) == 'true';
       if (_clients.any((c) => c.id == id)) {
         final index = _clients.indexWhere((client) => client.id == id);
         if (index >= 0) {
+          _clients[index].unreadChatMessageCount.value = 0;
           if (close) {
             _clients.removeAt(index);
             tabController.remove(index);
@@ -500,6 +541,7 @@ class ServerModel with ChangeNotifier {
         parent.target?.dialogManager.dismissByTag(getLoginDialogTag(id));
         parent.target?.invokeMethod("cancel_notification", id);
       }
+      parent.target?.chatModel.removeSession(id);
       if (desktopType == DesktopType.cm && _clients.isEmpty) {
         hideCmWindow();
       }
@@ -510,14 +552,12 @@ class ServerModel with ChangeNotifier {
     }
   }
 
-  /// `byOperator` false means the CM's window went away rather than a person asking for the
-  /// peers to go. The sessions end either way; only the close reason differs, and with it
-  /// whether the peer is allowed to reconnect. See `ipc::Data::CmWindowClosed`.
-  Future<void> closeAll({bool byOperator = true}) async {
-    await Future.wait(_clients.map((client) => byOperator
-        ? bind.cmCloseConnection(connId: client.id)
-        : bind.cmCloseConnectionWindow(connId: client.id)));
+  Future<void> closeAll() async {
+    await Future.wait(
+        _clients.map((client) => bind.cmCloseConnection(connId: client.id)));
     _clients.clear();
+    _syncVoiceRing();
+    parent.target?.chatModel.retainIncomingSessions({});
     tabController.state.value.tabs.clear();
     if (isAndroid) androidUpdatekeepScreenOn();
   }
@@ -534,6 +574,35 @@ class ServerModel with ChangeNotifier {
     }
   }
 
+  Future<void> onChatAttention(Map<String, dynamic> evt) async {
+    if (!isWindows || desktopType != DesktopType.cm) return;
+    final id = int.tryParse(evt['id']?.toString() ?? '');
+    final client = _clients.firstWhereOrNull((c) => c.id == id);
+    if (client == null || client.type_() != ClientType.remote ||
+        !chatAttention.receive(client.id, authorized: client.authorized,
+            connected: !client.disconnected)) return;
+    jumpTo(client.id);
+    windowsCmCollapsed = false;
+    parent.target?.chatModel.changeCurrentKey(MessageKey(client.peerId, client.id));
+    await parent.target?.chatModel.showChatPage(MessageKey(client.peerId, client.id));
+    notifyListeners();
+    // Showing an attention request must not focus its chat input or steal typing.
+    try {
+      await showCmWindow(restore: true, focus: false);
+    } catch (e) {
+      debugPrint('Failed to show the chat attention dock: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    chatAttention.removeListener(notifyListeners);
+    chatAttention.dispose();
+    voiceRing.removeListener(notifyListeners);
+    voiceRing.dispose();
+    super.dispose();
+  }
+
   void updateVoiceCallState(Map<String, dynamic> evt) {
     try {
       final client = Client.fromJson(jsonDecode(evt["client"]));
@@ -541,21 +610,40 @@ class ServerModel with ChangeNotifier {
       if (index != -1) {
         _clients[index].inVoiceCall = client.inVoiceCall;
         _clients[index].incomingVoiceCall = client.incomingVoiceCall;
+        _syncVoiceRing();
         if (client.incomingVoiceCall) {
           if (isAndroid) {
             showVoiceCallDialog(client);
           } else {
             // Has incoming phone call, let's set the window on top.
             Future.delayed(Duration.zero, () {
+              if (isWindows && desktopType == DesktopType.cm) {
+                jumpTo(client.id);
+                windowsCmCollapsed = false;
+                notifyListeners();
+                showCmWindow(restore: true);
+                return;
+              }
               windowOnTop(null);
             });
           }
         }
         notifyListeners();
+      } else if (isWindows && desktopType == DesktopType.cm) {
+        // Native state is authoritative; never authorize an unknown event here.
+        updateClientState();
       }
     } catch (e) {
       debugPrint("updateVoiceCallState failed: $e");
     }
+  }
+
+  void _syncVoiceRing() {
+    if (!isWindows || desktopType != DesktopType.cm) return;
+    voiceRing.synchronize(_clients.where((client) => IncomingVoiceRing.shouldRing(
+        authorized: client.authorized, connected: !client.disconnected,
+        incoming: client.incomingVoiceCall, inCall: client.inVoiceCall))
+        .map((client) => client.id));
   }
 
   void androidUpdatekeepScreenOn() async {
@@ -608,6 +696,10 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
+  String lanApprovalNonce = '';
+  String lanApprovalSource = '';
+  String lanApprovalScope = '';
+  int lanApprovalTimeoutSeconds = 0;
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -637,6 +729,10 @@ class Client {
     fromSwitch = json['from_switch'];
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
+    lanApprovalNonce = json['lan_approval_nonce'] ?? '';
+    lanApprovalSource = json['lan_approval_source'] ?? '';
+    lanApprovalScope = json['lan_approval_scope'] ?? '';
+    lanApprovalTimeoutSeconds = json['lan_approval_timeout_seconds'] ?? 0;
   }
 
   Map<String, dynamic> toJson() {
@@ -662,6 +758,10 @@ class Client {
     data['from_switch'] = fromSwitch;
     data['in_voice_call'] = inVoiceCall;
     data['incoming_voice_call'] = incomingVoiceCall;
+    data['lan_approval_nonce'] = lanApprovalNonce;
+    data['lan_approval_source'] = lanApprovalSource;
+    data['lan_approval_scope'] = lanApprovalScope;
+    data['lan_approval_timeout_seconds'] = lanApprovalTimeoutSeconds;
     return data;
   }
 

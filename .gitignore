@@ -15,23 +15,11 @@ src/version.rs
 cert.pfx
 *.bak
 *png
-!flutter/assets/subnetdesk-local-laptop.png
-!flutter/assets/subnetdesk-mark.png
-!flutter/assets/subnetdesk-device.png
-!flutter/assets/subnetdesk-phone.png
-!flutter/assets/subnetdesk-tablet.png
-!flutter/assets/subnetdesk-desktop.png
-!flutter/assets/subnetdesk-server.png
-!docs/design/2026-10-lan-ui/device-art-light.png
-!docs/design/2026-10-lan-ui/device-art-dark.png
-!res/subnetdesk-mark.png
 !flutter/assets/icon.png
 !assets/screenshots/device-discovery.png
 !assets/screenshots/lan-settings.png
 *svg
 !res/subnetdesk-icon.svg
-!flutter/assets/remote_toolbar/*.svg
-!docs/design/2026-10-lan-ui/remote-toolbar/*.png
 *jpg
 !assets/community/wechat-contact.jpg
 sciter.dll
@@ -73,11 +61,26 @@ vcpkg_installed
 flutter/lib/generated_plugin_registrant.dart
 libsciter.dylib
 flutter/web/
-# libdrmtap is cloned at build time by build.py (not a submodule)
-/third_party/libdrmtap/
-res/*.pkg.tar.zst
-res/pkg/
 
-# Native Sciter UI acceptance evidence
-!docs/win7/screenshots/*.png
-!src/ui/icons/*.svg
+# Local tools, build artifacts, releases, and planning sessions
+/output/
+/outputs/
+/baseline/
+/flutter/.wix/
+/.ai-planner/
+
+/tools/
+/.claude/
+/logs/
+
+# Personal settings, signing material and runtime credentials
+.env.*
+!.env.example
+!.env.sample
+**/.private/
+*.pfx
+*.p12
+*.pem
+*.key
+*.jks
+*.keystore

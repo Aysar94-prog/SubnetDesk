@@ -1,8 +1,6 @@
 lazy_static::lazy_static! {
 pub static ref T: std::collections::HashMap<&'static str, &'static str> =
     [
-        ("Export diagnostic bundle", "匯出診斷包"),
-        ("Diagnostic bundle description", "匯出最近 7 天的日誌和版本資訊，用於提交問題回報。會嘗試隱藏常見敏感資訊，請在公開上傳前檢查診斷包內容。"),
         ("Status", "狀態"),
         ("Your Desktop", "您的桌面"),
         ("desk_tip", "您可以透過此 ID 及密碼存取您的桌面"),
@@ -766,29 +764,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Show on the minimized toolbar", "在最小化工具列上顯示"),
         ("All monitors", "所有顯示器"),
         ("#{} monitor", "{}號顯示器"),
-        ("Online", "線上"),
-        ("Offline", "離線"),
-        ("Status unknown", "狀態未知"),
-        ("Last seen", "最後發現"),
-        ("Never discovered", "尚未發現此裝置"),
-        ("Try to connect", "嘗試連線"),
-        ("Refresh devices", "重新整理裝置"),
-        ("Discovery status may be delayed. You can still try to connect.", "狀態基於區域網路探索，可能有延遲；未發現不代表裝置已關機，仍可嘗試連線。"),
         ("conn-e2ee-unavailable-tip", "無法驗證端對端加密。\n遠端裝置可能仍在準備中，請稍後重試。\n如果此問題持續發生，伺服器可能不受信任。\n仍要繼續嗎？"),
-        ("The screen sharing request was declined on the remote device", "遠端裝置上的使用者拒絕了螢幕分享要求"),
-        ("The screen sharing request timed out on the remote device", "遠端裝置上的螢幕分享要求逾時了"),
-        ("RustDesk cannot reach the desktop session on the remote device, check that a desktop session is running and that RustDesk can use it", "RustDesk 無法存取遠端裝置的桌面工作階段，請確認工作階段已啟動且 RustDesk 可以使用它"),
-        ("The desktop portal on the remote device is missing a capability needed for screen sharing or remote control, its backend may not be installed", "遠端裝置上的桌面入口缺少螢幕分享或遠端控制所需的功能，可能沒有安裝它的後端"),
-        ("Screen sharing was approved on the remote device, but the PipeWire connection could not be opened", "遠端裝置上已核准螢幕分享，但無法開啟 PipeWire 連線"),
-        ("The screen sharing request ended without completing on the remote device", "遠端裝置上的螢幕分享要求已結束，但未完成"),
-        ("RustDesk could not obtain a usable screen from the XDG Desktop Portal, the PipeWire library may be too old", "RustDesk 無法從 XDG Desktop Portal 取得可用的螢幕，PipeWire 函式庫可能過舊"),
-        ("RustDesk could not load a GStreamer component needed for screen capture ({})", "RustDesk 無法載入螢幕擷取所需的 GStreamer 元件 ({})"),
-        ("Sync clipboard between sessions", "在工作階段間同步剪貼簿"),
-        ("sync-clipboard-between-sessions-tip", "在一個遠端工作階段中複製的文字或圖片也會傳送到其他已連線工作階段的剪貼簿。"),
-        ("View rotation", ""),
-        ("No rotation", ""),
-        ("Rotate 90° clockwise", ""),
-        ("Rotate 180°", ""),
-        ("Rotate 270° clockwise", ""),
     ].iter().cloned().collect();
 }

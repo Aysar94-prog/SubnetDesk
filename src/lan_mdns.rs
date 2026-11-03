@@ -130,7 +130,10 @@ pub(super) fn start_publisher() -> ResultType<()> {
     }
 }
 
-pub(super) fn spawn_browse(tx: UnboundedSender<DiscoveryPeer>) -> ResultType<()> {
+pub(super) fn spawn_browse(
+    tx: UnboundedSender<DiscoveryPeer>,
+    local_networks: Vec<crate::lan::LocalNetwork>,
+) -> ResultType<()> {
     let daemon = ServiceDaemon::new().map_err(|err| anyhow!("Failed to start mDNS: {err}"))?;
     let receiver = daemon
         .browse(SERVICE_TYPE)
@@ -160,6 +163,7 @@ pub(super) fn spawn_browse(tx: UnboundedSender<DiscoveryPeer>) -> ResultType<()>
                         service.get_port(),
                         &addresses,
                         &properties,
+                        &local_networks,
                     ) {
                         if tx.send(peer).is_err() {
                             break;
@@ -170,6 +174,8 @@ pub(super) fn spawn_browse(tx: UnboundedSender<DiscoveryPeer>) -> ResultType<()>
                 Err(_) => break,
             }
         }
+        // Closing the result channel must not depend on daemon cleanup.
+        drop(tx);
         if let Err(err) = daemon.stop_browse(SERVICE_TYPE) {
             log::debug!("Failed to stop mDNS browse: {err}");
         }
@@ -212,7 +218,6 @@ fn announcement_properties(
         ("v".to_owned(), PROTOCOL_VERSION.to_string()),
         ("name".to_owned(), safe_display_name(display_name)),
         ("os".to_owned(), normalize_platform(platform)),
-        ("device_type".to_owned(), crate::device_type::local().to_owned()),
         ("fp".to_owned(), fingerprint.to_ascii_lowercase()),
     ])
 }
@@ -223,6 +228,7 @@ fn peer_from_mdns_fields(
     port: u16,
     addresses: &[IpAddr],
     properties: &HashMap<String, String>,
+    local_ipv4_networks: &[crate::lan::LocalNetwork],
 ) -> Option<DiscoveryPeer> {
     if port == 0
         || properties
@@ -245,16 +251,7 @@ fn peer_from_mdns_fields(
         .copied()
         .filter(|address| connectable_address(*address))
         .collect::<Vec<_>>();
-    let local_ipv4_networks = default_net::get_interfaces()
-        .into_iter()
-        .flat_map(|interface| {
-            interface
-                .ipv4
-                .into_iter()
-                .map(|network| (network.addr, network.netmask))
-        })
-        .collect::<Vec<_>>();
-    addresses.sort_by_key(|address| (address_priority(*address, &local_ipv4_networks), *address));
+    addresses.sort_by_key(|address| (address_priority(*address, local_ipv4_networks), *address));
     addresses.dedup();
     let primary = addresses.first().copied()?;
     let endpoint = match primary {
@@ -287,9 +284,6 @@ fn peer_from_mdns_fields(
         fingerprint,
         hostname,
         platform,
-        device_type: crate::device_type::normalize(
-            properties.get("device_type").map(String::as_str).unwrap_or_default()
-        ).to_owned(),
         username: String::new(),
         online: true,
         ip_mac,
@@ -308,23 +302,17 @@ fn connectable_address(address: IpAddr) -> bool {
     }
 }
 
-fn address_priority(
+pub(crate) fn address_priority(
     address: IpAddr,
-    local_ipv4_networks: &[(std::net::Ipv4Addr, std::net::Ipv4Addr)],
+    local_ipv4_networks: &[crate::lan::LocalNetwork],
 ) -> u8 {
     match address {
-        IpAddr::V4(address)
-            if address.is_private()
-                && local_ipv4_networks.iter().any(|(local, netmask)| {
-                    (u32::from(*local) & u32::from(*netmask))
-                        == (u32::from(address) & u32::from(*netmask))
-                }) =>
-        {
-            0
-        }
-        IpAddr::V4(address) if address.is_private() => 1,
-        IpAddr::V6(address) if (address.segments()[0] & 0xfe00) == 0xfc00 => 2,
-        IpAddr::V4(_) => 3,
+        IpAddr::V4(address) => local_ipv4_networks.iter()
+            .filter(|(local, netmask, _)| (u32::from(*local) & u32::from(*netmask)) == (u32::from(address) & u32::from(*netmask)))
+            .map(|(_, _, priority)| *priority)
+            .min()
+            .unwrap_or(if address.is_private() { 2 } else { 4 }),
+        IpAddr::V6(address) if (address.segments()[0] & 0xfe00) == 0xfc00 => 3,
         IpAddr::V6(_) => 4,
     }
 }
@@ -441,7 +429,7 @@ mod tests {
         let properties = announcement_properties("Office PC", "Windows", REMOTE_FINGERPRINT);
         assert_eq!(
             properties.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
-            ["device_type", "fp", "name", "os", "v"]
+            ["fp", "name", "os", "v"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect()
@@ -463,6 +451,7 @@ mod tests {
             21_118,
             &addresses,
             &valid_properties(),
+            &[],
         )
         .unwrap();
 
@@ -473,20 +462,6 @@ mod tests {
         assert_eq!(peer.fingerprint, REMOTE_FINGERPRINT);
         assert!(peer.username.is_empty());
         assert!(peer.online);
-        assert!(peer.device_type.is_empty());
-    }
-
-    #[test]
-    fn resolved_peer_preserves_known_hardware_and_ignores_unknown_types() {
-        let mut properties = valid_properties();
-        let addresses = ["192.168.1.24".parse().unwrap()];
-        for (advertised, expected) in [("tablet", "tablet"), ("server", "server"), ("future", "")] {
-            properties.insert("device_type".to_owned(), advertised.to_owned());
-            let peer = peer_from_mdns_fields(
-                LOCAL_FINGERPRINT, "office-pc.local.", 21_118, &addresses, &properties,
-            ).unwrap();
-            assert_eq!(peer.device_type, expected);
-        }
     }
 
     #[test]
@@ -501,6 +476,7 @@ mod tests {
             21_118,
             &private_address,
             &properties,
+            &[],
         )
         .is_none());
 
@@ -512,6 +488,7 @@ mod tests {
             21_118,
             &private_address,
             &invalid_fingerprint,
+            &[],
         )
         .is_none());
 
@@ -523,6 +500,7 @@ mod tests {
             21_118,
             &private_address,
             &unsupported_version,
+            &[],
         )
         .is_none());
 
@@ -532,6 +510,7 @@ mod tests {
             21_118,
             &public_address,
             &properties,
+            &[],
         )
         .is_none());
     }
@@ -554,10 +533,41 @@ mod tests {
         let local_networks = [(
             "192.168.1.10".parse().unwrap(),
             "255.255.255.0".parse().unwrap(),
+            0,
         )];
         assert!(
             address_priority("192.168.1.24".parse().unwrap(), &local_networks)
                 < address_priority("10.8.0.24".parse().unwrap(), &local_networks)
         );
+    }
+
+    #[test]
+    fn current_network_mask_selects_the_matching_advertised_address() {
+        let addresses = ["10.96.239.5".parse().unwrap(), "192.168.50.101".parse().unwrap()];
+        let networks = [("192.168.48.2".parse().unwrap(), "255.255.240.0".parse().unwrap(), 0)];
+        let peer = peer_from_mdns_fields(
+            LOCAL_FINGERPRINT,
+            "laptop.local.",
+            21_118,
+            &addresses,
+            &valid_properties(),
+            &networks,
+        ).unwrap();
+        assert_eq!(peer.endpoint, "192.168.50.101:21118");
+        assert_eq!(peer.ip_mac.len(), 2);
+    }
+
+    #[test]
+    fn physical_network_wins_over_a_matching_virtual_network() {
+        let addresses = ["10.0.0.20".parse().unwrap(), "192.168.50.101".parse().unwrap()];
+        let networks = [
+            ("10.0.0.1".parse().unwrap(), "255.255.255.0".parse().unwrap(), 1),
+            ("192.168.50.2".parse().unwrap(), "255.255.255.0".parse().unwrap(), 0),
+        ];
+        let peer = peer_from_mdns_fields(
+            LOCAL_FINGERPRINT, "laptop.local.", 21_118, &addresses,
+            &valid_properties(), &networks,
+        ).unwrap();
+        assert_eq!(peer.endpoint, "192.168.50.101:21118");
     }
 }

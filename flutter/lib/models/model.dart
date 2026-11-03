@@ -17,6 +17,7 @@ import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
+import 'package:flutter_hbb/models/printer_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
@@ -38,10 +39,11 @@ import 'package:vector_math/vector_math.dart' show Vector2;
 import '../common.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
+import '../desktop/widgets/windows_lan_access_dialog.dart';
+import '../desktop/widgets/windows_file_transfer_access.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
 import 'package:flutter_hbb/utils/scale.dart';
-import 'view_rotation.dart';
 
 import 'package:flutter_hbb/generated_bridge.dart'
     if (dart.library.html) 'package:flutter_hbb/web/bridge.dart';
@@ -132,131 +134,10 @@ class FfiModel with ChangeNotifier {
   Timer? waitForImageTimer;
   RxBool waitForFirstImage = true.obs;
   bool isRefreshing = false;
-  bool _hasConnectionResponse = false;
-
-  bool get hasConnectionResponse => _hasConnectionResponse;
 
   Timer? timerScreenshot;
 
-  /// Local (client-side) view rotation in degrees: 0, 90, 180 or 270.
-  /// The remote display is never rotated; see [ViewRotation].
-  final RxInt clientRotation = 0.obs;
-
-  /// Local (client-side) panel orientation in degrees: 0, 90, 180 or 270.
-  /// This is the orientation at which the peer's physical panel is upright,
-  /// i.e. the orientation of the peer's pointer space. Input is mapped into
-  /// this space, independently of [clientRotation], which only rotates the
-  /// view.
-  final RxInt panelRotation = 0.obs;
-  bool _clientRotationLoaded = false;
-
-  /// The true (base) display rect reported by the peer, unrotated.
-  Rect? get baseRect => _rect;
-
-  /// The display rect the client currently shows. When client-side rotation
-  /// is active the width and height are swapped for 90/270 degree rotations
-  /// so all layout and input math operates in the displayed (virtual)
-  /// coordinate space. The rect origin is kept unchanged.
-  Rect? get rect {
-    final r = _rect;
-    if (r == null) {
-      return r;
-    }
-    final rotation = clientRotationValue;
-    if (rotation == ViewRotation.none || !rotation.isQuarterTurn) {
-      return r;
-    }
-    return Rect.fromLTWH(r.left, r.top, r.height, r.width);
-  }
-
-  /// Whether client-side rotation is possible for the current display set.
-  /// Rotation is only applied for a single display.
-  bool get clientRotationSupported =>
-      _rect != null && _pi.getCurDisplays().length == 1;
-
-  /// The effective view rotation: the stored value if rotation is possible
-  /// for the current display set, otherwise [ViewRotation.none].
-  ViewRotation get clientRotationValue =>
-      clientRotationSupported
-          ? ViewRotation.fromAngle(clientRotation.value)
-          : ViewRotation.none;
-
-  /// The effective panel orientation: the stored value if rotation is
-  /// possible for the current display set, otherwise [ViewRotation.none].
-  ViewRotation get panelRotationValue =>
-      clientRotationSupported
-          ? ViewRotation.fromAngle(panelRotation.value)
-          : ViewRotation.none;
-
-  /// Map a displayed (virtual) point into the peer's pointer space, using the
-  /// panel orientation as the input reference. The rect origin is preserved.
-  Offset displayedToPanelPoint(Offset p) {
-    final base = baseRect;
-    final view = clientRotationValue;
-    final panel = panelRotationValue;
-    if (base == null || view == panel) {
-      return p;
-    }
-    final local = Offset(p.dx - base.left, p.dy - base.top);
-    final f = view.toBase(local, base.size);
-    final q = panel.toVirtual(f, base.size);
-    return Offset(q.dx + base.left, q.dy + base.top);
-  }
-
-  /// Map a peer pointer-space point into the displayed (virtual) space.
-  Offset panelToDisplayedPoint(Offset p) {
-    final base = baseRect;
-    final view = clientRotationValue;
-    final panel = panelRotationValue;
-    if (base == null || view == panel) {
-      return p;
-    }
-    final local = Offset(p.dx - base.left, p.dy - base.top);
-    final f = panel.toBase(local, base.size);
-    final d = view.toVirtual(f, base.size);
-    return Offset(d.dx + base.left, d.dy + base.top);
-  }
-
-  /// Set and persist the local view rotation. [value] must be one of
-  /// 0, 90, 180 or 270; anything else is treated as 0.
-  void setClientRotation(int value) {
-    final normalized = [0, 90, 180, 270].contains(value) ? value : 0;
-    if (clientRotation.value == normalized) {
-      return;
-    }
-    clientRotation.value = normalized;
-    bind.sessionPeerOption(
-      sessionId: sessionId,
-      name: kOptionClientRotation,
-      value: normalized.toString(),
-    );
-    // Recompute fit scale/offsets for the (possibly new) displayed
-    // dimensions, and force a repaint even when the view style is unchanged.
-    parent.target?.canvasModel.updateViewStyle();
-    parent.target?.canvasModel.notifyListeners();
-    // The displayed position of the peer cursor follows the view rotation.
-    parent.target?.cursorModel.remapPanelCursor();
-  }
-
-  /// Set and persist the panel orientation used for input mapping. [value]
-  /// must be one of 0, 90, 180, 270; anything else is treated as 0.
-  void setPanelRotation(int value) {
-    final normalized = [0, 90, 180, 270].contains(value) ? value : 0;
-    if (panelRotation.value == normalized) {
-      return;
-    }
-    panelRotation.value = normalized;
-    bind.sessionPeerOption(
-      sessionId: sessionId,
-      name: kOptionPanelRotation,
-      value: normalized.toString(),
-    );
-    // The peer cursor feedback and the local pointer glyph orientation
-    // depend on the panel orientation; the view layout does not.
-    parent.target?.cursorModel.remapPanelCursor();
-    notifyListeners();
-  }
-
+  Rect? get rect => _rect;
   bool get isOriginalResolutionSet =>
       _pi.tryGetDisplayIfNotAllDisplay()?.isOriginalResolutionSet ?? false;
   bool get isVirtualDisplayResolution =>
@@ -368,7 +249,6 @@ class FfiModel with ChangeNotifier {
 
   clear() {
     _pi = PeerInfo();
-    _hasConnectionResponse = false;
     lastUserDisplay = null;
     _cancelPendingMonitorRestore();
     _secure = null;
@@ -439,7 +319,6 @@ class FfiModel with ChangeNotifier {
   }
 
   handleCachedPeerData(CachedPeerData data, String peerId) async {
-    _hasConnectionResponse = true;
     handleMsgBox(
       {
         'type': 'success',
@@ -467,9 +346,6 @@ class FfiModel with ChangeNotifier {
   StreamEventHandler startEventListener(SessionID sessionId, String peerId) {
     return (evt) async {
       var name = evt['name'];
-      if (name == 'msgbox' || name == 'peer_info') {
-        _hasConnectionResponse = true;
-      }
       if (name == 'msgbox') {
         handleMsgBox(evt, sessionId, peerId);
       } else if (name == 'toast') {
@@ -515,6 +391,8 @@ class FfiModel with ChangeNotifier {
           int.parse(evt['id'] as String),
           evt['text'] ?? '',
         );
+      } else if (name == 'chat_attention') {
+        await parent.target?.serverModel.onChatAttention(evt);
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {
@@ -612,6 +490,8 @@ class FfiModel with ChangeNotifier {
             isMobile) {
           parent.target?.recordingModel.updateStatus(evt['start'] == 'true');
         }
+      } else if (name == "printer_request") {
+        _handlePrinterRequest(evt, sessionId, peerId);
       } else if (name == 'screenshot') {
         _handleScreenshot(evt, sessionId, peerId);
       } else if (name == 'exit_relative_mouse_mode') {
@@ -701,6 +581,207 @@ class FfiModel with ChangeNotifier {
         tag: '$msgBoxType-$msgBoxTitle-$msgBoxTitle',
       );
     }
+  }
+
+  _handlePrinterRequest(
+    Map<String, dynamic> evt,
+    SessionID sessionId,
+    String peerId,
+  ) {
+    final id = evt['id'];
+    final path = evt['path'];
+    final dialogManager = parent.target!.dialogManager;
+    dialogManager.show((setState, close, context) {
+      PrinterOptions printerOptions = PrinterOptions.load();
+      final saveSettings = mainGetLocalBoolOptionSync(kKeyPrinterSave).obs;
+      final dontShowAgain = false.obs;
+      final Rx<String> selectedPrinterName = printerOptions.printerName.obs;
+      final printerNames = printerOptions.printerNames;
+      final defaultOrSelectedGroupValue =
+          (printerOptions.action == kValuePrinterIncomingJobDismiss
+                  ? kValuePrinterIncomingJobDefault
+                  : printerOptions.action)
+              .obs;
+
+      onRatioChanged(String? value) {
+        defaultOrSelectedGroupValue.value =
+            value ?? kValuePrinterIncomingJobDefault;
+      }
+
+      onSubmit() {
+        final printerName = defaultOrSelectedGroupValue.isEmpty
+            ? ''
+            : selectedPrinterName.value;
+        bind.sessionPrinterResponse(
+          sessionId: sessionId,
+          id: id,
+          path: path,
+          printerName: printerName,
+        );
+        if (saveSettings.value || dontShowAgain.value) {
+          bind.mainSetLocalOption(key: kKeyPrinterSelected, value: printerName);
+          bind.mainSetLocalOption(
+            key: kKeyPrinterIncomingJobAction,
+            value: defaultOrSelectedGroupValue.value,
+          );
+        }
+        if (dontShowAgain.value) {
+          mainSetLocalBoolOption(kKeyPrinterAllowAutoPrint, true);
+        }
+        close();
+      }
+
+      onCancel() {
+        if (dontShowAgain.value) {
+          bind.mainSetLocalOption(
+            key: kKeyPrinterIncomingJobAction,
+            value: kValuePrinterIncomingJobDismiss,
+          );
+        }
+        close();
+      }
+
+      final printerItemHeight = 30.0;
+      final selectionAreaHeight =
+          printerItemHeight * min(8.0, max(printerNames.length, 3.0));
+      final content = Column(
+        children: [
+          Text(translate('print-incoming-job-confirm-tip')),
+          Row(
+            children: [
+              Obx(
+                () => Radio<String>(
+                  value: kValuePrinterIncomingJobDefault,
+                  groupValue: defaultOrSelectedGroupValue.value,
+                  onChanged: onRatioChanged,
+                ),
+              ),
+              GestureDetector(
+                child: Text(translate('use-the-default-printer-tip')),
+                onTap: () => onRatioChanged(kValuePrinterIncomingJobDefault),
+              ),
+            ],
+          ),
+          Column(
+            children: [
+              Row(
+                children: [
+                  Obx(
+                    () => Radio<String>(
+                      value: kValuePrinterIncomingJobSelected,
+                      groupValue: defaultOrSelectedGroupValue.value,
+                      onChanged: onRatioChanged,
+                    ),
+                  ),
+                  GestureDetector(
+                    child: Text(translate('use-the-selected-printer-tip')),
+                    onTap: () =>
+                        onRatioChanged(kValuePrinterIncomingJobSelected),
+                  ),
+                ],
+              ),
+              SizedBox(
+                height: selectionAreaHeight,
+                width: 500,
+                child: ListView.builder(
+                  itemBuilder: (context, index) {
+                    return Obx(
+                      () => GestureDetector(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color:
+                                selectedPrinterName.value == printerNames[index]
+                                    ? (defaultOrSelectedGroupValue.value ==
+                                            kValuePrinterIncomingJobSelected
+                                        ? MyTheme.button
+                                        : MyTheme.button.withOpacity(0.5))
+                                    : Theme.of(context).cardColor,
+                            borderRadius: BorderRadius.all(
+                              Radius.circular(5.0),
+                            ),
+                          ),
+                          key: ValueKey(printerNames[index]),
+                          height: printerItemHeight,
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding: const EdgeInsets.only(left: 10.0),
+                              child: Text(
+                                printerNames[index],
+                                style: TextStyle(fontSize: 14),
+                              ),
+                            ),
+                          ),
+                        ),
+                        onTap: defaultOrSelectedGroupValue.value ==
+                                kValuePrinterIncomingJobSelected
+                            ? () {
+                                selectedPrinterName.value = printerNames[index];
+                              }
+                            : null,
+                      ),
+                    );
+                  },
+                  itemCount: printerNames.length,
+                ),
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              Obx(
+                () => Checkbox(
+                  value: saveSettings.value,
+                  onChanged: (value) {
+                    if (value != null) {
+                      saveSettings.value = value;
+                      mainSetLocalBoolOption(kKeyPrinterSave, value);
+                    }
+                  },
+                ),
+              ),
+              GestureDetector(
+                child: Text(translate('save-settings-tip')),
+                onTap: () {
+                  saveSettings.value = !saveSettings.value;
+                  mainSetLocalBoolOption(kKeyPrinterSave, saveSettings.value);
+                },
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              Obx(
+                () => Checkbox(
+                  value: dontShowAgain.value,
+                  onChanged: (value) {
+                    if (value != null) {
+                      dontShowAgain.value = value;
+                    }
+                  },
+                ),
+              ),
+              GestureDetector(
+                child: Text(translate('dont-show-again-tip')),
+                onTap: () {
+                  dontShowAgain.value = !dontShowAgain.value;
+                },
+              ),
+            ],
+          ),
+        ],
+      );
+      return CustomAlertDialog(
+        title: Text(translate('Incoming Print Job')),
+        content: content,
+        actions: [
+          dialogButton('OK', onPressed: onSubmit),
+          dialogButton('Cancel', onPressed: onCancel),
+        ],
+        onSubmit: onSubmit,
+        onCancel: onCancel,
+      );
+    });
   }
 
   _handleUseTextureRender(
@@ -795,43 +876,6 @@ class FfiModel with ChangeNotifier {
       await parent.target?.canvasModel.updateViewStyle(
         refreshMousePos: updateCursorPos,
       );
-      if (!_clientRotationLoaded) {
-        // Load the per-peer persisted rotations once the session is
-        // established, so previously chosen rotations apply from the first
-        // frame. The panel orientation falls back to the view rotation when
-        // unset, keeping the legacy behavior where input follows the view.
-        _clientRotationLoaded = true;
-        bind.sessionGetPeerOption(
-          sessionId: sessionId,
-          name: kOptionClientRotation,
-        ).then((value) {
-          final saved = int.tryParse(value) ?? 0;
-          if ([0, 90, 180, 270].contains(saved) &&
-              saved != clientRotation.value) {
-            clientRotation.value = saved;
-            parent.target?.canvasModel.updateViewStyle();
-            parent.target?.canvasModel.notifyListeners();
-          }
-          bind.sessionGetPeerOption(
-            sessionId: sessionId,
-            name: kOptionPanelRotation,
-          ).then((panelValue) {
-            final savedPanel = int.tryParse(panelValue ?? '') ?? -1;
-            if ([0, 90, 180, 270].contains(savedPanel)) {
-              panelRotation.value = savedPanel;
-            } else {
-              panelRotation.value = clientRotation.value;
-              bind.sessionPeerOption(
-                sessionId: sessionId,
-                name: kOptionPanelRotation,
-                value: panelRotation.value.toString(),
-              );
-            }
-            parent.target?.cursorModel.remapPanelCursor();
-            notifyListeners();
-          });
-        });
-      }
       _updateSessionWidthHeight(sessionId);
 
       // Keep pointer lock center in sync when using relative mouse mode.
@@ -942,6 +986,11 @@ class FfiModel with ChangeNotifier {
     final text = evt['text'];
     final link = evt['link'];
 
+    // A lost/restarted remote connection starts a fresh chat on reconnect.
+    if (title == 'Connection Error' || type == 'restarting' || type == 'restarting-show') {
+      parent.target?.chatModel.resetClientMode();
+    }
+
     // Disable relative mouse mode on any error-type message to ensure cursor is released.
     // This includes connection errors, session-ending messages, elevation errors, etc.
     // Safety: releasing pointer lock on errors prevents the user from being stuck.
@@ -952,12 +1001,35 @@ class FfiModel with ChangeNotifier {
       parent.target?.inputModel.setRelativeMouseMode(false);
     }
 
-    if (type == 'lan-login-required') {
+    if (type == 'lan-access-pending') {
+      dialogManager.dismissAll();
+      dialogManager.showLoading(translate('Waiting for receiver approval (up to 60 seconds)'), onCancel: closeConnection);
+    } else if (type == 'lan-login-required') {
+      if (isWindows && parent.target?.connType == ConnType.fileTransfer) {
+        dialogManager.dismissAll();
+        dialogManager.show((setState, close, context) => WindowsLanAccessDialog(
+          endpoint: peerId, title: 'File transfer access', allowSavedPassword: false,
+          translateText: translate,
+          onCancel: () { close(); closeConnection(id: peerId); },
+          onSubmit: (selection) async {
+            final error = await submitWindowsFileAccessPayload(selection.payload,
+              passwordLogin: (password, remember) => bind.sessionLoginLan(
+                sessionId: sessionId, username: '', password: password, remember: remember),
+              optionalLogin: (method, code) => bind.sessionLoginOptionalFileAccess(
+                sessionId: sessionId, accessMethod: method, temporaryCode: code));
+            if (error.isEmpty) {
+              close();
+              dialogManager.showLoading(translate('Logging in...'),
+                onCancel: () => closeConnection(id: peerId));
+            }
+            return error;
+          }));
+        return;
+      }
       enterLanLoginDialog(
         sessionId,
         dialogManager,
-        'Enter the access username and password configured on the remote device.',
-        credentialsRejected: title == 'Username or password is incorrect',
+        'Enter the unattended access password configured on the remote device.',
       );
     } else if (type == 're-input-password') {
       wrongPasswordDialog(sessionId, dialogManager, type, title, text);
@@ -1185,6 +1257,7 @@ class FfiModel with ChangeNotifier {
     bool _manual,
   ) {
     // Disable relative mouse mode before reconnecting to ensure cursor is released.
+    parent.target?.chatModel.resetClientMode();
     parent.target?.inputModel.setRelativeMouseMode(false);
     _cancelPendingMonitorRestore();
     bind.sessionReconnect(sessionId: sessionId);
@@ -2355,27 +2428,13 @@ class CanvasModel with ChangeNotifier {
 
   updateSize() => _size = getSize();
 
-  /// [knownSize], when given, is the real available size as measured by a
-  /// `LayoutBuilder` wrapping the canvas (see `_ViewStyleUpdater` in
-  /// remote_page.dart) -- a size Flutter's own layout system guarantees is
-  /// correct for whatever is actually allocated to the canvas. [getSize]'s
-  /// own MediaQuery + topToEdge/leftToEdge arithmetic is a separate,
-  /// independent estimate of the same thing; using the measured size
-  /// directly here avoids relying on that estimate matching it. (Confirmed
-  /// via a temporary debug log, since removed, that the two never actually
-  /// disagreed on the one hardware combination this was suspected on --
-  /// this is a real correctness improvement regardless, just not the cause
-  /// of that particular bug.)
-  updateViewStyle({refreshMousePos = true, notify = true, Size? knownSize}) async {
+  updateViewStyle({refreshMousePos = true, notify = true}) async {
     final style = await bind.sessionGetViewStyle(sessionId: sessionId);
     if (style == null) {
       return;
     }
-    if (knownSize != null) {
-      _size = knownSize;
-    } else {
-      updateSize();
-    }
+
+    updateSize();
     final displayWidth = getDisplayWidth();
     final displayHeight = getDisplayHeight();
     final viewStyle = ViewStyle(
@@ -2521,7 +2580,6 @@ class CanvasModel with ChangeNotifier {
   }
 
   void updateLocalCursor(double x, double y) {
-    if (parent.target?.ffiModel.viewOnly == true) return;
     // If keyboard is not permitted, do not move cursor when mouse is moving.
     if (parent.target != null && parent.target!.ffiModel.keyboard) {
       // Draw cursor if is not desktop.
@@ -2877,7 +2935,7 @@ class CursorData {
     required this.width,
     required this.height,
   })  : hotx = hotxOrigin * scale,
-        hoty = hotyOrigin * scale;
+        hoty = hotxOrigin * scale;
 
   int _doubleToInt(double v) => (v * 10e6).round().toInt();
 
@@ -3539,18 +3597,14 @@ class CursorModel with ChangeNotifier {
     }
   }
 
-  /// Update the cursor position. The peer reports the cursor in its pointer
-  /// space (the panel orientation, see [FfiModel.panelRotationValue]); the
-  /// drawn position is mapped into the displayed space and re-mapped when the
-  /// view or panel rotation changes.
+  /// Update the cursor position.
   updateCursorPosition(Map<String, dynamic> evt, String id) async {
     if (!isConnIn2Secs()) {
       gotMouseControl = false;
       _lastPeerMouse = DateTime.now();
     }
-    _panelX = double.parse(evt['x']);
-    _panelY = double.parse(evt['y']);
-    _mapPanelCursor(notify: false);
+    _x = double.parse(evt['x']);
+    _y = double.parse(evt['y']);
     try {
       RemoteCursorMovedState.find(id).value = true;
     } catch (e) {
@@ -3558,33 +3612,6 @@ class CursorModel with ChangeNotifier {
     }
     notifyListeners();
   }
-
-  /// The last cursor position reported by the peer, in its pointer space.
-  double? _panelX;
-  double? _panelY;
-
-  void _mapPanelCursor({bool notify = true}) {
-    final px = _panelX;
-    final py = _panelY;
-    if (px == null || py == null) {
-      return;
-    }
-    final ffiModel = parent.target?.ffiModel;
-    if (ffiModel == null) {
-      _x = px;
-      _y = py;
-    } else {
-      final d = ffiModel.panelToDisplayedPoint(Offset(px, py));
-      _x = d.dx;
-      _y = d.dy;
-    }
-    if (notify) {
-      notifyListeners();
-    }
-  }
-
-  /// Re-map the last peer cursor report for the current view/panel rotations.
-  remapPanelCursor() => _mapPanelCursor();
 
   updateDisplayOrigin(double x, double y, {updateCursorPos = true}) {
     _displayOriginX = x;
@@ -3897,7 +3924,6 @@ class FFI {
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
     if (isNewPeer) {
-      // ignore: unused_local_variable
       final addRes = bind.sessionAddSync(
         sessionId: sessionId,
         id: id,
@@ -3908,6 +3934,22 @@ class FFI {
         isTerminal: isTerminal,
         password: password ?? '',
       );
+      if (addRes.isNotEmpty) {
+        // The caller installs its Connecting overlay after start() returns.
+        // Deliver this like an async native event so it replaces that overlay.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          Future.microtask(() {
+            if (closed) return;
+            ffiModel.handleMsgBox({
+              'type': 'error',
+              'title': 'Connection Error',
+              'text': addRes,
+              'link': '',
+            }, sessionId, id);
+          });
+        });
+        return;
+      }
     } else if (display != null) {
       if (displays == null) {
         debugPrint(

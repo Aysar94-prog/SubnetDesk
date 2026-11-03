@@ -16,16 +16,23 @@ mod client;
 pub mod common;
 #[cfg(not(any(target_os = "ios")))]
 pub mod ipc;
-#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
-mod diagnostics;
-mod device_type;
 mod lan;
+mod discovery_coordinator;
+mod cm_state_snapshot;
 mod lan_identity;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(any(target_os = "android", test))]
+mod android_credentials;
+#[cfg(not(target_os = "ios"))]
 mod lan_mdns;
 mod lan_protocol;
-mod lan_ui;
-mod host_permissions;
+mod lan_access_policy;
+mod file_transfer_access;
+#[cfg(all(test, feature = "flutter"))]
+mod file_transfer_access_session_tests;
+mod lan_access;
+mod chat_attention;
+mod private_build;
+mod camera_access;
 mod lan_server;
 #[cfg(all(
     feature = "flutter",
@@ -50,8 +57,6 @@ use common::*;
 mod clipboard;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod core_main;
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod desktop_runtime;
 mod lang;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod port_forward;
@@ -59,6 +64,9 @@ mod port_forward;
 #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub mod plugin;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod tray;
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod whiteboard;

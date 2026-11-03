@@ -1,10 +1,13 @@
 #include <windows.h>
 #include <wtsapi32.h>
 #include <tlhelp32.h>
+#include <comdef.h>
+#include <xpsprint.h>
 #include <cstdio>
 #include <cstdint>
 #include <intrin.h>
 #include <string>
+#include <memory>
 #include <shlobj.h> // NOLINT(build/include_order)
 #include <userenv.h>
 #include <versionhelpers.h>
@@ -215,65 +218,6 @@ extern "C"
             CloseHandle(hProcess);
         }
         return bResult;
-    }
-
-    // Launch the secure-desktop input/capture agent in this interactive session.
-    // No service is created, and no SYSTEM/LocalService profile is loaded.
-    HANDLE LaunchSessionAgentWin(LPCWSTR command, DWORD session, DWORD *error)
-    {
-        struct TokenGuard {
-            HANDLE handle = NULL;
-            TOKEN_PRIVILEGES previous{};
-            bool restore = false;
-            ~TokenGuard() {
-                if (restore) AdjustTokenPrivileges(handle, FALSE, &previous, 0, NULL, NULL);
-                if (handle) CloseHandle(handle);
-            }
-        } caller, source, primary;
-        struct HandleGuard {
-            HANDLE handle = NULL;
-            ~HandleGuard() { if (handle) CloseHandle(handle); }
-        } process;
-        *error = ERROR_SUCCESS;
-        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &caller.handle)) {
-            *error = GetLastError(); return NULL;
-        }
-        TOKEN_PRIVILEGES privileges{};
-        privileges.PrivilegeCount = 1;
-        privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        if (!LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &privileges.Privileges[0].Luid)) {
-            *error = GetLastError(); return NULL;
-        }
-        DWORD previous_size = sizeof(caller.previous);
-        SetLastError(ERROR_SUCCESS);
-        if (!AdjustTokenPrivileges(caller.handle, FALSE, &privileges, sizeof(caller.previous), &caller.previous, &previous_size)
-            || GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
-            *error = ERROR_PRIVILEGE_NOT_HELD; return NULL;
-        }
-        caller.restore = true;
-        const DWORD pid = GetLogonPid(session, FALSE);
-        if (!pid) { *error = ERROR_NO_SUCH_LOGON_SESSION; return NULL; }
-        process.handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!process.handle || !OpenProcessToken(process.handle, TOKEN_DUPLICATE | TOKEN_QUERY, &source.handle)) {
-            *error = GetLastError(); return NULL;
-        }
-        if (!DuplicateTokenEx(source.handle, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &primary.handle)) {
-            *error = GetLastError(); return NULL;
-        }
-        std::wstring mutable_command(command);
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        startup.lpDesktop = const_cast<LPWSTR>(L"winsta0\\default");
-        PROCESS_INFORMATION child{};
-        LPWCH environment = GetEnvironmentStringsW();
-        if (!environment) { *error = GetLastError(); return NULL; }
-        const BOOL started = CreateProcessWithTokenW(primary.handle, 0, NULL, &mutable_command[0],
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, environment, NULL, &startup, &child);
-        const DWORD failure = started ? ERROR_SUCCESS : GetLastError();
-        FreeEnvironmentStringsW(environment);
-        if (!started) { *error = failure; return NULL; }
-        CloseHandle(child.hThread);
-        return child.hProcess;
     }
 
     bool is_windows_server()
@@ -636,6 +580,27 @@ extern "C"
         return rdp_or_console;
     }
 
+    // Optional interactive access fails closed on unknown/locked sessions.
+    BOOL is_session_known_unlocked(DWORD session_id)
+    {
+        if (session_id == 0 || session_id == 0xFFFFFFFF) return FALSE;
+        PWTSINFOEXW info = NULL;
+        DWORD bytes = 0;
+        BOOL unlocked = TRUE;
+        if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id,
+                WTSSessionInfoEx, (LPWSTR *)&info, &bytes)) {
+            if (info && bytes >= sizeof(WTSINFOEXW) && info->Level == 1) {
+                if (info->Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK) {
+                    unlocked = FALSE;
+                } else if (info->Data.WTSInfoExLevel1.SessionState != WTSActive) {
+                    unlocked = FALSE;
+                }
+            }
+        }
+        if (info) WTSFreeMemory(info);
+        return unlocked;
+    }
+
     BOOL is_session_locked(DWORD session_id)
     {
         if (session_id == 0xFFFFFFFF) {
@@ -948,3 +913,167 @@ extern "C"
         return isRunning;
     }
 } // end of extern "C"
+
+// Remote printing 
+extern "C"
+{
+// Dynamic loading of XPS Print functions
+typedef HRESULT(WINAPI *StartXpsPrintJobFunc)(
+    LPCWSTR printerName,
+    LPCWSTR jobName,
+    LPCWSTR outputFileName,
+    HANDLE progressEvent,
+    HANDLE completionEvent,
+    UINT8* printablePagesOn,
+    UINT32 printablePagesOnCount,
+    IXpsPrintJob** xpsPrintJob,
+    IXpsPrintJobStream** documentStream,
+    IXpsPrintJobStream** printTicketStream);
+
+static HMODULE xpsPrintModule = nullptr;
+static StartXpsPrintJobFunc StartXpsPrintJobPtr = nullptr;
+
+static bool InitXpsPrint()
+{
+    if (xpsPrintModule == nullptr)
+    {
+        xpsPrintModule = LoadLibraryA("XpsPrint.dll");
+        if (xpsPrintModule == nullptr)
+        {
+            flog("Failed to load XpsPrint.dll. Error: %d\n", GetLastError());
+            return false;
+        }
+        
+        StartXpsPrintJobPtr = (StartXpsPrintJobFunc)GetProcAddress(xpsPrintModule, "StartXpsPrintJob");
+        if (StartXpsPrintJobPtr == nullptr)
+        {
+            flog("Failed to get StartXpsPrintJob function. Error: %d\n", GetLastError());
+            FreeLibrary(xpsPrintModule);
+            xpsPrintModule = nullptr;
+            return false;
+        }
+    }
+    return true;
+}
+#pragma warning(push)
+#pragma warning(disable : 4995)
+
+#define PRINT_XPS_CHECK_HR(hr, msg)                      \
+    if (FAILED(hr))                                      \
+    {                                                    \
+        _com_error err(hr);                              \
+        flog("%s Error: %s\n", msg, err.ErrorMessage()); \
+        return -1;                                       \
+    }
+
+    int PrintXPSRawData(LPWSTR printerName, BYTE *rawData, ULONG dataSize)
+    {
+        // Check if XPS Print DLL is available
+        if (!InitXpsPrint())
+        {
+            flog("XPS Print functionality not available on this system\n");
+            return -1;
+        }
+
+        BOOL isCoInitializeOk = FALSE;
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (hr == RPC_E_CHANGED_MODE)
+        {
+            hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        }
+        if (hr == S_OK)
+        {
+            isCoInitializeOk = TRUE;
+        }
+        std::shared_ptr<int> coInitGuard(nullptr, [isCoInitializeOk](int *) {
+            if (isCoInitializeOk) CoUninitialize();
+        });
+
+        IXpsOMObjectFactory *xpsFactory = nullptr;
+        hr = CoCreateInstance(
+            __uuidof(XpsOMObjectFactory),
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            __uuidof(IXpsOMObjectFactory),
+            reinterpret_cast<LPVOID *>(&xpsFactory));
+        PRINT_XPS_CHECK_HR(hr, "Failed to create XPS object factory.");
+        std::shared_ptr<IXpsOMObjectFactory> xpsFactoryGuard(
+            xpsFactory,
+            [](IXpsOMObjectFactory *xpsFactory) {
+                xpsFactory->Release();
+        });
+
+        HANDLE completionEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+        if (completionEvent == nullptr)
+        {
+            flog("Failed to create completion event. Last error: %d\n", GetLastError());
+            return -1;
+        }
+        std::shared_ptr<HANDLE> completionEventGuard(
+            &completionEvent,
+            [](HANDLE *completionEvent) {
+                CloseHandle(*completionEvent);
+        });
+
+        IXpsPrintJob *job = nullptr;
+        IXpsPrintJobStream *jobStream = nullptr;
+        // `StartXpsPrintJob()` is deprecated, but we still use it for compatibility.
+        // We may change to use the `Print Document Package API` in the future.
+        // https://learn.microsoft.com/en-us/windows/win32/printdocs/xpsprint-functions
+        hr = StartXpsPrintJobPtr(
+            printerName,
+            L"Print Job 1",
+            nullptr,
+            nullptr,
+            completionEvent,
+            nullptr,
+            0,
+            &job,
+            &jobStream,
+            nullptr);
+        PRINT_XPS_CHECK_HR(hr, "Failed to start XPS print job.");
+
+        std::shared_ptr<IXpsPrintJobStream> jobStreamGuard(jobStream, [](IXpsPrintJobStream *jobStream) {
+                jobStream->Release();
+        });
+        BOOL jobOk = FALSE;
+        std::shared_ptr<IXpsPrintJob> jobGuard(job, [&jobOk](IXpsPrintJob* job) {
+            if (jobOk == FALSE)
+            {
+                job->Cancel();
+            }
+            job->Release();
+        });
+
+        DWORD bytesWritten = 0;
+        hr = jobStream->Write(rawData, dataSize, &bytesWritten);
+        PRINT_XPS_CHECK_HR(hr, "Failed to write data to print job stream.");
+
+        hr = jobStream->Close();
+        PRINT_XPS_CHECK_HR(hr, "Failed to close print job stream.");
+
+        // Wait about 5 minutes for the print job to complete.
+        DWORD waitMillis = 300 * 1000;
+        DWORD waitResult = WaitForSingleObject(completionEvent, waitMillis);
+        if (waitResult != WAIT_OBJECT_0)
+        {
+            flog("Wait for print job completion failed. Last error: %d\n", GetLastError());
+            return -1;
+        }
+        jobOk = TRUE;
+
+        return 0;
+    }
+
+    void CleanupXpsPrint()
+    {
+        if (xpsPrintModule != nullptr)
+        {
+            FreeLibrary(xpsPrintModule);
+            xpsPrintModule = nullptr;
+            StartXpsPrintJobPtr = nullptr;
+        }
+    }
+
+#pragma warning(pop)
+}

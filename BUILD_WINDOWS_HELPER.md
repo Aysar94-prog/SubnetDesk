@@ -1,0 +1,176 @@
+# Local Windows helper build checkpoint
+
+## Private1.3.5/build83:2026-10-09
+
+Current source85b9941/807f718 + patched commonb56ada4. Historical commands/state
+below describe earlier versions and must not override this section or current status.
+Regenerate ignored FRB1.80.1 outputs for mainSetUnattendedAccess before rebuilding.
+Windows requires FULL native rebuild, not FrontendOnly:
+`build-private-helper.ps1 -BuildName 1.3.5 -BuildNumber 83` (native release features
+flutter,hwcodec,vram; no software-update). Flutter build windows --release --no-pub
+--build-name 1.3.5 --build-number 83; explicit version is1.3.5+83.
+
+Verification: -AccessTest12 PASS; fresh native test executable password_only_contract_tests3,
+android_credentials4, private_build3, camera_access3, lan_protocol6 PASS. -ProtocolTest4
+and -CommonPasswordTest1 PASS; Flutter101 PASS; analyzer no errors/60 legacy warning/info.
+Do not run overlapping Windows scripts while one owns the scoped S: mapping. Android
+build uses separate physical tool/target paths. Keep .private/signing material out of archives.
+
+Code now mounts on actual normal main sidebar as well as incoming-only home. Native
+interactive listener initializes/rotates code, not UI polling. Settings > General >
+Unattended access is password-only; Connection approval separately enables manual requests.
+Password-only wire3 needs positive encrypted version1 capability boolean4; no hidden
+account/old-peer fallback. Existing explicit legacy method0 profile support is retained.
+No OS service/prelogin/firewall/security expansion. Original service remains Stopped/Auto.
+Temporary codes unavailable while receiver stopped/locked/noninteractive; manual opt-in
+resets off on restart. Device/UI/paired acceptance is distinct from automated tests.
+
+Stage/package with package-ring79-helper.ps1 -BuildName 1.3.5 -BuildNumber 83, then -Archives
+after clean local commits. Include patched submodules/generated bridge and license/notices;
+never substitute build82 binaries or claim historical192.168.1.61 was remotely updated.
+
+## Incoming ringtone build79:2026-10-08
+
+Windows frontend/runner-only repair. Backend1.3.3 and Android APK unchanged.
+Use outputs/SubnetDesk-helper-cm/checks/build-private-helper.ps1 with
+`-FrontendOnly -BuildName 1.3.3 -BuildNumber 79`. FrontendOnly verifies the existing
+no-updater DLL hash9054FD39049AF4C52CCE0D7DB86F82D53A9EE85EFA59552F68958BDC62F2D570
+and skips Rust build/tests; never substitute a software-update-feature test DLL.
+Native waveform and command-line tests: configure/build/ctest the runner/tests CMake
+project with Visual Studio17 2022 and an explicit matching generator instance (the old
+cached native-cmake directory incorrectly points a VS17 generator at a VS18 instance).
+Fresh checks/native-ring-cmake79 passes2/2 with /W4 /WX.
+Build file version1.3.3+79 is distinct from frozen1.3.3+78; Rust CLI/UI still reports1.3.3.
+Dedicated memory buffer has static lifetime during asynchronous PlaySound; no sound scheme
+lookup, no SND_SYSTEM/volume override. Real audible test is separate from automated tests.
+
+## Private1.3.3+78 camera-removal checkpoint:2026-10-08
+
+This version removes View camera entry points and rejects camera sessions natively while
+retaining screen/control and voice. Camera FFI signatures remain for compatibility, but deny
+camera requests before endpoint parsing/registration; no bridge regeneration required here.
+Windows frontend release and Flutter65/65 pass. Native camera3/3 and updater4/4 (feature enabled)
+pass. Final no-updater native release and Flutter release PASS; Flutter65/65 rerun PASS.
+Physical acceptance remains separate, including Windows Firewall permission handled by user.
+build-private-helper.ps1 defaults to1.3.3+78;
+package-private-helper.ps1 stages a new1.3.3 folder and matched source archive, preserving1.3.2.
+Use -PolicyTest for updater-feature and camera/session-constructor tests. Normal release omits
+software-update. Source archive must include src/camera_access.rs and patched common source.
+Android dependency preparation uses scoped SDK36/NDKr28c/Temurin17, with no system PATH change.
+Its native/APK build is not yet verified; do not reuse upstream native libraries as a new build.
+Candidate Gradle alone pins NDK28.2.13676358. Scoped cargo-ndk3.1.2 matches upstream CI.
+Windows-host libsodium-sys0.2.7 requires a separately cross-built Android archive via
+SODIUM_LIB_DIR, not its bundled Windows library; build scripts explicitly gate this prerequisite.
+
+## Private1.3.2+77 checkpoint:2026-10-08
+
+User approved permanent updater shutdown, chat buzzer and Windows incoming voice ring.
+Private release command omits software-update:
+`cargo build --locked --features flutter,hwcodec,vram --lib --release`.
+An immutable policy still blocks scheduler/preferences/check/download/install when that
+feature is accidentally compiled. Windows legacy --update/install paths are blocked too.
+Flutter About no longer registers update events or creates updater controls.
+Full Flutter65/65 pass; final native policy tests/build/package/runtime gates are separate.
+Script: outputs/SubnetDesk-helper-cm/checks/build-private-helper.ps1; `-PolicyTest` deliberately
+compiles software-update and exercises its public operations without performing updates.
+Side-by-side Android package switch is `-PsubnetdeskHelperCandidate=true`, debug-signed
+and clearly labelled SubnetDesk Helper; original signer/app/data are not touched.
+Android native/APK build and credential/access-mode implementation remain pending.
+
+Bridge generation is required for the new request API. Use FRB1.80.1 with RUST_LOG=info:
+`flutter_rust_bridge_codegen --rust-input src/flutter_ffi.rs
+--dart-output flutter/lib/generated_bridge.dart
+--c-output flutter/macos/Runner/bridge_generated.h --llvm-path <tools>/llvm
+--skip-add-mod-to-lib --no-build-runner --skip-deps-check`.
+Generated bridge files are ignored in Git; corresponding-source packaging includes the
+matching generated outputs explicitly. hbb_common now contains the local optional
+ChatAttention event patch; its original pin alone no longer reproduces this build.
+The upstream handshake/password authorization contract is unchanged by the buzzer.
+Historical commands/evidence below describe previous1.3.1 candidates, not current policy.
+
+## Current runner repair: 2026-10-08
+
+User authorized implementation after the first candidate failed live incoming dock acceptance.
+Native runner argument trim now preserves the final character and handles empty arguments.
+Native production-header regression: old0/17 -> fixed17/17; launch policy2/2 rechecked.
+Rust package1.3.1, Flutter1.3.1+76: local test candidate, not official upstream1.3.1.
+Full rebuild completed: Rust release exit0 (46 existing warnings), Flutter Release exit0,
+Flutter53/53; CTest1/1 and launch policy2/2. Reproducible local orchestration is
+`D:\LAN-Messenger\outputs\SubnetDesk-helper-cm\checks\build-runner-fix.ps1`.
+It imports MSVC2022 environment in-process, checks/maps unused S:, builds Rust with locked
+dependencies and original full features, builds Flutter with --no-pub and explicit version,
+runs Flutter tests, and removes only its own validated S: mapping. No global PATH change.
+Native test-only mode: `-NativeTestsOnly`. Portable CMake/CTest instructions are under
+flutter/windows/runner/tests/README.md. Keep native runtime acceptance separate from tests.
+Original installed service is now Stopped/Auto with explicit user approval; installed files
+remain untouched. New1.3.1+76 candidate switched in at09:47:38/PID4052 and owns TCP21118.
+Direct --cm reaches Flutter CM initialization instead of immediate exit1. With no session,
+it later closes consistent with existing6s idle policy. Actual incoming dock acceptance remains
+pending user reconnect; native startup is not visual/session acceptance. Reboot may restore
+old installed service. Final staging renames upstream-built rustdesk.exe to SubnetDesk.exe,
+copies original auxiliary resources without installing drivers, and checks rebuilt DLL hashes.
+Older build observations below are historical.
+
+Source changes are Windows-only and committed locally; the 2026-10-08 candidate is fully built
+but not accepted against a real session. Do not replace the installed
+SubnetDesk without user direction. Do not combine this application
+with LAN Messenger or use its Android signing key.
+
+## Existing environment
+
+- Source: `D:\LAN-Messenger\reference\SubnetDesk-v1.3.0\source\zibo-chen-SubnetDesk-1d3ac5a`.
+- Tools: `D:\LAN-Messenger\reference\SubnetDesk-v1.3.0\tools`, mapped as `S:`.
+- Scoped Cargo/Rustup paths: `S:\cargo`, `S:\rustup`.
+- PUB_CACHE: `D:\LAN-Messenger\reference\SubnetDesk-v1.3.0\tools\pub-cache`.
+- VCPKG_ROOT: `S:\vcpkg`; VCPKG_INSTALLED_ROOT: `S:\native-installed`.
+  `vcpkg/installed` junction also points at native-installed for upstream magnum-opus.
+- LIBCLANG_PATH: `S:\llvm\bin`.
+- Rust 1.82.0, Flutter 3.44.1/Dart 3.12.1, FRB codegen 1.80.1, LLVM 15.0.6.
+- Original exact hbb_common submodule is initialized and unchanged.
+
+If `S:` is absent after restart, recreate it only after confirming the drive is unused.
+Never remap an existing user drive. Environment variables are per-build, not global changes.
+
+## Build ordering
+
+1. Finish the manifest native install at pinned baseline
+   `120deac3062162151622ca4860575a33844ba10b`:
+   `S:\vcpkg\vcpkg.exe install --triplet x64-windows-static --host-triplet x64-windows-static
+   --x-manifest-root=<source> --x-install-root=S:\native-installed --disable-metrics`.
+2. Generated Rust/Dart bridge already exists locally and is Git-ignored. If regeneration is
+   needed, use the upstream bridge workflow's command with `--llvm-path S:\llvm`,
+   `--skip-add-mod-to-lib` and RUST_LOG=info. It runs build_runner; wait until successful
+   before compiling tests or Flutter. Do not change FFI signatures for this UI work.
+3. Use the MSVC 2022 developer environment. Rust library: from source, with the scoped environment above,
+   `cargo build --locked --features flutter,software-update,hwcodec,vram --lib --release`.
+   Full native headers/libraries must exist first; missing opus/FFmpeg errors before that
+   are expected dependency failures, not completed source verification.
+4. Flutter: from source/flutter, `flutter build windows --release --no-pub`.
+   Local plugin directory junctions replace unavailable symlinks without changing Developer
+   Mode or system security policy. A pub get may recreate their directory; restore validated
+   junctions from .flutter-plugins-dependencies if needed.
+5. Build the virtual-display DLL: `cargo build -p dylib_virtual_display --locked --release`.
+   Copy runner/Release plus target/release/deps/dylib_virtual_display.dll
+   as upstream build.py requires to a clearly identified candidate under
+   `D:\LAN-Messenger\outputs\SubnetDesk-helper-cm`. Preserve license/notices and provide
+   corresponding source (including the pinned submodule) before distribution.
+6. WindowInjection is pinned to upstream workflow commit
+   `ecd8d6a139eee76845ea66423fb739af450fda90` in tools/window-injection-source. Build its x64
+   Release vcxproj with MSBuild 2022, PlatformToolset=v143; retain its MIT license.
+   Original USB/printer archives are in tools/bundle-assets; printer checksums match the
+   upstream release manifest. Copy resources only; do not install drivers.
+
+## Current evidence / next gates
+
+Full Flutter suite 53/53 and actual launch-policy module tests 2/2 passed.
+All 16 native packages, full-feature Rust library, virtual-display DLL, WindowInjection DLL and
+Flutter Windows Release builds completed. Earlier missing-DLL assembly failure is resolved.
+Candidate CLI startup: 1.3.0, exit 0, isolated data directories.
+Full Flutter analysis has no errors; upstream style/deprecation warnings remain.
+
+Use WINDOWS_HELPER_STATUS.md for runtime/device gates. Physical paired Android chat/audio,
+service startup and dock DPI/work-area acceptance are still unverified. The original installed
+SubnetDesk service is Running/Auto at C:/Program Files/SubnetDesk/SubnetDesk.exe --service.
+It was not stopped/replaced and can still launch old/headless CM. Obtain user direction for
+a session-safe backend handoff. Do not publish, stop services, install drivers or overwrite
+installed applications as an automatic next step.

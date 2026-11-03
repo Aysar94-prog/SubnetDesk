@@ -3,21 +3,6 @@ mod ipc_auth;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "ipc/fs.rs"]
 mod ipc_fs;
-// The DRM/KMS capture producer, the `_drm` channel and its SCM_RIGHTS framing live in their own
-// module, declared the same way as the other pieces of this file, so the opt-in feature adds a
-// bounded, self-contained surface here instead of ~1800 lines in the middle of the shared IPC.
-#[cfg(all(target_os = "linux", feature = "drm"))]
-#[path = "ipc/drm.rs"]
-mod ipc_drm;
-// Re-exported so the paths callers already use (`crate::ipc::start_drm`, `crate::ipc::connect_drm`,
-// `crate::ipc::DrmDisplayInfo`) keep working, and so the `Data` variants can name the two
-// payload types.
-#[cfg(all(target_os = "linux", feature = "drm"))]
-pub use ipc_drm::{start_drm, DmabufDesc, DrmDisplayInfo};
-#[cfg(all(target_os = "linux", feature = "drm"))]
-pub(crate) use ipc_drm::DrmConn;
-#[cfg(all(target_os = "linux", feature = "drm"))]
-pub(crate) use ipc_drm::connect_drm;
 
 #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -47,7 +32,6 @@ use hbb_common::{
     tokio_util::codec::Framed,
     ResultType,
 };
-use base::config::keys::{self, OPTION_ALLOW_WEBSOCKET};
 #[cfg(windows)]
 pub(crate) use ipc_auth::authorize_windows_portable_service_ipc_connection;
 #[cfg(windows)]
@@ -73,9 +57,6 @@ use ipc_fs::{
     check_pid, ensure_secure_ipc_parent_dir, scrub_secure_ipc_parent_dir,
     should_scrub_parent_entries_after_check_pid, write_pid,
 };
-// Gated with the module that uses it, so a `drm`-less build does not carry an unused import.
-#[cfg(all(target_os = "linux", feature = "drm"))]
-use ipc_fs::remove_ipc_entry_via_secure_parent_fd;
 use parity_tokio_ipc::{
     Connection as Conn, ConnectionClient as ConnClient, Endpoint, Incoming, SecurityAttributes,
 };
@@ -310,6 +291,14 @@ pub enum DataPortableService {
     CmShowElevation(bool),
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct LanApprovalPermissions {
+    pub keyboard: bool,
+    pub clipboard: bool,
+    pub file: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "t", content = "c")]
 pub enum Data {
@@ -337,6 +326,7 @@ pub enum Data {
     ChatMessage {
         text: String,
     },
+    ChatAttention,
     SystemInfo(Option<String>),
     ClickTime(i64),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -385,6 +375,9 @@ pub enum Data {
     #[cfg(windows)]
     ControlledSessionCount(usize),
     CmErr(String),
+    LanApprovalRequest { nonce: String, source: String, scope: String, timeout_seconds: u32 },
+    LanApprovalDecision { nonce: String, accept: bool },
+    LanApprovalDecisionWithPermissions { nonce: String, accept: bool, permissions: LanApprovalPermissions },
     // CM-side file reading responses (Windows only)
     // These are sent from CM back to Connection when CM handles file reading
     /// Response to ReadFile: contains initial file list or error
@@ -454,9 +447,14 @@ pub enum Data {
     CheckHwcodec,
     #[cfg(feature = "flutter")]
     VideoConnCount(Option<usize>),
+    #[cfg(feature = "flutter")]
+    ActiveSessionCount(Option<usize>),
     // Although the key is not necessary, it is used to avoid hardcoding the key.
     WaylandScreencastRestoreToken((String, String)),
     HwCodecConfig(Option<String>),
+    #[cfg(all(target_os = "windows", feature = "flutter"))]
+    PrinterData(Vec<u8>),
+    InstallOption(Option<(String, String)>),
     #[cfg(all(
         feature = "flutter",
         not(any(target_os = "android", target_os = "ios"))
@@ -468,60 +466,6 @@ pub enum Data {
     PortForwardSessionCount(Option<usize>),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Whiteboard((String, crate::whiteboard::CustomEvent)),
-    /// CM -> server: the connection manager's WINDOW went away, which is not the same event
-    /// as the operator disconnecting a peer. Linux only, and deliberately: there a session
-    /// logout closes every window, and the close arrives at the CM indistinguishable from a
-    /// person clicking it - measured on KDE, the CM gets no signal and logind still reports the
-    /// session active. So the ambiguous case ends the session WITHOUT the no-retry reason and
-    /// the peer is allowed to reconnect (landing on the greeter after a logout), while the
-    /// explicit Disconnect button keeps sending `Close` and kicking for good.
-    #[cfg(target_os = "linux")]
-    CmWindowClosed,
-    // --- DRM/KMS capture (opt-in `drm` feature) over the `_drm` service-scoped channel ---
-    // All of the following are `cfg(all(linux, drm))`, so the drm-off IPC wire is byte-identical
-    // to upstream. Protocol on `_drm`: on connect the root service sends `DrmDisplayList`, the
-    // client replies `DrmStart{display}`, then the service streams `DrmFrame` + send_raw(BGRA) and
-    // `DrmCursor` + send_raw(RGBA). A frame/cursor header is ALWAYS immediately followed by exactly
-    // one `send_raw()` payload (the same header-then-raw pairing as `FileBlockFromCM`). This keeps
-    // the header extensible. The zero-copy `DrmFrameDmabuf(DmabufDesc)` sibling below carries only a
-    // small JSON metadata descriptor; the scanout dma-buf fd rides an SCM_RIGHTS ancillary message on
-    // the same `DrmConn` send (see `DrmConn::send_msg`), so it has NO trailing `send_raw()` body.
-    /// Client -> service: begin streaming the chosen display.
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    // `need_cpu` is set by an unprivileged consumer that could not open a render-node convert context
-    // (drmtap_open_render failed, e.g. no /dev/dri/renderD* access). The service then streams the
-    // CPU-converted `DrmFrame` path for this connection instead of a dma-buf fd the consumer cannot
-    // detile, so a render-node-less seat still captures instead of losing the stream.
-    DrmStart { display: i32, need_cpu: bool },
-    /// Service -> client: the enumerated DRM displays (sent once, before frames).
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    DrmDisplayList(Vec<DrmDisplayInfo>),
-    /// Service -> client: the connector topology changed mid-stream (a monitor hotplug/unplug/modeset,
-    /// observed by the service's udev DRM-uevent listener). Carries the freshly-enumerated list so the
-    /// consumer can swap its sticky positive availability cache off the hot path, WITHOUT re-probing
-    /// `_drm` (which would trip the enumeration restart loop). Interleaved with frames on the same
-    /// stream; carries no `send_raw()` body and no fd.
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    DrmDisplaysChanged(Vec<DrmDisplayInfo>),
-    /// Service -> client: a frame header; the packed BGRA pixels follow via `send_raw()`.
-    /// CPU-fallback path (no render node, or no transferable dma-buf): pixels cross the wire.
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    DrmFrame { width: u32, height: u32 },
-    /// Service -> client: a zero-copy dma-buf frame descriptor. The scanout fd is NOT a field; when
-    /// `desc.has_fd` it rides an SCM_RIGHTS ancillary message on the same `DrmConn::send_msg`, and
-    /// there is NO trailing `send_raw()` body. The unprivileged `--server` imports the fd and does
-    /// the EGL detile/convert itself (see `DmabufDesc`).
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    DrmFrameDmabuf(DmabufDesc),
-    /// Service -> client: a hardware-cursor header; the RGBA pixels follow via `send_raw()`.
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    DrmCursor {
-        id: u64,
-        width: u32,
-        height: u32,
-        hotx: i32,
-        hoty: i32,
-    },
     Shutdown,
 }
 
@@ -788,17 +732,44 @@ async fn handle(data: Data, stream: &mut Connection) {
             allow_err!(stream.send(&Data::MouseMoveTime(t)).await);
         }
         Data::Close => {
+            log::info!("Receive close message");
             if EXIT_RECV_CLOSE.load(Ordering::SeqCst) {
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                crate::desktop_runtime::shutdown();
                 #[cfg(not(target_os = "android"))]
                 crate::server::input_service::fix_key_down_timeout_at_exit();
-                std::process::exit(0);
+                if is_server() {
+                    let _ = privacy_mode::turn_off_privacy(0, Some(PrivacyModeState::OffByPeer));
+                }
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                if crate::is_main() {
+                    // below part is for main windows can be reopen during rustdesk installation and installing service from UI
+                    // this make new ipc server (domain socket) can be created.
+                    std::fs::remove_file(&Config::ipc_path("")).ok();
+                    #[cfg(target_os = "linux")]
+                    {
+                        hbb_common::sleep((crate::platform::SERVICE_INTERVAL * 2) as f32 / 1000.0)
+                            .await;
+                        // https://github.com/rustdesk/rustdesk/discussions/9254
+                        crate::run_me::<&str>(vec!["--no-server"]).ok();
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        // our launchagent interval is 1 second
+                        hbb_common::sleep(1.5).await;
+                        std::process::Command::new("open")
+                            .arg("-n")
+                            .arg(&format!("/Applications/{}.app", crate::get_app_name()))
+                            .spawn()
+                            .ok();
+                    }
+                    // leave above open a little time
+                    hbb_common::sleep(0.3).await;
+                    // in case below exit failed
+                    crate::platform::quit_gui();
+                }
+                std::process::exit(-1); // to make sure --server luauchagent process can restart because SuccessfulExit used
             }
         }
         Data::Shutdown => {
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            crate::desktop_runtime::shutdown();
             log::info!("Receive clean background shutdown message");
             #[cfg(not(target_os = "android"))]
             crate::server::input_service::fix_key_down_timeout_at_exit();
@@ -835,6 +806,11 @@ async fn handle(data: Data, stream: &mut Connection) {
                 .filter(|x| x.conn_type == crate::server::AuthConnType::Remote)
                 .count();
             allow_err!(stream.send(&Data::VideoConnCount(Some(n))).await);
+        }
+        #[cfg(feature = "flutter")]
+        Data::ActiveSessionCount(None) => {
+            let count = crate::server::AUTHED_CONNS.lock().unwrap().len();
+            allow_err!(stream.send(&Data::ActiveSessionCount(Some(count))).await);
         }
         Data::Config((name, value)) => match value {
             None => {
@@ -917,7 +893,7 @@ async fn handle(data: Data, stream: &mut Connection) {
             allow_err!(
                 stream
                     .send(&Data::SyncWinCpuUsage(
-                        base::platform::windows::cpu_uage_one_minute()
+                        hbb_common::platform::windows::cpu_uage_one_minute()
                     ))
                     .await
             );
@@ -1005,6 +981,23 @@ async fn handle(data: Data, stream: &mut Connection) {
                 );
             }
         }
+        Data::InstallOption(opt) => match opt {
+            Some((_k, _v)) => {
+                #[cfg(target_os = "windows")]
+                if let Err(e) = crate::platform::windows::update_install_option(&_k, &_v) {
+                    log::error!(
+                        "Failed to update install option \"{}\" to \"{}\", error: {}",
+                        &_k,
+                        &_v,
+                        e
+                    );
+                }
+            }
+            None => {
+                // `None` is usually used to get values.
+                // This branch is left blank for unification and further use.
+            }
+        },
         #[cfg(target_os = "windows")]
         Data::PortForwardSessionCount(c) => match c {
             None => {
@@ -1768,6 +1761,16 @@ async fn handle_wayland_screencast_restore_token(
         return Ok(Some(v));
     }
     return Ok(None);
+}
+
+#[tokio::main(flavor = "current_thread")]
+pub async fn set_install_option(k: String, v: String) -> ResultType<()> {
+    if let Ok(mut c) = connect(1000, "").await {
+        c.send(&&Data::InstallOption(Some((k, v)))).await?;
+        // do not put below before connect, because we need to check should_exit
+        c.next_timeout(1000).await.ok();
+    }
+    Ok(())
 }
 
 #[cfg(test)]

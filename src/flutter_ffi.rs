@@ -15,10 +15,9 @@ use flutter_rust_bridge::{StreamSink, SyncReturn};
 #[cfg(feature = "plugin_framework")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::allow_err;
-use base::fs;
 use hbb_common::{
-    config::{self, Config, LocalConfig, PeerConfig},
-    lazy_static, log,
+    config::{self, Config, LocalConfig, PeerConfig, RecentLanEndpoint},
+    fs, lazy_static, log,
     rendezvous_proto::ConnType,
     ResultType,
 };
@@ -38,11 +37,62 @@ lazy_static::lazy_static! {
     static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));
 }
 
+#[cfg(test)]
+mod lan_server_info_tests {
+    use super::{lan_server_running_for_ui, should_sync_lan_settings_to_background};
+
+    #[test]
+    fn reports_cached_background_listener_status() {
+        assert!(lan_server_running_for_ui(
+            crate::lan_server::RUNTIME_STATE_LISTENING
+        ));
+    }
+
+    #[test]
+    fn non_listening_background_status_is_not_ready() {
+        assert!(!lan_server_running_for_ui(
+            crate::lan_server::RUNTIME_STATE_STARTING
+        ));
+        assert!(!lan_server_running_for_ui(
+            crate::lan_server::RUNTIME_STATE_FAILED
+        ));
+        assert!(!lan_server_running_for_ui(
+            crate::lan_server::RUNTIME_STATE_STOPPED
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_lan_settings_are_synchronized_to_the_background_host() {
+        assert!(should_sync_lan_settings_to_background());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_portable_lan_settings_are_synchronized_to_the_background_host() {
+        assert!(should_sync_lan_settings_to_background());
+    }
+}
+
 fn initialize(app_dir: &str, custom_client_config: &str) {
     // `APP_DIR` is set in `main_get_data_dir_ios()` on iOS.
     #[cfg(not(target_os = "ios"))]
     {
         *config::APP_DIR.write().unwrap() = app_dir.to_owned();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let password_file = std::path::PathBuf::from(config::APP_DIR.read().unwrap().clone())
+            .join("unattended-password.txt");
+        if let Ok(password) = std::fs::read_to_string(&password_file) {
+            let password = password.trim();
+            if !password.is_empty() {
+                let _ = config::Config::set_lan_password(password.as_bytes());
+                let _ = config::Config::set_lan_password_access_enabled(true);
+            }
+            let _ = std::fs::remove_file(&password_file);
+        }
+        config::initialize_receiver_only();
     }
     // core_main's load_custom_client does not work for flutter since it is only applied to its load_library in main.c
     if custom_client_config.is_empty() {
@@ -52,7 +102,6 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     }
     #[cfg(target_os = "android")]
     {
-        // flexi_logger can't work when android_logger initialized.
         #[cfg(debug_assertions)]
         android_logger::init_once(
             android_logger::Config::default()
@@ -238,6 +287,16 @@ pub fn session_login_lan(
     SyncReturn(result.err().map(|err| err.to_string()).unwrap_or_default())
 }
 
+pub fn session_login_optional_file_access(
+    session_id: SessionID, access_method: u32, temporary_code: String,
+) -> SyncReturn<String> {
+    let code = zeroize::Zeroizing::new(temporary_code);
+    let result = sessions::get_session_by_session_id(&session_id)
+        .ok_or_else(|| hbb_common::anyhow::anyhow!("Session is no longer available"))
+        .and_then(|session| session.submit_optional_file_access(access_method, code.to_string()));
+    SyncReturn(result.err().map(|err| err.to_string()).unwrap_or_default())
+}
+
 pub fn session_login_lan_identity(
     session_id: SessionID,
     identity_id: String,
@@ -326,7 +385,7 @@ pub fn session_toggle_option(session_id: SessionID, value: String) {
     }
     #[cfg(feature = "unix-file-copy-paste")]
     if sessions::get_session_by_session_id(&session_id).is_some()
-        && (value == base::config::keys::OPTION_ENABLE_FILE_COPY_PASTE || value == "view-only")
+        && (value == config::keys::OPTION_ENABLE_FILE_COPY_PASTE || value == "view-only")
     {
         crate::flutter::update_file_clipboard_required();
     }
@@ -653,6 +712,12 @@ pub fn session_input_string(session_id: SessionID, value: String) {
 }
 
 // chat_client_mode
+pub fn session_request_chat_attention(session_id: SessionID) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.request_chat_attention();
+    }
+}
+
 pub fn session_send_chat(session_id: SessionID, text: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.send_chat(text);
@@ -931,14 +996,12 @@ pub fn main_get_sound_inputs() -> Vec<String> {
 }
 
 pub fn main_get_option(key: String) -> String {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if key == "desktop-runtime" {
-        return crate::desktop_runtime::state();
-    }
+    if key.starts_with("incoming-only") { return config::Config::get_option(&key); }
     get_option(key)
 }
 
 pub fn main_get_option_sync(key: String) -> SyncReturn<String> {
+    if key.starts_with("incoming-only") { return SyncReturn(config::Config::get_option(&key)); }
     SyncReturn(get_option(key))
 }
 
@@ -948,13 +1011,20 @@ pub fn main_get_error() -> String {
 
 pub fn main_show_option(_key: String) -> SyncReturn<bool> {
     #[cfg(target_os = "linux")]
-    if _key.eq(base::config::keys::OPTION_ALLOW_LINUX_HEADLESS) {
+    if _key.eq(config::keys::OPTION_ALLOW_LINUX_HEADLESS) {
         return SyncReturn(true);
     }
     SyncReturn(false)
 }
 
 pub fn main_set_option(key: String, mut value: String) {
+    if key.starts_with("incoming-only") {
+        #[cfg(windows)]
+        if config::Config::get_option("incoming-only-scope") == "device" {
+            log::warn!("Receiver policy is managed by SubnetDesk Deploy"); return;
+        }
+        config::Config::set_option(key.clone(), value.clone());
+    }
     if config::is_lan_only_obsolete_option(&key) {
         log::warn!("Ignored obsolete public-network option in LAN-only mode: {key}");
         return;
@@ -967,6 +1037,7 @@ pub fn main_set_option(key: String, mut value: String) {
         "lan-listen-addresses"
             | "lan-listen-port"
             | "lan-allowed-networks"
+            | "lan-discovery-enabled"
             | "web-access-enabled"
             | "web-listen-port"
             | "web-certificate-path"
@@ -1011,26 +1082,14 @@ pub fn main_uri_prefix_sync() -> SyncReturn<String> {
     SyncReturn(crate::get_uri_prefix())
 }
 
-/// Runs on the bridge worker pool, keeping ZIP I/O off the UI thread.
-pub fn main_export_diagnostics(request: String) -> String {
-    crate::diagnostics::export(&request)
-        .err()
-        .map(|e| e.to_string())
-        .unwrap_or_default()
-}
-
-pub fn main_record_flutter_error(message: String) -> String {
-    crate::diagnostics::record_flutter_error(&message)
-        .err()
-        .map(|e| e.to_string())
-        .unwrap_or_default()
-}
-
 pub fn main_get_version() -> String {
     get_version()
 }
 
 pub fn main_get_software_update_state() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_STATE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1044,6 +1103,9 @@ pub fn main_get_software_update_state() -> String {
 }
 
 pub fn main_check_software_update() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_MESSAGE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1060,6 +1122,9 @@ pub fn main_check_software_update() -> String {
 }
 
 pub fn main_download_software_update() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_MESSAGE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1076,6 +1141,9 @@ pub fn main_download_software_update() -> String {
 }
 
 pub fn main_install_software_update() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_MESSAGE.to_owned();
+    }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1092,6 +1160,7 @@ pub fn main_install_software_update() -> String {
 }
 
 pub fn main_set_software_update_preferences(auto_check: bool, auto_download: bool) {
+    if !crate::private_build::software_updates_enabled() { return; }
     #[cfg(all(
         feature = "software-update",
         not(any(target_os = "android", target_os = "ios"))
@@ -1224,6 +1293,10 @@ pub fn main_import_legacy_lan_credential(
 
 pub fn main_get_connect_status() -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let active_session_count = get_connect_status().active_session_count;
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let active_session_count = 0usize;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let (status_num, video_conn_count) = {
         let status = get_connect_status();
         (status.status_num, status.video_conn_count)
@@ -1240,6 +1313,7 @@ pub fn main_get_connect_status() -> String {
     serde_json::json!({
         "status_num": status_num,
         "video_conn_count": video_conn_count,
+        "active_session_count": active_session_count,
     })
     .to_string()
 }
@@ -1253,9 +1327,43 @@ pub fn main_discover() {
     discover();
 }
 
+/// Starts a manual, unicast-only scan of `range` (a single IP, CIDR block
+/// like "10.96.160.0/24", or dash range like "10.96.160.1-254"), bypassing
+/// UDP broadcast/mDNS so a device on another routed subnet can still be
+/// found. Runs in the background; results arrive via the usual
+/// `load_lan_peers` event once probed devices respond.
+///
+/// Returns an empty string on success, or an error message if `range`
+/// couldn't be parsed.
+pub fn main_discover_range(range: String) -> String {
+    match crate::lan::discover_range_async(range) {
+        Ok(_count) => String::new(),
+        Err(err) => err.to_string(),
+    }
+}
+
+pub fn main_get_saved_subnets() -> Vec<String> {
+    LocalConfig::get_saved_subnets()
+}
+
+/// Saves `subnet` for reuse in the manual scan dialog. Returns an empty string
+/// on success, or the parse error if it isn't a valid IP, CIDR, or range, so
+/// a typo is never persisted.
+pub fn main_add_saved_subnet(subnet: String) -> String {
+    match crate::lan::parse_ip_range(&subnet) {
+        Ok(_) => {
+            LocalConfig::add_saved_subnet(&subnet);
+            String::new()
+        }
+        Err(err) => err.to_string(),
+    }
+}
+
+pub fn main_remove_saved_subnet(subnet: String) {
+    LocalConfig::remove_saved_subnet(&subnet);
+}
+
 pub fn main_get_local_option(key: String) -> SyncReturn<String> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if key == "desktop-runtime" { return SyncReturn(crate::desktop_runtime::state()); }
     SyncReturn(get_local_option(key))
 }
 
@@ -1297,14 +1405,8 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 }
 
 pub fn main_set_local_option(key: String, value: String) {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    match key.as_str() {
-        "start-on-boot" => { crate::desktop_runtime::set_autostart(value == "Y"); return; },
-        "desktop-shutdown" => { crate::desktop_runtime::shutdown(); return; },
-        _ => {},
-    }
-    let is_texture_render_key = key.eq(base::config::keys::OPTION_TEXTURE_RENDER);
-    let is_d3d_render_key = key.eq(base::config::keys::OPTION_ALLOW_D3D_RENDER);
+    let is_texture_render_key = key.eq(config::keys::OPTION_TEXTURE_RENDER);
+    let is_d3d_render_key = key.eq(config::keys::OPTION_ALLOW_D3D_RENDER);
     set_local_option(key, value.clone());
     let is_render_target =
         |session: &crate::flutter::FlutterSession| session.is_default() || session.is_view_camera();
@@ -1484,6 +1586,66 @@ pub fn main_peer_exists(id: String) -> bool {
     peer_exists(&id)
 }
 
+/// Looks up a saved (recent/favorite) device's live discovery reachability by
+/// fingerprint or last-known endpoint. Saved devices are often reachable only
+/// by direct/routed unicast (e.g. on another subnet, never seen by broadcast
+/// or mDNS), so without this lookup they would carry no reachability data at
+/// all and the UI would default them to looking offline. Defaults to
+/// `"unknown"` rather than omitting the field, so the UI never has to treat a
+/// missing key as a hardcoded false/offline.
+fn lan_reachability_fields(fingerprint: &str, endpoint: &str) -> (String, String) {
+    let now_ms = hbb_common::get_time();
+    let matched = config::LanPeers::load().peers.into_iter().find(|peer| {
+        (!fingerprint.is_empty() && peer.fingerprint.eq_ignore_ascii_case(fingerprint))
+            || (!endpoint.is_empty() && peer.endpoint == endpoint)
+    });
+    match matched {
+        Some(peer) => {
+            let reachability = match peer.reachability(now_ms) {
+                config::LanReachability::Online => "online",
+                config::LanReachability::Unknown => "unknown",
+                config::LanReachability::Offline => "offline",
+            };
+            (reachability.to_owned(), peer.last_seen_at.to_string())
+        }
+        None => ("unknown".to_owned(), "0".to_owned()),
+    }
+}
+
+fn recent_lan_endpoint_to_map(recent: RecentLanEndpoint) -> HashMap<&'static str, String> {
+    let alias = PeerConfig::load(&recent.endpoint)
+        .options
+        .get("alias")
+        .cloned()
+        .unwrap_or_default();
+    let (reachability, last_seen_at) =
+        lan_reachability_fields(&recent.fingerprint, &recent.endpoint);
+    HashMap::from([
+        ("id", recent.endpoint),
+        ("username", recent.username),
+        ("hostname", recent.hostname),
+        ("platform", recent.platform),
+        ("alias", alias),
+        ("fingerprint", recent.fingerprint),
+        ("last_connected_at", recent.last_connected_at.to_string()),
+        ("reachability", reachability),
+        ("last_seen_at", last_seen_at),
+    ])
+}
+
+/// Kicks off a background unicast reachability probe of each saved
+/// endpoint's host, so a device that broadcast/mDNS discovery can never see
+/// (e.g. on a different routed subnet) still gets a real, non-default
+/// reachability signal over time instead of looking permanently offline.
+/// Fire-and-forget: results land in the shared LAN peers cache and the next
+/// `load_recent_peers`/`load_fav_peers`/`load_lan_peers` refresh picks them up.
+fn refresh_saved_endpoints_reachability(endpoints: impl Iterator<Item = String>) {
+    let targets: Vec<std::net::IpAddr> = endpoints
+        .filter_map(|endpoint| hbb_common::lan::Endpoint::parse(&endpoint).ok())
+        .filter_map(|endpoint| endpoint.host().parse().ok())
+        .collect();
+    crate::lan::probe_ips_async(targets);
+}
 
 pub fn main_load_recent_peers() {
     let push_to_flutter = |peers| {
@@ -1495,12 +1657,9 @@ pub fn main_load_recent_peers() {
     };
 
     if !config::APP_DIR.read().unwrap().is_empty() {
-        let discovered = config::LanPeers::load().peers;
-        let now = hbb_common::get_time();
-        let peers: Vec<_> = LocalConfig::get_recent_lan_endpoints()
-            .into_iter()
-            .map(|peer| crate::lan_ui::recent_lan_endpoint_to_map(peer, &discovered, now))
-            .collect();
+        let recent = LocalConfig::get_recent_lan_endpoints();
+        refresh_saved_endpoints_reachability(recent.iter().map(|r| r.endpoint.clone()));
+        let peers: Vec<_> = recent.into_iter().map(recent_lan_endpoint_to_map).collect();
         push_to_flutter(serde_json::ser::to_string(&peers).unwrap_or_else(|_| "[]".to_owned()));
     } else {
         push_to_flutter("[]".to_owned())
@@ -1517,16 +1676,29 @@ pub fn main_load_fav_peers() {
     };
     if !config::APP_DIR.read().unwrap().is_empty() {
         let favs = get_fav();
-        let discovered = config::LanPeers::load().peers;
-        let now = hbb_common::get_time();
-        let peers: Vec<_> = crate::lan_ui::favorite_lan_endpoints(
-            favs,
-            LocalConfig::get_recent_lan_endpoints(),
-            &discovered,
-        )
+        refresh_saved_endpoints_reachability(favs.iter().cloned());
+        let mut peers: Vec<_> = LocalConfig::get_recent_lan_endpoints()
             .into_iter()
-            .map(|peer| crate::lan_ui::recent_lan_endpoint_to_map(peer, &discovered, now))
+            .filter(|recent| favs.contains(&recent.endpoint))
+            .map(recent_lan_endpoint_to_map)
             .collect();
+
+        // A discovered device can be starred before its first successful login.
+        let discovered = get_lan_peers();
+        for id in favs {
+            if peers.iter().any(|peer| peer.get("id") == Some(&id)) { continue; }
+            let peer = discovered.iter().find(|peer| peer.get("id") == Some(&id)).cloned()
+                .unwrap_or_else(|| {
+                    let (reachability, last_seen_at) = lan_reachability_fields("", &id);
+                    HashMap::from([
+                        ("id", id.clone()),
+                        ("alias", PeerConfig::load(&id).options.get("alias").cloned().unwrap_or_default()),
+                        ("reachability", reachability),
+                        ("last_seen_at", last_seen_at),
+                    ])
+                });
+            peers.push(peer);
+        }
 
         push_to_flutter(serde_json::ser::to_string(&peers).unwrap_or_else(|_| "[]".to_owned()));
     } else {
@@ -1744,23 +1916,139 @@ pub fn main_get_fingerprint() -> String {
 }
 
 pub fn main_get_lan_server_info() -> String {
-    crate::lan_ui::lan_server_info()
-}
-
-pub fn main_request_host_permissions() -> String {
-    crate::host_permissions::request()
-        .err()
-        .map(|err| err.to_string())
-        .unwrap_or_default()
+    lan_server_info()
 }
 
 pub fn main_get_lan_server_info_sync() -> SyncReturn<String> {
-    SyncReturn(crate::lan_ui::lan_server_info())
+    SyncReturn(lan_server_info())
+}
+
+fn lan_server_info() -> String {
+    let configured = Config::lan_credentials_configured();
+    #[cfg(target_os = "windows")]
+    let portable_service_running = crate::portable_service::client::running();
+    #[cfg(not(target_os = "windows"))]
+    let portable_service_running = false;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let (runtime_state, runtime_error) = get_lan_server_runtime_status();
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let (runtime_state, runtime_error) = {
+        let status = crate::lan_server::LanServer::runtime_status();
+        (status.state, status.last_error)
+    };
+    let running = lan_server_running_for_ui(&runtime_state);
+    #[cfg(not(target_os = "ios"))]
+    let configured_listen_addresses: std::collections::HashSet<String> =
+        Config::get_option("lan-listen-addresses")
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+    #[cfg(not(target_os = "ios"))]
+    let address_details: Vec<_> = crate::lan::local_connectable_address_details()
+        .into_iter()
+        .filter(|item| {
+            let wildcard = if item.address.is_ipv4() { "0.0.0.0" } else { "::" };
+            if configured_listen_addresses.is_empty() || configured_listen_addresses.contains(wildcard) {
+                crate::lan_server::source_allowed(item.address)
+            } else {
+                configured_listen_addresses.contains(&item.address.to_string())
+            }
+        })
+        .collect();
+    #[cfg(not(target_os = "ios"))]
+    let addresses: Vec<String> = address_details.iter().map(|item| item.address.to_string()).collect();
+    #[cfg(not(target_os = "ios"))]
+    let address_details: Vec<_> = address_details.into_iter()
+        .map(|item| serde_json::json!({"address": item.address.to_string(), "adapter": item.adapter}))
+        .collect();
+    #[cfg(target_os = "ios")]
+    let addresses: Vec<String> = Vec::new();
+    #[cfg(target_os = "ios")]
+    let address_details: Vec<serde_json::Value> = Vec::new();
+    let port = Config::get_option("lan-listen-port")
+        .parse::<u16>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(hbb_common::lan::DEFAULT_PORT);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    let (web_listen_port, web_https_enabled, web_runtime, web_ca_certificate_path) = (
+        crate::web_gateway::configured_port(),
+        crate::web_gateway::is_https_enabled(),
+        serde_json::to_value(crate::web_gateway::runtime_status()).unwrap_or_default(),
+        crate::web_gateway::certificate_authority_path_for_ui(),
+    );
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let (web_listen_port, web_https_enabled, web_runtime, web_ca_certificate_path) = (
+        18_123,
+        true,
+        serde_json::json!({
+            "state": "unsupported",
+            "endpoints": [],
+            "last_error": "",
+            "active_sessions": 0,
+        }),
+        String::new(),
+    );
+    let data = serde_json::json!({
+        "configured": configured,
+        "password_access_enabled": Config::lan_password_access_enabled(),
+        "running": running,
+        "portable_service_running": portable_service_running,
+        "runtime_state": runtime_state,
+        "runtime_error": runtime_error,
+        "username": Config::get_lan_access_username(),
+        "credential_revision": Config::get_credential_revision(),
+        "device_name": crate::lan::device_display_name(),
+        "system_device_name": crate::hostname(),
+        "fingerprint": crate::lan_protocol::fingerprint(&Config::get_key_pair().1),
+        "addresses": addresses,
+        "address_details": address_details,
+        "port": port,
+        "listen_addresses": Config::get_option("lan-listen-addresses"),
+        "allowed_networks": Config::get_option("lan-allowed-networks"),
+        "discovery_enabled": Config::get_option("lan-discovery-enabled") != "N",
+        "web_access_enabled": Config::get_option("web-access-enabled") == "Y",
+        "web_listen_port": web_listen_port,
+        "web_https_enabled": web_https_enabled,
+        "web_certificate_path": Config::get_option("web-certificate-path"),
+        "web_private_key_path": Config::get_option("web-private-key-path"),
+        "web_listen_addresses": Config::get_option("web-listen-addresses"),
+        "web_allowed_networks": Config::get_option("web-allowed-networks"),
+        "web_allowed_hosts": Config::get_option("web-allowed-hosts"),
+        "web_permission_profile": Config::get_option("web-permission-profile"),
+        "web_ca_certificate_path": web_ca_certificate_path,
+        "web_runtime": web_runtime,
+    });
+    data.to_string()
+}
+
+fn lan_server_running_for_ui(runtime_state: &str) -> bool {
+    runtime_state == crate::lan_server::RUNTIME_STATE_LISTENING
+}
+
+fn should_sync_lan_settings_to_background() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Portable builds run the background host as a user process instead of
+        // an SCM service. It still owns an independent in-memory Config snapshot,
+        // so LAN credentials and listener options must always be synchronized.
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        false
+    }
 }
 
 pub fn main_apply_lan_settings(
     username: String,
-    password: String,
+    mut password: String,
     listen_addresses: String,
     listen_port: String,
     allowed_networks: String,
@@ -1770,7 +2058,108 @@ pub fn main_apply_lan_settings(
     web_certificate_path: String,
     web_private_key_path: String,
 ) -> String {
-    crate::lan_ui::apply_lan_settings(username, password, listen_addresses, listen_port, allowed_networks, discovery_enabled, web_access_enabled, web_listen_port, web_certificate_path, web_private_key_path)
+    let result = (|| -> ResultType<()> {
+        let username = hbb_common::lan::validate_credential_username(&username)?;
+        let port = listen_port
+            .parse::<u16>()
+            .map_err(|_| hbb_common::anyhow::anyhow!("Listen port must be between 1 and 65535"))?;
+        if port == 0 {
+            hbb_common::bail!("Listen port must be between 1 and 65535");
+        }
+        let web_port = web_listen_port
+            .parse::<u16>()
+            .map_err(|_| hbb_common::anyhow::anyhow!("Web port must be between 1 and 65535"))?;
+        if web_port == 0 {
+            hbb_common::bail!("Web port must be between 1 and 65535");
+        }
+        if web_access_enabled && web_port == port {
+            hbb_common::bail!("Web port must differ from the native LAN port");
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let (web_certificate_path, web_private_key_path) =
+            match crate::web_gateway::validate_custom_certificate_files(
+                &web_certificate_path,
+                &web_private_key_path,
+            )? {
+                Some((certificate_path, private_key_path)) => (
+                    certificate_path.to_string_lossy().into_owned(),
+                    private_key_path.to_string_lossy().into_owned(),
+                ),
+                None => (String::new(), String::new()),
+            };
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let (web_certificate_path, web_private_key_path) = {
+            if web_access_enabled {
+                hbb_common::bail!("Web access is not supported on this platform");
+            }
+            (String::new(), String::new())
+        };
+        let listen_addresses = crate::lan_server::normalize_listen_addresses(&listen_addresses)?;
+        let allowed_networks = crate::lan_server::normalize_allowed_networks(&allowed_networks)?;
+
+        let current_username = Config::get_lan_access_username();
+        if username.is_empty() {
+            if !password.is_empty() { Config::set_lan_password(password.as_bytes())?; }
+        } else if password.is_empty() {
+            if !Config::lan_credentials_configured() || username != current_username {
+                hbb_common::bail!(
+                    "A password is required when creating or renaming the LAN account"
+                );
+            }
+        } else {
+            Config::set_lan_credentials(&username, password.as_bytes())?;
+        }
+        Config::set_option("lan-listen-addresses".to_owned(), listen_addresses);
+        Config::set_option("lan-listen-port".to_owned(), port.to_string());
+        Config::set_option("lan-allowed-networks".to_owned(), allowed_networks);
+        Config::set_option(
+            "lan-discovery-enabled".to_owned(),
+            if discovery_enabled { "Y" } else { "N" }.to_owned(),
+        );
+        Config::set_option(
+            "web-access-enabled".to_owned(),
+            if web_access_enabled { "Y" } else { "N" }.to_owned(),
+        );
+        Config::set_option("web-listen-port".to_owned(), web_port.to_string());
+        Config::set_option("web-https-enabled".to_owned(), "Y".to_owned());
+        Config::set_option("web-certificate-path".to_owned(), web_certificate_path);
+        Config::set_option("web-private-key-path".to_owned(), web_private_key_path);
+        Config::set_option("stop-service".to_owned(), String::new());
+        crate::lan_server::LanServer::restart();
+        Ok(())
+    })();
+    password.zeroize();
+    if let Err(err) = result {
+        return err.to_string();
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if should_sync_lan_settings_to_background() {
+        if let Err(err) = crate::ipc::sync_current_config_to_server(2_000) {
+            log::error!("Failed to synchronize LAN settings to the background service: {err}");
+            return "Failed to update the background service. Please retry.".to_owned();
+        }
+    }
+
+    String::new()
+}
+
+pub fn main_set_unattended_access(enabled: bool, mut password: String) -> String {
+    let result = (|| -> ResultType<()> {
+        if !cfg!(windows) { hbb_common::bail!("Unattended access settings are supported only by this Windows receiver"); }
+        if !password.is_empty() { Config::set_lan_password(password.as_bytes())?; }
+        if enabled && !Config::lan_credentials_configured() {
+            hbb_common::bail!("Set an unattended access password before enabling password access");
+        }
+        Config::set_lan_password_access_enabled(enabled)?;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if should_sync_lan_settings_to_background() {
+            crate::ipc::sync_current_config_to_server(2_000)?;
+        }
+        Ok(())
+    })();
+    password.zeroize();
+    result.err().map(|err| err.to_string()).unwrap_or_default()
 }
 
 pub fn cm_get_clients_state() -> String {
@@ -1778,11 +2167,7 @@ pub fn cm_get_clients_state() -> String {
 }
 
 pub fn cm_check_clients_length(length: usize) -> Option<String> {
-    if length != crate::ui_cm_interface::get_clients_length() {
-        Some(crate::ui_cm_interface::get_clients_state())
-    } else {
-        None
-    }
+    crate::ui_cm_interface::changed_clients_state(length)
 }
 
 pub fn cm_get_clients_length() -> usize {
@@ -2018,6 +2403,17 @@ pub fn session_toggle_virtual_display(session_id: SessionID, index: i32, on: boo
     }
 }
 
+pub fn session_printer_response(
+    session_id: SessionID,
+    id: i32,
+    path: String,
+    printer_name: String,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.printer_response(id, path, printer_name);
+    }
+}
+
 pub fn main_set_home_dir(_home: String) {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -2096,17 +2492,31 @@ pub fn cm_send_chat(conn_id: i32, msg: String) {
     crate::ui_cm_interface::send_chat(conn_id, msg);
 }
 
-pub fn cm_close_connection(conn_id: i32) {
-    #[cfg(not(any(target_os = "ios")))]
-    crate::ui_cm_interface::close(conn_id);
+pub fn main_get_lan_optional_access() -> String { crate::lan_access::state_json() }
+
+pub fn main_set_lan_optional_access(code: bool, manual: bool) -> String {
+    crate::lan_access::configure(code, manual).err().unwrap_or_default().to_owned()
 }
 
-/// The CM window closed. On Linux that is ambiguous - a logout closes it the same way a person
-/// does - so it ends the session without the no-retry reason; elsewhere it is a plain close.
-pub fn cm_close_connection_window(conn_id: i32) {
-    #[cfg(target_os = "linux")]
-    crate::ui_cm_interface::close_window(conn_id);
-    #[cfg(all(not(target_os = "linux"), not(target_os = "ios")))]
+pub fn main_regenerate_lan_code() -> String {
+    crate::lan_access::regenerate_code().err().unwrap_or_default().to_owned()
+}
+
+pub fn cm_decide_lan_request(id: i32, nonce: String, accept: bool) -> String {
+    crate::ui_cm_interface::decide_lan_request(id, nonce, accept).err().unwrap_or_default().to_owned()
+}
+
+pub fn cm_decide_lan_request_with_permissions(id: i32, nonce: String, accept: bool, permissions: String) -> String {
+    let permissions = match serde_json::from_str::<crate::ipc::LanApprovalPermissions>(&permissions) {
+        Ok(value) => value,
+        Err(_) => return "Invalid session permissions; access was not granted".to_owned(),
+    };
+    crate::ui_cm_interface::decide_lan_request_with_permissions(id, nonce, accept, permissions)
+        .err().unwrap_or_default().to_owned()
+}
+
+pub fn cm_close_connection(conn_id: i32) {
+    #[cfg(not(any(target_os = "ios")))]
     crate::ui_cm_interface::close(conn_id);
 }
 
@@ -2218,9 +2628,7 @@ pub fn main_is_installed_lower_version() -> SyncReturn<bool> {
 }
 
 pub fn main_is_installed_daemon(prompt: bool) -> SyncReturn<bool> {
-    let _ = prompt;
-    // Kept for bridge ABI compatibility; the application no longer installs a daemon.
-    SyncReturn(true)
+    SyncReturn(is_installed_daemon(prompt))
 }
 
 pub fn main_is_process_trusted(prompt: bool) -> SyncReturn<bool> {
@@ -2301,7 +2709,9 @@ pub fn install_install_options() -> SyncReturn<String> {
 }
 
 pub fn main_on_main_window_close() {
-    // Closing a window leaves the resident runtime and secure desktop agent alive.
+    // may called more than one times
+    #[cfg(windows)]
+    crate::portable_service::client::drop_portable_service_shared_memory();
 }
 
 pub fn main_current_is_wayland() -> SyncReturn<bool> {
@@ -2633,22 +3043,39 @@ pub fn main_audio_support_loopback() -> SyncReturn<bool> {
     SyncReturn(is_surpport)
 }
 
+pub fn main_get_printer_names() -> SyncReturn<String> {
+    #[cfg(target_os = "windows")]
+    return SyncReturn(
+        serde_json::to_string(&crate::platform::windows::get_printer_names().unwrap_or_default())
+            .unwrap_or_default(),
+    );
+    #[cfg(not(target_os = "windows"))]
+    return SyncReturn("".to_owned());
+}
+
 pub fn main_get_common(key: String) -> String {
-    if key == "transfer-job-id" {
-        return base::fs::get_next_job_id().to_string();
+    if key == "is-printer-installed" {
+        #[cfg(target_os = "windows")]
+        {
+            return match remote_printer::is_rd_printer_installed(&get_app_name()) {
+                Ok(r) => r.to_string(),
+                Err(e) => e.to_string(),
+            };
+        }
+        #[cfg(not(target_os = "windows"))]
+        return false.to_string();
+    } else if key == "is-support-printer-driver" {
+        #[cfg(target_os = "windows")]
+        return crate::platform::is_win_10_or_greater().to_string();
+        #[cfg(not(target_os = "windows"))]
+        return false.to_string();
+    } else if key == "transfer-job-id" {
+        return hbb_common::fs::get_next_job_id().to_string();
     } else if key == "has-gnome-shortcuts-inhibitor-permission" {
         #[cfg(target_os = "linux")]
         return crate::platform::linux::has_gnome_shortcuts_inhibitor_permission().to_string();
         #[cfg(not(target_os = "linux"))]
         return false.to_string();
-    } else if key == "gnome-monitor-layout-mode" {
-        #[cfg(target_os = "linux")]
-        return match crate::platform::linux::gnome_monitor_layout_mode() {
-            Some(mode) => mode.as_str().to_owned(),
-            None => String::new(),
-        };
-        #[cfg(not(target_os = "linux"))]
-        return String::new();
     } else {
         String::new()
     }
@@ -2659,6 +3086,38 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    #[cfg(target_os = "windows")]
+    if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
+        std::thread::spawn(move || {
+            let (success, msg) = match remote_printer::install_update_printer(&get_app_name()) {
+                Ok(_) => (true, "".to_owned()),
+                Err(e) => {
+                    let err = e.to_string();
+                    log::error!("Failed to install/update rd printer: {}", &err);
+                    (false, err)
+                }
+            };
+            if success {
+                // Use `ipc` to notify the server process to update the install option in the registry.
+                // Because `install_update_printer()` may prompt for permissions, there is no need to prompt again here.
+                if let Err(e) = crate::ipc::set_install_option(
+                    crate::platform::REG_NAME_INSTALL_PRINTER.to_string(),
+                    "1".to_string(),
+                ) {
+                    log::error!("Failed to set install printer option: {}", e);
+                }
+            }
+            let data = HashMap::from([
+                ("name", serde_json::json!("install-printer-res")),
+                ("success", serde_json::json!(success)),
+                ("msg", serde_json::json!(msg)),
+            ]);
+            let _res = flutter::push_global_event(
+                flutter::APP_TYPE_MAIN,
+                serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
+            );
+        });
+    }
     #[cfg(target_os = "linux")]
     if _key == "clear-gnome-shortcuts-inhibitor-permission" {
         std::thread::spawn(move || {

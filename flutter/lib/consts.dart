@@ -8,8 +8,6 @@ const int kMaxVirtualDisplayCount = 4;
 const int kAllVirtualDisplay = -1;
 
 const double kDesktopRemoteTabBarHeight = 28.0;
-const Size kDesktopMainWindowSize = Size(960, 640);
-const Size kDesktopMainWindowMinimumSize = Size(640, 480);
 const int kInvalidWindowId = -1;
 const int kMainWindowId = 0;
 
@@ -57,6 +55,7 @@ const String kAppTypeDesktopTerminal = "terminal";
 
 const String kWindowMainWindowOnTop = "main_window_on_top";
 const String kWindowRefreshCurrentUser = "refresh_current_user";
+const String kWindowGetWindowInfo = "get_window_info";
 const String kWindowGetScreenList = "get_screen_list";
 // This method is not used, maybe it can be removed.
 const String kWindowDisableGrabKeyboard = "disable_grab_keyboard";
@@ -86,8 +85,6 @@ const String kWindowEventOpenMonitorSession = "open_monitor_session";
 const String kOptionViewStyle = "view_style";
 const String kOptionScrollStyle = "scroll_style";
 const String kOptionEdgeScrollEdgeThickness = "edge-scroll-edge-thickness";
-const String kOptionClientRotation = "client-rotation";
-const String kOptionPanelRotation = "panel-rotation";
 const String kOptionImageQuality = "image_quality";
 const String kOptionOpenNewConnInTabs = "enable-open-new-connections-in-tabs";
 const String kOptionTextureRender = "use-texture-render";
@@ -104,10 +101,10 @@ const String kOptionAutoDisconnectTimeout = "auto-disconnect-timeout";
 const String kOptionEnableHwcodec = "enable-hwcodec";
 const String kOptionAllowAutoRecordIncoming = "allow-auto-record-incoming";
 const String kOptionAllowAutoRecordOutgoing = "allow-auto-record-outgoing";
-const String kOptionHideRecordingButton = "hide-recording-button";
 const String kOptionVideoSaveDirectory = "video-save-directory";
 const String kOptionEnableKeyboard = "enable-keyboard";
 // "Settings -> Security -> Permissions"
+const String kOptionEnableRemotePrinter = "enable-remote-printer";
 const String kOptionEnableClipboard = "enable-clipboard";
 const String kOptionEnableFileTransfer = "enable-file-transfer";
 const String kOptionEnableAudio = "enable-audio";
@@ -156,8 +153,6 @@ const String kOptionAllowRemoveWallpaper = "allow-remove-wallpaper";
 const String kOptionStopService = "stop-service";
 const String kOptionDirectxCapture = "enable-directx-capture";
 const String kOptionAllowRemoteCmModification = "allow-remote-cm-modification";
-const String kOptionAllowSyncClipboardBetweenSessions =
-    "allow-sync-clipboard-between-sessions";
 const String kOptionShowVirtualMouse = "show-virtual-mouse";
 const String kOptionVirtualMouseScale = "virtual-mouse-scale";
 const String kOptionShowVirtualJoystick = "show-virtual-joystick";
@@ -171,6 +166,7 @@ const String kOptionEnableShowTerminalExtraKeys =
 
 // builtin options
 const String kOptionHideStopService = "hide-stop-service";
+const String kOptionHideRemotePrinterSetting = "hide-remote-printer-settings";
 const String kOptionHideSecuritySetting = "hide-security-settings";
 const String kOptionHideNetworkSetting = "hide-network-settings";
 const String kOptionDisableUnlockPin = "disable-unlock-pin";
@@ -259,12 +255,12 @@ const int kMaxTrackpadSpeed = 1000;
 /// may cause performance issues during rapid window operations.
 const int kDefaultPointerLockCenterThrottleMs = 100;
 
-/// SubnetDesk inherited relative mouse mode (MOUSE_TYPE_MOVE_RELATIVE) before
-/// its first 1.0.0 release; its versions are independent of RustDesk's 1.4.5 gate.
+/// Minimum server version required for relative mouse mode (MOUSE_TYPE_MOVE_RELATIVE).
+/// Servers older than this version will ignore relative mouse events.
 ///
 /// IMPORTANT: This value must be kept in sync with the Rust constant
 /// `MIN_VERSION_RELATIVE_MOUSE_MODE` in `src/common.rs`.
-const String kMinVersionForRelativeMouseMode = '1.0.0';
+const String kMinVersionForRelativeMouseMode = '1.4.5';
 
 /// Maximum delta value for relative mouse movement.
 /// Large values could cause issues with i32 overflow on server side,
@@ -280,6 +276,15 @@ const int kMaxRelativeMouseDelta = 10000;
 /// intentional quick toggles but large enough to prevent accidental double-triggers.
 const int kRelativeMouseModeToggleDebounceMs = 150;
 
+// incomming (should be incoming) is kept, because change it will break the previous setting.
+const String kKeyPrinterIncomingJobAction = 'printer-incomming-job-action';
+const String kValuePrinterIncomingJobDismiss = 'dismiss';
+const String kValuePrinterIncomingJobDefault = '';
+const String kValuePrinterIncomingJobSelected = 'selected';
+const String kKeyPrinterSelected = 'printer-selected-name';
+const String kKeyPrinterSave = 'allow-printer-dialog-save';
+const String kKeyPrinterAllowAutoPrint = 'allow-printer-auto-print';
+
 double kNewWindowOffset = isWindows
     ? 56.0
     : isLinux
@@ -288,11 +293,10 @@ double kNewWindowOffset = isWindows
     ? 30.0
     : 50.0;
 
-const kDragToResizeAreaPaddingSize = 5.0;
 EdgeInsets get kDragToResizeAreaPadding => isLinux
     ? stateGlobal.fullscreen.isTrue || stateGlobal.isMaximized.value
-        ? EdgeInsets.zero
-        : EdgeInsets.all(kDragToResizeAreaPaddingSize)
+          ? EdgeInsets.zero
+          : EdgeInsets.all(5.0)
     : EdgeInsets.zero;
 // https://en.wikipedia.org/wiki/Non-breaking_space
 const int $nbsp = 0x00A0;
@@ -303,6 +307,8 @@ extension StringExtension on String {
 
 const Size kConnectionManagerWindowSizeClosedChat = Size(300, 490);
 const Size kConnectionManagerWindowSizeOpenChat = Size(700, 490);
+const Size kWindowsCmPanelSize = Size(360, 600);
+const Size kWindowsCmPanelFoldedSize = Size(360, 44);
 // Tabbar transition duration, now we remove the duration
 const Duration kTabTransitionDuration = Duration.zero;
 const double kEmptyMarginTop = 50;
@@ -413,9 +419,6 @@ const kAndroid13Notification = "android.permission.POST_NOTIFICATIONS";
 /// Android channel invoke type key
 class AndroidChannel {
   static final kStartAction = "start_action";
-  static final kGetStartOnBootOpt = "get_start_on_boot_opt";
-  static final kSetStartOnBootOpt = "set_start_on_boot_opt";
-  static final kSyncAppDirConfigPath = "sync_app_dir";
 }
 
 /// flutter/packages/flutter/lib/src/services/keyboard_key.dart -> _keyLabels

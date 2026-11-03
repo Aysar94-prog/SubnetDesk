@@ -3,14 +3,15 @@ use crate::{
     ipc,
     privacy_mode::win_topmost_window::{self, WIN_TOPMOST_INJECTED_PROCESS_EXE},
 };
-use base::message_proto::{DisplayInfo, Resolution, WindowsSession};
 use hbb_common::{
     allow_err,
     anyhow::anyhow,
     bail,
     config::{self, Config},
     libc::{c_int, wchar_t},
-    log, sleep,
+    log,
+    message_proto::{DisplayInfo, Resolution, WindowsSession},
+    sleep,
     sysinfo::{Pid, System},
     timeout, tokio,
 };
@@ -20,7 +21,10 @@ use std::{
     fs,
     io::{self, prelude::*},
     mem,
-    os::windows::{ffi::OsStringExt, process::CommandExt},
+    os::{
+        raw::c_ulong,
+        windows::{ffi::OsStringExt, process::CommandExt},
+    },
     path::*,
     ptr::null_mut,
     sync::{atomic::Ordering, Arc, Mutex},
@@ -58,6 +62,10 @@ use winapi::{
             TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_TYPE,
         },
         winreg::HKEY_CURRENT_USER,
+        winspool::{
+            EnumPrintersW, GetDefaultPrinterW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+            PRINTER_INFO_1W,
+        },
         winuser::*,
     },
 };
@@ -77,7 +85,14 @@ use windows::Win32::{
         PROCESS_QUERY_LIMITED_INFORMATION as WIN_PROCESS_QUERY_LIMITED_INFORMATION,
     },
 };
-
+use windows_service::{
+    define_windows_service,
+    service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+};
 use winreg::{enums::*, RegKey};
 
 mod acl;
@@ -94,6 +109,7 @@ pub const SET_FOREGROUND_WINDOW: &'static str = "SET_FOREGROUND_WINDOW";
 
 const REG_NAME_INSTALL_DESKTOPSHORTCUTS: &str = "DESKTOPSHORTCUTS";
 const REG_NAME_INSTALL_STARTMENUSHORTCUTS: &str = "STARTMENUSHORTCUTS";
+pub const REG_NAME_INSTALL_PRINTER: &str = "PRINTER";
 
 pub fn get_focused_display(displays: Vec<DisplayInfo>) -> Option<usize> {
     unsafe {
@@ -502,13 +518,26 @@ fn fix_cursor_mask(
     return true;
 }
 
-pub fn start_os_service() {
-    log::error!("System services are no longer supported; run the interactive application");
+define_windows_service!(ffi_service_main, service_main);
+
+fn service_main(arguments: Vec<OsString>) {
+    if let Err(e) = run_service(arguments) {
+        log::error!("run_service failed: {}", e);
+    }
 }
+
+pub fn start_os_service() {
+    if let Err(e) =
+        windows_service::service_dispatcher::start(crate::get_app_name(), ffi_service_main)
+    {
+        log::error!("start_service failed: {}", e);
+    }
+}
+
+const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 extern "C" {
     fn get_current_session(rdp: BOOL) -> DWORD;
-    fn LaunchSessionAgentWin(command: *const u16, session: DWORD, error: *mut DWORD) -> HANDLE;
     fn is_session_locked(session_id: DWORD) -> BOOL;
     fn LaunchProcessWin(
         cmd: *const u16,
@@ -603,6 +632,174 @@ fn authorize_service_scoped_ipc_connection(
 
 extern "system" {
     fn BlockInput(v: BOOL) -> BOOL;
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
+    let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        log::info!("Got service control event: {:?}", control_event);
+        match control_event {
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            ServiceControl::Stop | ServiceControl::Preshutdown | ServiceControl::Shutdown => {
+                send_close(crate::POSTFIX_SERVICE).ok();
+                ServiceControlHandlerResult::NoError
+            }
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+
+    // Register system service event handler
+    let status_handle = service_control_handler::register(crate::get_app_name(), event_handler)?;
+
+    let next_status = ServiceStatus {
+        // Should match the one from system service registry
+        service_type: SERVICE_TYPE,
+        // The new state
+        current_state: ServiceState::Running,
+        // Accept stop events when running
+        controls_accepted: ServiceControlAccept::STOP,
+        // Used to report an error when starting or stopping only, otherwise must be zero
+        exit_code: ServiceExitCode::Win32(0),
+        // Only used for pending states, otherwise must be zero
+        checkpoint: 0,
+        // Only used for pending states, otherwise must be zero
+        wait_hint: Duration::default(),
+        process_id: None,
+    };
+
+    // Tell the system that the service is running now
+    status_handle.set_service_status(next_status)?;
+
+    let mut session_id = unsafe { get_current_session(share_rdp()) };
+    log::info!("session id {}", session_id);
+    let mut h_process = launch_server(session_id, true).await.unwrap_or(NULL);
+    let mut incoming = ipc::new_listener(crate::POSTFIX_SERVICE).await?;
+    let mut stored_usid = None;
+    loop {
+        let sids: Vec<_> = get_available_sessions(false)
+            .iter()
+            .map(|e| e.sid)
+            .collect();
+        if !sids.contains(&session_id) || !is_share_rdp() {
+            let current_active_session = unsafe { get_current_session(share_rdp()) };
+            if session_id != current_active_session {
+                session_id = current_active_session;
+                // https://github.com/rustdesk/rustdesk/discussions/10039
+                let count = ipc::get_port_forward_session_count(1000).await.unwrap_or(0);
+                if count == 0 {
+                    h_process = launch_server(session_id, true).await.unwrap_or(NULL);
+                }
+            }
+        }
+        let res = timeout(super::SERVICE_INTERVAL, incoming.next()).await;
+        match res {
+            Ok(res) => match res {
+                Some(Ok(stream)) => {
+                    let mut stream = ipc::Connection::new(stream);
+                    // Keep IPC authorization consistent with the session we are currently serving.
+                    // Recompute expected session right before authorization to avoid using a stale
+                    // session_id after awaiting incoming.next().
+                    let expected_active_session_id =
+                        resolve_expected_active_session_id_for_service(session_id);
+                    if !authorize_service_scoped_ipc_connection(&stream, expected_active_session_id)
+                    {
+                        continue;
+                    }
+                    if let Ok(Some(data)) = stream.next_timeout(1000).await {
+                        match data {
+                            ipc::Data::Close => {
+                                log::info!("close received");
+                                break;
+                            }
+                            ipc::Data::SAS => {
+                                send_sas();
+                            }
+                            ipc::Data::UserSid(usid) => {
+                                if let Some(usid) = usid {
+                                    if session_id != usid {
+                                        log::info!(
+                                            "session changed from {} to {}",
+                                            session_id,
+                                            usid
+                                        );
+                                        session_id = usid;
+                                        stored_usid = Some(session_id);
+                                        h_process =
+                                            launch_server(session_id, true).await.unwrap_or(NULL);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Err(_) => {
+                // timeout
+                unsafe {
+                    let tmp = get_current_session(share_rdp());
+                    if tmp == 0xFFFFFFFF {
+                        continue;
+                    }
+                    let mut close_sent = false;
+                    if tmp != session_id && stored_usid != Some(session_id) {
+                        log::info!("session changed from {} to {}", session_id, tmp);
+                        session_id = tmp;
+                        let count = ipc::get_port_forward_session_count(1000).await.unwrap_or(0);
+                        if count == 0 {
+                            send_close_async("").await.ok();
+                            close_sent = true;
+                        }
+                    }
+                    let mut exit_code: DWORD = 0;
+                    if h_process.is_null()
+                        || (GetExitCodeProcess(h_process, &mut exit_code) == TRUE
+                            && exit_code != STILL_ACTIVE
+                            && CloseHandle(h_process) == TRUE)
+                    {
+                        match launch_server(session_id, !close_sent).await {
+                            Ok(ptr) => {
+                                h_process = ptr;
+                            }
+                            Err(err) => {
+                                log::error!("Failed to launch server: {}", err);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !h_process.is_null() {
+        send_close_async("").await.ok();
+        unsafe { CloseHandle(h_process) };
+    }
+
+    status_handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    Ok(())
+}
+
+async fn launch_server(session_id: DWORD, close_first: bool) -> ResultType<HANDLE> {
+    if close_first {
+        // in case started some elsewhere
+        send_close_async("").await.ok();
+    }
+    let cmd = format!(
+        "\"{}\" --server",
+        std::env::current_exe()?.to_str().unwrap_or("")
+    );
+    launch_privileged_process(session_id, &cmd)
 }
 
 pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
@@ -724,10 +921,85 @@ async fn send_close_async(postfix: &str) -> ResultType<()> {
 // https://www.cnblogs.com/doutu/p/4892726.html
 pub fn send_sas() {
     #[link(name = "sas")]
-    extern "system" { fn SendSAS(as_user: BOOL); }
-    // The OS decides whether this signed/authorized caller may send SAS.
-    // A portable application must not change the machine's security policy.
-    unsafe { SendSAS(if is_root() { FALSE } else { TRUE }); }
+    extern "system" {
+        pub fn SendSAS(AsUser: BOOL);
+    }
+    unsafe {
+        log::info!("SAS received");
+
+        // Check and temporarily set SoftwareSASGeneration if needed
+        let mut original_value: Option<u32> = None;
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+
+        if let Ok(policy_key) = hklm.open_subkey_with_flags(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+            KEY_READ | KEY_WRITE,
+        ) {
+            // Read current value
+            match policy_key.get_value::<u32, _>("SoftwareSASGeneration") {
+                Ok(value) => {
+                    /*
+                    - 0 = None (disabled)
+                    - 1 = Services
+                    - 2 = Ease of Access applications
+                    - 3 = Services and Ease of Access applications (Both)
+                                      */
+                    if value != 1 && value != 3 {
+                        original_value = Some(value);
+                        log::info!("SoftwareSASGeneration is {}, setting to 1", value);
+                        // Set to 1 for SendSAS to work
+                        if let Err(e) = policy_key.set_value("SoftwareSASGeneration", &1u32) {
+                            log::error!("Failed to set SoftwareSASGeneration: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::info!(
+                        "SoftwareSASGeneration not found or error reading: {}, setting to 1",
+                        e
+                    );
+                    original_value = Some(0); // Mark that we need to restore (delete) it
+                                              // Create and set to 1
+                    if let Err(e) = policy_key.set_value("SoftwareSASGeneration", &1u32) {
+                        log::error!("Failed to set SoftwareSASGeneration: {}", e);
+                    }
+                }
+            }
+        } else {
+            log::error!("Failed to open registry key for SoftwareSASGeneration");
+        }
+
+        // Send SAS
+        SendSAS(FALSE);
+
+        // Restore original value if we changed it
+        if let Some(original) = original_value {
+            if let Ok(policy_key) = hklm.open_subkey_with_flags(
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+                KEY_WRITE,
+            ) {
+                if original == 0 {
+                    // It didn't exist before, delete it
+                    if let Err(e) = policy_key.delete_value("SoftwareSASGeneration") {
+                        log::error!("Failed to delete SoftwareSASGeneration: {}", e);
+                    } else {
+                        log::info!("Deleted SoftwareSASGeneration (restored to original state)");
+                    }
+                } else {
+                    // Restore the original value
+                    if let Err(e) = policy_key.set_value("SoftwareSASGeneration", &original) {
+                        log::error!(
+                            "Failed to restore SoftwareSASGeneration to {}: {}",
+                            original,
+                            e
+                        );
+                    } else {
+                        log::info!("Restored SoftwareSASGeneration to {}", original);
+                    }
+                }
+            }
+        }
+    }
 }
 
 lazy_static::lazy_static! {
@@ -781,6 +1053,13 @@ pub fn set_share_rdp(enable: bool) {
 
 pub fn get_current_process_session_id() -> Option<u32> {
     get_session_id_of_process(unsafe { GetCurrentProcessId() })
+}
+
+pub(crate) fn optional_lan_access_available() -> bool {
+    extern "C" { fn is_session_known_unlocked(session_id: DWORD) -> BOOL; }
+    let Some(sid) = get_current_process_session_id() else { return false; };
+    sid != 0 && !get_session_username(sid).is_empty()
+        && unsafe { is_session_known_unlocked(sid) == TRUE }
 }
 
 pub fn get_session_id_of_process(pid: DWORD) -> Option<u32> {
@@ -1043,11 +1322,28 @@ pub fn get_install_options() -> String {
     if let Some(start_menu_shortcuts) = start_menu_shortcuts {
         opts.insert(REG_NAME_INSTALL_STARTMENUSHORTCUTS, start_menu_shortcuts);
     }
+    let printer = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_PRINTER);
+    if let Some(printer) = printer {
+        opts.insert(REG_NAME_INSTALL_PRINTER, printer);
+    }
     serde_json::to_string(&opts).unwrap_or("{}".to_owned())
 }
 
-pub fn get_silent_install_options() -> &'static str {
-    "desktopicon startmenu"
+pub fn get_silent_install_options(printer_override: Option<bool>) -> &'static str {
+    let install_printer = match printer_override {
+        Some(override_value) => override_value,
+        None => {
+            let app_name = crate::get_app_name();
+            let subkey = format!(".{}", app_name.to_lowercase());
+            let printer = get_reg_of_hkcr(&subkey, REG_NAME_INSTALL_PRINTER);
+            printer.as_deref() == Some("1")
+        }
+    };
+    if install_printer && is_win_10_or_greater() {
+        "desktopicon startmenu printer"
+    } else {
+        "desktopicon startmenu"
+    }
 }
 
 // This function return Option<String>, because some registry value may be empty.
@@ -1204,6 +1500,7 @@ fn get_after_install(
     exe: &str,
     reg_value_start_menu_shortcuts: Option<String>,
     reg_value_desktop_shortcuts: Option<String>,
+    reg_value_printer: Option<String>,
 ) -> String {
     let app_name = crate::get_app_name();
     let ext = app_name.to_lowercase();
@@ -1227,11 +1524,20 @@ fn get_after_install(
             )
         })
         .unwrap_or_default();
+    let reg_printer = reg_value_printer
+        .map(|v| {
+            format!(
+                "reg add HKEY_CLASSES_ROOT\\.{ext} /f /v {REG_NAME_INSTALL_PRINTER} /t REG_SZ /d \"{v}\""
+            )
+        })
+        .unwrap_or_default();
+
     format!("
     chcp 65001
     reg add HKEY_CLASSES_ROOT\\.{ext} /f
     {desktop_shortcuts}
     {start_menu_shortcuts}
+    {reg_printer}
     reg add HKEY_CLASSES_ROOT\\.{ext}\\DefaultIcon /f
     reg add HKEY_CLASSES_ROOT\\.{ext}\\DefaultIcon /f /ve /t REG_SZ  /d \"\\\"{exe}\\\",0\"
     reg add HKEY_CLASSES_ROOT\\.{ext}\\shell /f
@@ -1252,7 +1558,7 @@ fn get_after_install(
 }
 
 pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> ResultType<()> {
-    let uninstall_str = get_uninstall(false);
+    let uninstall_str = get_uninstall(false, false);
     let mut path = path.trim_end_matches('\\').to_owned();
     let (subkey, _path, start_menu, exe) = get_default_install_info();
     let mut exe = exe;
@@ -1321,6 +1627,7 @@ oLink.Save
     let tray_shortcut = get_tray_shortcut(&path, &exe, &cur_exe, &tmp_path)?;
     let mut reg_value_desktop_shortcuts = "0".to_owned();
     let mut reg_value_start_menu_shortcuts = "0".to_owned();
+    let mut reg_value_printer = "0".to_owned();
     let mut shortcuts = Default::default();
     if options.contains("desktopicon") {
         shortcuts = format!(
@@ -1340,6 +1647,11 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{start_menu}\\\"
         );
         reg_value_start_menu_shortcuts = "1".to_owned();
     }
+    let install_printer = options.contains("printer") && is_win_10_or_greater();
+    if install_printer {
+        reg_value_printer = "1".to_owned();
+    }
+
     let meta = std::fs::symlink_metadata(&current_exe)?;
     let mut size = meta.len() / 1024;
     if let Some(parent_dir) = current_exe.parent() {
@@ -1370,6 +1682,16 @@ if exist \"{tmp_path}\\{app_name} Tray.lnk\" del /f /q \"{tmp_path}\\{app_name} 
 cscript \"{tray_shortcut}\"
 copy /Y \"{tmp_path}\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
 ")
+    };
+
+    let install_remote_printer = if install_printer {
+        // No need to use `|| true` here.
+        // The script will not exit even if `--install-remote-printer` panics.
+        format!("\"{}\" --install-remote-printer", &src_exe)
+    } else if is_win_10_or_greater() {
+        format!("\"{}\" --uninstall-remote-printer", &src_exe)
+    } else {
+        "".to_owned()
     };
 
     // Remember to check if `update_me` need to be changed if changing the `cmds`.
@@ -1403,6 +1725,7 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
 {dels}
 {import_config}
 {after_install}
+{install_remote_printer}
 {sleep}
     ",
         display_icon = get_custom_icon(&path, &cur_exe).unwrap_or(exe.to_string()),
@@ -1412,6 +1735,7 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
             &exe,
             Some(reg_value_start_menu_shortcuts),
             Some(reg_value_desktop_shortcuts),
+            Some(reg_value_printer)
         ),
         sleep = if debug { "timeout 300" } else { "" },
         dels = if debug { "" } else { &dels },
@@ -1425,7 +1749,11 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
 
 pub fn run_after_install() -> ResultType<()> {
     let (_, _, _, exe) = get_install_info();
-    run_cmds(get_after_install(&exe, None, None), true, "after_install")
+    run_cmds(
+        get_after_install(&exe, None, None, None),
+        true,
+        "after_install",
+    )
 }
 
 pub fn run_before_uninstall() -> ResultType<()> {
@@ -1461,25 +1789,33 @@ fn get_before_uninstall(kill_self: bool) -> String {
 /// - `kill_self`: The command will kill the process of current app name. If `true`, it will kill
 ///   the current process as well. If `false`, it will exclude the current process from the kill
 ///   command.
-fn get_uninstall(kill_self: bool) -> String {
+/// - `uninstall_printer`: If `true`, includes commands to uninstall the remote printer.
+///
+/// # Details
+/// The `uninstall_printer` parameter determines whether the command to uninstall the remote printer
+/// is included in the generated uninstall script. If `uninstall_printer` is `false`, the printer
+/// related command is omitted from the script.
+fn get_uninstall(kill_self: bool, uninstall_printer: bool) -> String {
     let reg_uninstall_string = get_reg("UninstallString");
     if reg_uninstall_string.to_lowercase().contains("msiexec.exe") {
         return reg_uninstall_string;
     }
 
     let mut uninstall_cert_cmd = "".to_string();
-    let mut legacy_printer_cleanup_cmd = "".to_string();
+    let mut uninstall_printer_cmd = "".to_string();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_path) = exe.to_str() {
             uninstall_cert_cmd = format!("\"{}\" --uninstall-cert", exe_path);
-            legacy_printer_cleanup_cmd = format!("\"{}\" --uninstall-remote-printer", &exe_path);
+            if uninstall_printer {
+                uninstall_printer_cmd = format!("\"{}\" --uninstall-remote-printer", &exe_path);
+            }
         }
     }
     let (subkey, path, start_menu, _) = get_install_info();
     format!(
         "
     {before_uninstall}
-    {legacy_printer_cleanup_cmd}
+    {uninstall_printer_cmd}
     {uninstall_cert_cmd}
     reg delete {subkey} /f
     {uninstall_amyuni_idd}
@@ -1495,7 +1831,7 @@ fn get_uninstall(kill_self: bool) -> String {
 }
 
 pub fn uninstall_me(kill_self: bool) -> ResultType<()> {
-    run_cmds(get_uninstall(kill_self), true, "uninstall")
+    run_cmds(get_uninstall(kill_self, true), true, "uninstall")
 }
 
 fn write_cmds(cmds: String, ext: &str, tip: &str) -> ResultType<std::path::PathBuf> {
@@ -1787,6 +2123,22 @@ pub fn prepare_custom_client_update() -> ResultType<bool> {
 
 // We can't directly use `RegKey::set_value` to update the registry value, because it will fail with `ERROR_ACCESS_DENIED`
 // So we have to use `run_cmds` to update the registry value.
+pub fn update_install_option(k: &str, v: &str) -> ResultType<()> {
+    // Don't update registry if not installed or not server process.
+    if !is_installed() || !crate::is_server() {
+        return Ok(());
+    }
+    if ![REG_NAME_INSTALL_PRINTER].contains(&k) || !["0", "1"].contains(&v) {
+        return Ok(());
+    }
+    let app_name = crate::get_app_name();
+    let ext = app_name.to_lowercase();
+    let cmds =
+        format!("chcp 65001 && reg add HKEY_CLASSES_ROOT\\.{ext} /f /v {k} /t REG_SZ /d \"{v}\"");
+    run_cmds(cmds, false, "update_install_option")?;
+    Ok(())
+}
+
 #[inline]
 pub fn is_win_server() -> bool {
     unsafe { is_windows_server() > 0 }
@@ -1795,6 +2147,35 @@ pub fn is_win_server() -> bool {
 #[inline]
 pub fn is_win_10_or_greater() -> bool {
     unsafe { is_windows_10_or_greater() > 0 }
+}
+
+/// MSI calls this after writing the installed files/registry and before service startup.
+pub fn reset_receiver_only_for_install() -> ResultType<()> {
+    let hive = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let helper = hive.open_subkey_with_flags(
+        "SOFTWARE\\SubnetDesk\\Helper", KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)?;
+    let install: String = helper.get_value("InstallFolder")?;
+    let executable = std::env::current_exe()?;
+    let directory = executable.parent().ok_or_else(|| hbb_common::anyhow::anyhow!("Missing Helper directory"))?;
+    if !directory.to_string_lossy().trim_end_matches('\\').eq_ignore_ascii_case(install.trim_end_matches('\\')) {
+        hbb_common::bail!("Receiver installation reset must run from the registered Helper directory");
+    }
+    match hive.open_subkey_with_flags(
+        "SOFTWARE\\SubnetDesk\\DevicePolicy", KEY_READ | KEY_WRITE | KEY_WOW64_64KEY) {
+        Ok(key) => match key.get_value::<String, _>("ReceiverPolicy") {
+            Ok(raw) => {
+                let policy = config::relock_managed_receiver_policy(serde_json::from_str(&raw)?)?;
+                key.set_value("ReceiverPolicy", &serde_json::to_string(&policy)?)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.into()),
+    }
+    helper.set_value("ReceiverInstallId", &uuid::Uuid::new_v4().to_string())?;
+    config::initialize_installed_helper();
+    Ok(())
 }
 
 pub fn bootstrap() -> bool {
@@ -2057,16 +2438,10 @@ pub fn elevate(arg: &str) -> ResultType<bool> {
 }
 
 pub fn run_as_system(arg: &str) -> ResultType<()> {
-    let exe = std::env::current_exe()?;
-    let session = get_current_process_session_id()
-        .ok_or_else(|| hbb_common::anyhow::anyhow!("Cannot determine the interactive session"))?;
-    let command = wide_string(&format!("\"{}\" {}", exe.display(), arg));
-    let mut error = 0;
-    let process = unsafe { LaunchSessionAgentWin(command.as_ptr(), session, &mut error) };
-    if process.is_null() {
-        return Err(io::Error::from_raw_os_error(error as i32).into());
+    let exe = std::env::current_exe()?.to_string_lossy().to_string();
+    if impersonate_system::run_as_system(&exe, arg).is_err() {
+        bail!(format!("Failed to run {} as system", exe));
     }
-    unsafe { CloseHandle(process); }
     Ok(())
 }
 
@@ -2091,11 +2466,6 @@ pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_syst
         "--run-as-system"
     }
     .to_owned();
-    if let Some(paths) = hbb_common::app_paths::get() {
-        let data_arg = format!(" \"--data-dir={}\"", paths.root.display());
-        arg_elevate.push_str(&data_arg);
-        arg_run_as_system.push_str(&data_arg);
-    }
     let shmem_name_from_args = crate::portable_service::portable_service_shmem_name_from_args();
     if shmem_name_from_args.is_none() && crate::portable_service::has_portable_service_shmem_arg() {
         log::error!("Invalid portable service shared memory argument, aborting elevation flow");
@@ -2149,7 +2519,7 @@ pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_syst
 }
 
 pub fn is_elevated(process_id: Option<DWORD>) -> ResultType<bool> {
-    use base::platform::windows::RAIIHandle;
+    use hbb_common::platform::windows::RAIIHandle;
     unsafe {
         let handle: HANDLE = match process_id {
             Some(process_id) => OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process_id),
@@ -2903,6 +3273,9 @@ fn get_directory_size_kb(path: &str) -> u64 {
 }
 
 pub fn update_me(debug: bool) -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     let app_name = crate::get_app_name();
     let src_exe = std::env::current_exe()?.to_string_lossy().to_string();
     let (subkey, path, _, exe) = get_install_info();
@@ -3020,8 +3393,17 @@ reg add {subkey} /f /v EstimatedSize /t REG_DWORD /d {size}
         "".to_owned()
     };
 
-    // Updates clean up installations created by versions that supported remote printing.
-    let legacy_printer_cleanup_cmd = format!("\"{}\" --uninstall-remote-printer", &src_exe);
+    // No need to check the install option here, `is_rd_printer_installed` rarely fails.
+    let is_printer_installed = remote_printer::is_rd_printer_installed(&app_name).unwrap_or(false);
+    // Do nothing if the printer is not installed or failed to query if the printer is installed.
+    let (uninstall_printer_cmd, install_printer_cmd) = if is_printer_installed {
+        (
+            format!("\"{}\" --uninstall-remote-printer", &src_exe),
+            format!("\"{}\" --install-remote-printer", &src_exe),
+        )
+    } else {
+        ("".to_owned(), "".to_owned())
+    };
 
     // We do not try to remove all files in the old version.
     // Because I don't know whether additional files will be installed here after installation, such as drivers.
@@ -3044,10 +3426,9 @@ taskkill /F /IM {app_name}.exe{filter}
 {copy_exe}
 {rename_exe}
 {remove_meta_toml}
-{legacy_printer_cleanup_cmd}
-if exist \"{path}\\printer_driver_adapter.dll\" del /F /Q \"{path}\\printer_driver_adapter.dll\"
-if exist \"{path}\\drivers\\RustDeskPrinterDriver\" rd /S /Q \"{path}\\drivers\\RustDeskPrinterDriver\"
 {restore_service_cmd}
+{uninstall_printer_cmd}
+{install_printer_cmd}
 {sleep}
     ",
         app_name = app_name,
@@ -3251,6 +3632,9 @@ pub fn handle_custom_client_staging_dir_before_update(
 
 // Used for auto update and manual update in the main window.
 pub fn update_to(file: &str) -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     if file.ends_with(".exe") {
         let custom_client_staging_dir = get_custom_client_staging_dir();
         if crate::is_custom_client() {
@@ -3287,6 +3671,9 @@ pub fn update_to(file: &str) -> ResultType<()> {
 //    `1` and `3` must be done in custom actions.
 //    We need also to handle the command line parsing to find the tray processes.
 pub fn update_me_msi(msi: &str, quiet: bool) -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     let quiet_args = if quiet { " /qn LAUNCH_TRAY_APP=N" } else { "" };
     let cmds =
         format!("chcp 65001 && msiexec /i \"{msi}\"{quiet_args} REBOOT=ReallySuppress /norestart");
@@ -3783,6 +4170,120 @@ pub mod reg_display_settings {
     }
 }
 
+pub fn get_printer_names() -> ResultType<Vec<String>> {
+    let mut needed_bytes = 0;
+    let mut returned_count = 0;
+
+    unsafe {
+        // First call to get required buffer size
+        EnumPrintersW(
+            PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS,
+            std::ptr::null_mut(),
+            1,
+            std::ptr::null_mut(),
+            0,
+            &mut needed_bytes,
+            &mut returned_count,
+        );
+
+        let mut buffer = vec![0u8; needed_bytes as usize];
+
+        if EnumPrintersW(
+            PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS,
+            std::ptr::null_mut(),
+            1,
+            buffer.as_mut_ptr() as *mut _,
+            needed_bytes,
+            &mut needed_bytes,
+            &mut returned_count,
+        ) == 0
+        {
+            return Err(anyhow!("Failed to enumerate printers"));
+        }
+
+        let ptr = buffer.as_ptr() as *const PRINTER_INFO_1W;
+        let printers = std::slice::from_raw_parts(ptr, returned_count as usize);
+
+        Ok(printers
+            .iter()
+            .filter_map(|p| {
+                let name = p.pName;
+                if !name.is_null() {
+                    let mut len = 0;
+                    while len < 500 {
+                        if name.add(len).is_null() || *name.add(len) == 0 {
+                            break;
+                        }
+                        len += 1;
+                    }
+                    if len > 0 && len < 500 {
+                        Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+                            name, len,
+                        )))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+}
+
+extern "C" {
+    fn PrintXPSRawData(printer_name: *const u16, raw_data: *const u8, data_size: c_ulong) -> DWORD;
+}
+
+pub fn send_raw_data_to_printer(printer_name: Option<String>, data: Vec<u8>) -> ResultType<()> {
+    let mut printer_name = printer_name.unwrap_or_default();
+    if printer_name.is_empty() {
+        // use GetDefaultPrinter to get the default printer name
+        let mut needed_bytes = 0;
+        unsafe {
+            GetDefaultPrinterW(std::ptr::null_mut(), &mut needed_bytes);
+        }
+        if needed_bytes > 0 {
+            let mut default_printer_name = vec![0u16; needed_bytes as usize];
+            unsafe {
+                GetDefaultPrinterW(
+                    default_printer_name.as_mut_ptr() as *mut _,
+                    &mut needed_bytes,
+                );
+            }
+            printer_name = String::from_utf16_lossy(&default_printer_name[..needed_bytes as usize]);
+        }
+    } else {
+        if let Ok(names) = crate::platform::windows::get_printer_names() {
+            if !names.contains(&printer_name) {
+                // Don't set the first printer as current printer.
+                // It may not be the desired printer.
+                bail!("Printer name \"{}\" not found", &printer_name);
+            }
+        }
+    }
+    if printer_name.is_empty() {
+        return Err(anyhow!("Failed to get printer name"));
+    }
+
+    log::info!("Sending data to printer: {}", &printer_name);
+    let printer_name = wide_string(&printer_name);
+    unsafe {
+        let res = PrintXPSRawData(
+            printer_name.as_ptr(),
+            data.as_ptr() as *const u8,
+            data.len() as c_ulong,
+        );
+        if res != 0 {
+            bail!("Failed to send data to the printer, see logs in C:\\Windows\\temp\\test_rustdesk.log for more details.");
+        } else {
+            log::info!("Successfully sent data to the printer");
+        }
+    }
+
+    Ok(())
+}
+
 fn get_pids<S: AsRef<str>>(name: S) -> ResultType<Vec<u32>> {
     let name = name.as_ref().to_lowercase();
     let mut pids = Vec::new();
@@ -4027,7 +4528,7 @@ mod tests {
     // Test-only reusable Win32 HANDLE RAII helper.
     // If a future non-test path needs the same pattern, move it out of this test module.
     //
-    // This struct is similar to `base::platform::windows::RAIIHandle`,
+    // This struct is similar to `hbb_common::platform::windows::RAIIHandle`,
     // but `RAIIHandle` depends on `WinApi` crate, while this `HandleGuard` only depends on `windows` crate.
     struct HandleGuard(WinHANDLE);
 

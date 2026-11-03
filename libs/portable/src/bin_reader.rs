@@ -34,42 +34,36 @@ impl Default for BinaryReader {
 }
 
 impl BinaryData {
-    fn decompress(&self) -> std::io::Result<Vec<u8>> {
+    fn decompress(&self) -> Vec<u8> {
         let cursor = Cursor::new(self.raw);
         let mut decoder = brotli::Decompressor::new(cursor, BUF_SIZE);
         let mut buf = Vec::new();
-        decoder.read_to_end(&mut buf)?;
-        Ok(buf)
+        decoder.read_to_end(&mut buf).ok();
+        buf
     }
 
-    pub fn write_to_file(&self, prefix: &Path) -> std::io::Result<()> {
-        use std::path::Component;
-        let normalized = self.path.replace('\\', "/");
-        let relative = Path::new(&normalized);
-        if relative.components().any(|part| !matches!(part, Component::Normal(_))) || normalized.contains(':') {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid portable archive path"));
-        }
-        let p = prefix.join(relative);
+    pub fn write_to_file(&self, prefix: &Path) {
+        let p = prefix.join(&self.path);
         if let Some(parent) = p.parent() {
             if !parent.exists() {
-                fs::create_dir_all(parent)?;
+                let _ = fs::create_dir_all(parent);
             }
         }
         if p.exists() {
             // check md5
-            let f = fs::read(&p)?;
+            let f = fs::read(p.clone()).unwrap_or_default();
             let digest = format!("{:x}", md5::compute(&f));
             let md5_record = String::from_utf8_lossy(self.md5_code);
             if digest == md5_record {
                 // same, skip this file
                 println!("skip {}", &self.path);
-                return Ok(());
+                return;
             } else {
                 println!("writing {}", p.display());
                 println!("{} -> {}", md5_record, digest)
             }
         }
-        fs::write(p, self.decompress()?)
+        let _ = fs::write(p, self.decompress());
     }
 }
 

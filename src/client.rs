@@ -43,10 +43,12 @@ use hbb_common::{
     anyhow::{anyhow, Context},
     bail,
     config::{
-        self, Config, LocalConfig, PeerConfig, PeerInfoSerde, Resolution, CONNECT_TIMEOUT,
+        self, keys, Config, LocalConfig, PeerConfig, PeerInfoSerde, Resolution, CONNECT_TIMEOUT,
         READ_TIMEOUT,
     },
+    fs::JobType,
     get_version_number, log,
+    message_proto::{option_message::BoolOption, *},
     protobuf::{Enum, Message as _, MessageField},
     rand,
     rendezvous_proto::*,
@@ -58,11 +60,6 @@ use hbb_common::{
         time::{Duration, Instant},
     },
     AddrMangle, ResultType, Stream,
-};
-use base::{
-    config::keys,
-    fs::JobType,
-    message_proto::{option_message::BoolOption, *},
 };
 pub use helper::*;
 use scrap::{
@@ -129,13 +126,25 @@ fn lan_credential_config_id_for_fingerprint(fingerprint: &str) -> Option<String>
 pub(crate) fn load_remembered_lan_credential_for_fingerprint(
     fingerprint: &str,
 ) -> Option<(String, Vec<u8>)> {
+    #[cfg(target_os = "android")]
+    {
+        return match crate::android_credentials::load(fingerprint) {
+            Ok(credential) => credential,
+            Err(_) => {
+                log::warn!("Unable to read Android's encrypted LAN credential store");
+                None
+            }
+        };
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     let config_id = lan_credential_config_id_for_fingerprint(fingerprint)?;
     let config = PeerConfig::load(&config_id);
     let username = config
         .options
         .get(LAN_CREDENTIAL_USERNAME_OPTION)
         .cloned()?;
-    if hbb_common::lan::validate_username(&username).is_err() {
+    if hbb_common::lan::validate_credential_username(&username).is_err() {
         return None;
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -167,9 +176,18 @@ pub(crate) fn load_remembered_lan_credential_for_fingerprint(
     {
         None
     }
+    }
 }
 
 pub(crate) fn clear_remembered_lan_credential_for_fingerprint(fingerprint: &str) {
+    #[cfg(target_os = "android")]
+    {
+        if crate::android_credentials::forget(fingerprint).is_err() {
+            log::warn!("Unable to remove the saved Android LAN credential");
+        }
+        return;
+    }
+    #[cfg(not(target_os = "android"))]
     if let Some(config_id) = lan_credential_config_id_for_fingerprint(fingerprint) {
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         match keyring::Entry::new(LAN_CREDENTIAL_KEYRING_SERVICE, &config_id)
@@ -251,9 +269,12 @@ impl Client {
         peer: &str,
         _conn_type: ConnType,
         interface: impl Interface,
-    ) -> ResultType<(Stream, Vec<u8>, String)> {
+    ) -> ResultType<(Stream, Vec<u8>, String, Option<String>)> {
+        if !crate::camera_access::allowed(_conn_type == ConnType::VIEW_CAMERA) {
+            bail!(crate::camera_access::DISABLED_MESSAGE);
+        }
         if config::is_incoming_only() {
-            bail!("Incoming only mode");
+            bail!("This device is receiver-only and cannot initiate connections");
         }
         if let Some(remaining) = interface.get_lch().read().unwrap().auth_retry_remaining() {
             bail!(
@@ -268,7 +289,8 @@ impl Client {
         let requested = hbb_common::lan::Endpoint::parse(peer)?
             .authority()
             .to_owned();
-        let (expected_fingerprint, mut candidates) = crate::lan::connection_candidates(&requested);
+        let (intent, expected_fingerprint, mut candidates) =
+            crate::lan::connection_candidates(&requested);
         let mut discovery = expected_fingerprint.as_ref().map(|_| {
             tokio::spawn(async {
                 if let Err(err) = crate::lan::discover_async().await {
@@ -311,14 +333,29 @@ impl Client {
                         continue;
                     }
                 };
+                let mut verified_fingerprint = None;
                 if let Some(expected) = expected_fingerprint.as_ref() {
-                    if !identity.fingerprint.eq_ignore_ascii_case(expected) {
+                    let matches = identity.fingerprint.eq_ignore_ascii_case(expected);
+                    if !matches {
                         log::warn!(
-                            "LAN endpoint {} presented fingerprint {}, expected {}; requesting user confirmation",
+                            "LAN endpoint {} presented fingerprint {}, expected {}",
                             endpoint,
                             identity.fingerprint,
                             expected
                         );
+                        if intent == crate::lan::ConnectionIntent::SavedDevice {
+                            // A saved device's identity is proven only by a prior
+                            // verified connection. A mismatch here means the
+                            // endpoint is occupied by a different device (e.g. an
+                            // IP reassignment); never trust or log into it, and
+                            // never surface a re-trust prompt for it.
+                            errors.push(format!(
+                                "{endpoint}: fingerprint mismatch for saved device"
+                            ));
+                            continue;
+                        }
+                    } else if intent == crate::lan::ConnectionIntent::SavedDevice {
+                        verified_fingerprint = Some(identity.fingerprint.clone());
                     }
                 }
 
@@ -330,14 +367,19 @@ impl Client {
                     endpoint,
                     identity.fingerprint
                 );
-                return Ok((stream, identity.device_public_key, connected_endpoint));
+                return Ok((
+                    stream,
+                    identity.device_public_key,
+                    connected_endpoint,
+                    verified_fingerprint,
+                ));
             }
 
             if let Some(discovery) = discovery.take() {
                 if let Err(err) = discovery.await {
                     log::debug!("LAN discovery fallback task failed: {err}");
                 }
-                let (_, refreshed) = crate::lan::connection_candidates(&requested);
+                let (_, _, refreshed) = crate::lan::connection_candidates(&requested);
                 candidates = refreshed;
                 if candidates
                     .iter()
@@ -832,10 +874,6 @@ impl AudioHandler {
 
     /// Handle audio format and create an audio decoder.
     pub fn handle_format(&mut self, f: AudioFormat) {
-        if !is_supported_audio_channel_count(f.channels) {
-            log::error!("Unsupported audio channel count: {}", f.channels);
-            return;
-        }
         match AudioDecoder::new(f.sample_rate, if f.channels > 1 { Stereo } else { Mono }) {
             Ok(d) => {
                 let buffer = vec![0.; f.sample_rate as usize * f.channels as usize];
@@ -972,23 +1010,6 @@ impl AudioHandler {
         stream.play()?;
         self.audio_stream = Some(Box::new(stream));
         Ok(())
-    }
-}
-
-fn is_supported_audio_channel_count(channels: u32) -> bool {
-    (1..=2).contains(&channels)
-}
-
-#[cfg(test)]
-mod audio_format_tests {
-    use super::is_supported_audio_channel_count;
-
-    #[test]
-    fn only_mono_and_stereo_are_supported() {
-        assert!(is_supported_audio_channel_count(1));
-        assert!(is_supported_audio_channel_count(2));
-        assert!(!is_supported_audio_channel_count(0));
-        assert!(!is_supported_audio_channel_count(u32::MAX));
     }
 }
 
@@ -1245,15 +1266,35 @@ impl LoginConfigHandler {
         load_remembered_lan_credential_for_fingerprint(&self.lan_fingerprint)
     }
 
+    pub fn load_remembered_lan_credential_checked(&self) -> ResultType<Option<(String, Vec<u8>)>> {
+        #[cfg(target_os = "android")]
+        { crate::android_credentials::load(&self.lan_fingerprint) }
+        #[cfg(not(target_os = "android"))]
+        { Ok(self.load_remembered_lan_credential()) }
+    }
+
+    pub fn clear_remembered_lan_credential_checked(&self) -> ResultType<()> {
+        #[cfg(target_os = "android")]
+        { crate::android_credentials::forget(&self.lan_fingerprint) }
+        #[cfg(not(target_os = "android"))]
+        { self.clear_remembered_lan_credential(); Ok(()) }
+    }
+
     pub fn save_remembered_lan_credential(
         &self,
         username: &str,
         password: &[u8],
     ) -> ResultType<()> {
+        #[cfg(target_os = "android")]
+        {
+            return crate::android_credentials::save(&self.lan_fingerprint, username, password);
+        }
+        #[cfg(not(target_os = "android"))]
+        {
         let config_id = self
             .lan_credential_config_id()
             .ok_or_else(|| anyhow!("LAN device fingerprint is not available"))?;
-        let username = hbb_common::lan::validate_username(username)?;
+        let username = hbb_common::lan::validate_credential_username(username)?;
         hbb_common::lan::validate_password(password)?;
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         {
@@ -1278,6 +1319,7 @@ impl LoginConfigHandler {
             .insert(LAN_CREDENTIAL_USERNAME_OPTION.to_owned(), username);
         config.store(&config_id);
         Ok(())
+        }
     }
 
     pub fn clear_remembered_lan_credential(&self) {
@@ -1917,38 +1959,30 @@ impl LoginConfigHandler {
         };
         if connected_endpoint != self.id && !self.lan_fingerprint.is_empty() {
             self.config.store(&connected_endpoint);
-            let mut changed = false;
-            let mut seen = HashSet::new();
-            let favorites = LocalConfig::get_fav()
-                .into_iter()
-                .filter_map(|favorite| {
-                    let favorite = if favorite == self.id {
-                        changed = true;
-                        connected_endpoint.clone()
-                    } else {
-                        favorite
-                    };
-                    seen.insert(favorite.clone()).then_some(favorite)
-                })
-                .collect::<Vec<_>>();
-            if changed {
-                LocalConfig::set_fav(favorites);
+            // Atomically update any favorite matching this verified device's
+            // fingerprint to its new endpoint under the cross-process
+            // favorites lock. This replaces the old unlocked
+            // get_fav()/set_fav() endpoint-string rewrite, which raced with
+            // concurrent edits from another process and matched by the old
+            // connection string rather than the device's verified identity.
+            if let Err(err) = LocalConfig::update_favorite_endpoint_for_fingerprint(
+                &self.lan_fingerprint,
+                &connected_endpoint,
+            ) {
+                log::error!("Failed to update favorite endpoint for verified device: {err}");
             }
             LocalConfig::set_remote_id(&connected_endpoint);
         }
-        if !self.lan_fingerprint.is_empty() && !self.lan_access_username.is_empty() {
-            let additions = serde_json::from_str::<serde_json::Value>(&pi.platform_additions)
-                .unwrap_or_default();
-            let device_type = crate::device_type::normalize(
-                additions.get("device_type").and_then(|value| value.as_str()).unwrap_or_default()
-            );
+        if !self.lan_fingerprint.is_empty() {
+            // Android saves the access username only inside the encrypted payload.
+            // History may retain public peer display information, not the login account.
+            let recent_username = if pi.username.is_empty() { "Device" } else { &pi.username };
             if let Err(err) = LocalConfig::record_recent_lan_endpoint(
                 &connected_endpoint,
-                &self.lan_access_username,
+                recent_username,
                 &pi.hostname,
                 &pi.platform,
                 &self.lan_fingerprint,
-                device_type,
             ) {
                 log::error!("Failed to store recent LAN endpoint: {err}");
             }
@@ -2397,7 +2431,7 @@ async fn do_sync_cpu_usage() {
                 if let Ok(Some(data)) = conn.next_timeout(50).await {
                     match data {
                         Data::SyncWinCpuUsage(cpu_usage) => {
-                            base::platform::windows::sync_cpu_usage(cpu_usage);
+                            hbb_common::platform::windows::sync_cpu_usage(cpu_usage);
                         }
                         _ => {}
                     }
@@ -2682,17 +2716,17 @@ pub async fn handle_login_error(
         interface.msgbox("input-password", "Password Required", "", "");
         true
     } else if err == LOGIN_MSG_LAN_CREDENTIALS_WRONG {
-        if let Err(err) = tokio::task::spawn_blocking(move || {
-            lc.read().unwrap().clear_remembered_lan_credential();
-        })
-        .await
-        {
-            log::warn!("Failed to clear the remembered LAN credential: {err}");
+        let cleared = tokio::task::spawn_blocking(move || {
+            lc.read().unwrap().clear_remembered_lan_credential_checked()
+        }).await;
+        if !matches!(cleared, Ok(Ok(()))) {
+            log::warn!("Unable to remove the rejected saved LAN credential");
+            interface.msgbox("error", "Failed", "Unable to remove the saved credential. Use Forget password before reconnecting.", "");
         }
         interface.msgbox(
             "lan-login-required",
-            "Username or password is incorrect",
-            "Enter the access username and password configured on the remote device.",
+            "Password is incorrect",
+            "Enter the unattended access password configured on the remote device.",
             "",
         );
         true
@@ -2727,8 +2761,122 @@ pub async fn send_lan_login(
     username: String,
     password: Vec<u8>,
     peer: &mut Stream,
-) {
-    send_lan_login_with_os_login(lc, username, password, String::new(), String::new(), peer).await;
+) -> ResultType<()> {
+    send_lan_login_with_os_login(lc, username, password, String::new(), String::new(), peer).await
+}
+
+async fn negotiate_lan_access(peer: &mut Stream, method: u32) -> ResultType<()> {
+    if !peer.is_secured() { bail!("Encrypted LAN session required"); }
+    let mut probe = Message::new();
+    probe.set_lan_access_probe(LanAccessProbe { version: hbb_common::lan::ACCESS_VERSION, ..Default::default() });
+    peer.send(&probe).await?;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis() as u64;
+        if remaining == 0 { bail!("Remote version does not support the selected access method"); }
+        let Some(bytes) = peer.next_timeout(remaining).await else { bail!("Remote version does not support the selected access method"); };
+        let msg = Message::parse_from_bytes(&bytes?)?;
+        match msg.union {
+            Some(message::Union::LanAccessCapabilities(caps)) if caps.version == hbb_common::lan::ACCESS_VERSION => {
+                let enabled = match method {
+                    hbb_common::lan::ACCESS_CODE => caps.code_enabled,
+                    hbb_common::lan::ACCESS_MANUAL => caps.manual_enabled,
+                    hbb_common::lan::ACCESS_PASSWORD_ONLY => caps.password_only_enabled,
+                    hbb_common::lan::ACCESS_AUTO => caps.code_enabled || caps.manual_enabled || caps.password_only_enabled,
+                    _ => false,
+                };
+                if !enabled { bail!("Selected access method is disabled or unsupported on the receiver"); }
+                return Ok(());
+            }
+            Some(message::Union::TestDelay(test)) if !test.from_client => {
+                let mut reply = Message::new(); reply.set_test_delay(test); peer.send(&reply).await?;
+            }
+            Some(message::Union::LoginResponse(_)) => bail!("Remote version rejected access negotiation"),
+            _ => {},
+        }
+    }
+}
+
+#[cfg(test)]
+mod password_only_contract_tests {
+    use super::*;
+    use hbb_common::sodiumoxide;
+    use hbb_common::tokio::net::{TcpListener, TcpStream};
+
+    async fn pair() -> (Stream, Stream) {
+        sodiumoxide::init().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, remote) = listener.accept().await.unwrap();
+        let key = sodiumoxide::crypto::secretbox::gen_key();
+        let mut client = Stream::from(client, address);
+        let mut server = Stream::from(server, remote);
+        client.set_key(key.clone()); server.set_key(key);
+        (client, server)
+    }
+    async fn exercise(enabled: bool) {
+        let (mut client, mut server) = pair().await;
+        let server_task = tokio::spawn(async move {
+            let bytes = server.next_timeout(2000).await.unwrap().unwrap();
+            assert!(matches!(Message::parse_from_bytes(&bytes).unwrap().union, Some(message::Union::LanAccessProbe(_))));
+            let mut reply = Message::new();
+            reply.set_lan_access_capabilities(LanAccessCapabilities { version: hbb_common::lan::ACCESS_VERSION,
+                password_only_enabled: enabled, ..Default::default() });
+            server.send(&reply).await.unwrap();
+            if enabled {
+                let bytes = server.next_timeout(2000).await.unwrap().unwrap();
+                let msg = Message::parse_from_bytes(&bytes).unwrap();
+                let login = msg.login_request().lan_login.as_ref().unwrap();
+                assert_eq!(login.access_method, hbb_common::lan::ACCESS_PASSWORD_ONLY);
+                assert!(login.access_username.is_empty());
+                assert_eq!(login.access_password.as_ref(), b"synthetic-password");
+            } else {
+                // No password and no legacy fallback after a negative/old reply.
+                assert!(server.next_timeout(100).await.is_none());
+            }
+        });
+        let config = Arc::new(RwLock::new(LoginConfigHandler::default()));
+        let result = send_lan_login(config, String::new(), b"synthetic-password".to_vec(), &mut client).await;
+        assert_eq!(result.is_ok(), enabled);
+        server_task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn positive_capability_precedes_password_only_login() { exercise(true).await; }
+    #[tokio::test]
+    async fn old_or_disabled_capability_sends_no_password_or_fallback() { exercise(false).await; }
+    #[tokio::test]
+    async fn unsecured_stream_never_gets_password_or_probe() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, remote) = listener.accept().await.unwrap();
+        let mut client = Stream::from(client, address);
+        let mut server = Stream::from(server, remote);
+        let config = Arc::new(RwLock::new(LoginConfigHandler::default()));
+        assert!(send_lan_login(config, String::new(), b"synthetic-password".to_vec(), &mut client).await.is_err());
+        assert!(server.next_timeout(100).await.is_none());
+    }
+}
+
+pub(crate) async fn send_optional_lan_login(
+    lc: Arc<RwLock<LoginConfigHandler>>, method: u32, mut code: String, peer: &mut Stream,
+) -> ResultType<()> {
+    let result = async {
+        negotiate_lan_access(peer, method).await?;
+        let mut request = lc.read().unwrap().create_login_msg(String::new(), String::new(), Vec::new()).login_request().clone();
+        request.username.clear(); request.password.clear();
+        request.my_id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
+        request.lan_login = MessageField::some(LanLoginRequest { access_method: method, temporary_code: std::mem::take(&mut code), ..Default::default() });
+        let mut msg = Message::new(); msg.set_login_request(request);
+        let result = peer.send(&msg).await;
+        if let Some(message::Union::LoginRequest(lr)) = msg.union.as_mut() {
+            if let Some(login) = lr.lan_login.as_mut() { login.temporary_code.zeroize(); }
+        }
+        result
+    }.await;
+    code.zeroize();
+    result
 }
 
 pub async fn send_lan_login_with_os_login(
@@ -2738,17 +2886,24 @@ pub async fn send_lan_login_with_os_login(
     os_username: String,
     os_password: String,
     peer: &mut Stream,
-) {
-    let username = match hbb_common::lan::validate_username(&username) {
+) -> ResultType<()> {
+    let username = match hbb_common::lan::validate_credential_username(&username) {
         Ok(value) => value,
         Err(_) => {
             password.zeroize();
-            return;
+            bail!("Invalid LAN credential");
         }
     };
     if hbb_common::lan::validate_password(&password).is_err() {
         password.zeroize();
-        return;
+        bail!("Invalid LAN password");
+    }
+    let password_only = username.is_empty();
+    if password_only {
+        if let Err(err) = negotiate_lan_access(peer, hbb_common::lan::ACCESS_PASSWORD_ONLY).await {
+            password.zeroize();
+            return Err(err);
+        }
     }
     let mut request = lc
         .read()
@@ -2762,6 +2917,7 @@ pub async fn send_lan_login_with_os_login(
         access_username: username,
         access_password: Bytes::copy_from_slice(&password),
         credential_revision_hint: 0,
+        access_method: if password_only { hbb_common::lan::ACCESS_PASSWORD_ONLY } else { hbb_common::lan::ACCESS_PASSWORD },
         ..Default::default()
     });
     request.my_id = crate::lan_protocol::fingerprint(&Config::get_key_pair().1);
@@ -2770,9 +2926,7 @@ pub async fn send_lan_login_with_os_login(
     let result = peer.send(&message).await;
     password.zeroize();
     scrub_lan_password(&mut message);
-    if let Err(err) = result {
-        log::debug!("Failed to send LAN login request: {err}");
-    }
+    result
 }
 
 fn scrub_lan_password(message: &mut Message) {
@@ -2807,7 +2961,7 @@ pub async fn handle_login_from_ui(
     access_username: String,
     access_password: Vec<u8>,
     peer: &mut Stream,
-) {
+) -> ResultType<()> {
     let _ = remember;
     send_lan_login_with_os_login(
         lc,
@@ -2817,7 +2971,7 @@ pub async fn handle_login_from_ui(
         os_password,
         peer,
     )
-    .await;
+    .await
 }
 
 /// Interface for client to send data and commands.
@@ -2849,7 +3003,7 @@ pub trait Interface: Send + Clone + 'static + Sized {
         self.get_lch().read().unwrap().id.clone()
     }
 
-    fn swap_modifier_mouse(&self, _msg: &mut base::protos::message::MouseEvent) {}
+    fn swap_modifier_mouse(&self, _msg: &mut hbb_common::protos::message::MouseEvent) {}
 
     fn update_direct(&self, direct: Option<bool>) {
         self.get_lch().write().unwrap().direct = direct;
@@ -2896,6 +3050,7 @@ pub trait Interface: Send + Clone + 'static + Sized {
 /// Data used by the client interface.
 #[derive(Clone)]
 pub enum Data {
+    RequestChatAttention,
     Close,
     RejectLanDevice,
     SubmitLanCredentials,
@@ -2933,6 +3088,7 @@ pub async fn confirm_lan_device(
     receiver: &mut UnboundedReceiver<Data>,
     endpoint: &str,
     device_public_key: &[u8],
+    verified_fingerprint: Option<&str>,
 ) -> bool {
     let endpoint = match hbb_common::lan::Endpoint::parse(endpoint) {
         Ok(value) => value,
@@ -2945,6 +3101,19 @@ pub async fn confirm_lan_device(
     let trusted = Config::get_trusted_lan_fingerprint(endpoint.authority());
     if trusted.as_deref() == Some(fingerprint.as_str()) {
         return true;
+    }
+    // `Client::start` already verified this fingerprint against the saved
+    // device's prior, verified identity before returning. Record trust
+    // without prompting; a saved-device mismatch never reaches this point,
+    // since `Client::start` rejects that candidate outright.
+    if let Some(verified) = verified_fingerprint {
+        if verified.eq_ignore_ascii_case(&fingerprint) {
+            if let Err(err) = Config::trust_lan_fingerprint(endpoint.authority(), &fingerprint) {
+                log::error!("Failed to save verified LAN device fingerprint: {err}");
+                return false;
+            }
+            return true;
+        }
     }
     if trusted.is_none() && Config::is_trusted_lan_fingerprint(&fingerprint) {
         if let Err(err) = Config::trust_lan_fingerprint(endpoint.authority(), &fingerprint) {

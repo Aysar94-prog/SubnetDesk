@@ -1,5 +1,4 @@
-use hbb_common::log;
-use base::{fs, message_proto::*};
+use hbb_common::{fs, log, message_proto::*};
 
 use super::{Data, Interface};
 

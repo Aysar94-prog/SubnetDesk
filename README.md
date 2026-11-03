@@ -62,10 +62,6 @@ That makes it a good fit for home labs, offices, classrooms, on-site support, an
 > [!IMPORTANT]
 > SubnetDesk does not provide Internet rendezvous or relay services. The two devices must be reachable through the same LAN, a routed private network, or a VPN.
 
-Version 2.0.0 ships the regular Linux packages. Publication of the separate DRM
-unattended/login-screen package is paused while its root service is adapted to
-the new user-session runtime.
-
 <a id="features"></a>
 
 ## ✨ Features
@@ -125,8 +121,6 @@ Download stable packages from **[GitHub Releases](https://github.com/zibo-chen/S
 - CIDR allowlists let the controlled device limit which source networks may connect.
 
 As with any remote-control software, expose the listening port only to trusted networks, use a strong unique password, and verify fingerprints through a separate trusted channel when possible.
-
-See the [SubnetDesk Privacy Policy](PRIVACY.md) for session data, local storage, update requests, and deletion controls.
 
 <a id="build-from-source"></a>
 

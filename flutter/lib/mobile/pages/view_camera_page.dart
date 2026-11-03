@@ -487,7 +487,11 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   }
 
   showChatOptions(String id) async {
-    onPressVoiceCall() => bind.sessionRequestVoiceCall(sessionId: sessionId);
+    onPressVoiceCall() async {
+      // Microphone is requested only when the user starts a voice call.
+      if (!await ensureAndroidVoiceCallMicrophone()) return;
+      bind.sessionRequestVoiceCall(sessionId: sessionId);
+    }
     onPressEndVoiceCall() => bind.sessionCloseVoiceCall(sessionId: sessionId);
 
     makeTextMenu(String label, Widget icon, VoidCallback onPressed,

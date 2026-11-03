@@ -22,6 +22,10 @@ static HICON g_custom_icon_ = nullptr;
 // Try to load icon from data\flutter_assets\assets\icon.ico if it exists.
 // Returns nullptr if the file doesn't exist or can't be loaded.
 HICON LoadCustomIcon() {
+#ifdef SUBNETDESK_DEPLOY_ICON
+  // Keep the Deploy badge from the executable on taskbar and window icons.
+  return nullptr;
+#else
   if (g_custom_icon_ != nullptr) {
     return g_custom_icon_;
   }
@@ -51,6 +55,7 @@ HICON LoadCustomIcon() {
       nullptr, icon_path.c_str(), IMAGE_ICON, 0, 0,
       LR_LOADFROMFILE | LR_DEFAULTSIZE);
   return g_custom_icon_;
+#endif
 }
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);

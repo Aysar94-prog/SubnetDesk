@@ -29,7 +29,7 @@ if (flutterVersionCode == null) {
 
 def flutterVersionName = localProperties.getProperty('flutter.versionName')
 if (flutterVersionName == null) {
-    flutterVersionName = '2.0.0'
+    flutterVersionName = '1.0'
 }
 
 // Add rustls-platform-verifier Android support
@@ -85,10 +85,14 @@ android {
     // Keep the established Kotlin namespace while publishing under the SubnetDesk application ID.
     namespace "com.carriez.flutter_hbb"
     compileSdkVersion flutter.compileSdkVersion
+    if (providers.gradleProperty('subnetdeskHelperCandidate').orNull == 'true') {
+        // Match the scoped native dependency build; leave upstream builds unchanged.
+        ndkVersion '28.2.13676358'
+    }
     sourceSets {
         main.java.srcDirs += 'src/main/kotlin'
 
-        main.proto.srcDirs += '../../../libs/base/protos'
+        main.proto.srcDirs += '../../../libs/hbb_common/protos'
         main.proto.includes += "message.proto"
     }
 
@@ -101,10 +105,18 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId "com.zibochen.subnetdesk"
+        // Opt-in side-by-side helper; never replaces the differently signed original.
+        if (providers.gradleProperty('subnetdeskHelperCandidate').orNull == 'true') {
+            applicationIdSuffix ".helper"
+        }
+        manifestPlaceholders.subnetDeskAppLabel =
+            providers.gradleProperty('subnetdeskHelperCandidate').orNull == 'true'
+                ? 'SubnetDesk Helper' : '@string/app_name'
         minSdkVersion flutter.minSdkVersion
         targetSdkVersion flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+        testInstrumentationRunner "com.carriez.flutter_hbb.CredentialStoreInstrumentation"
     }
 
     signingConfigs {
@@ -120,7 +132,8 @@ android {
         release {
             // Local release builds use android/key.properties. CI replaces its
             // temporary build signature with the pinned release certificate.
-            signingConfig signingConfigs.release
+            signingConfig providers.gradleProperty('subnetdeskHelperCandidate').orNull == 'true'
+                ? signingConfigs.debug : signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }
     }

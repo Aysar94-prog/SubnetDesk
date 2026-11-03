@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:auto_size_text_field/auto_size_text_field.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/formatter/id_formatter.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
 import 'package:get/get.dart';
@@ -11,9 +12,10 @@ import 'package:flutter_hbb/models/peer_model.dart';
 
 import '../../common.dart';
 import '../../common/widgets/peer_tab_page.dart';
+import '../../common/widgets/connection_diagnostic_dialog.dart';
+import '../../common/widgets/scan_range_dialog.dart';
 import '../../common/widgets/autocomplete.dart';
 import '../../consts.dart';
-import '../../desktop/lan_discovery_refresh.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import 'home_page.dart';
@@ -36,8 +38,7 @@ class ConnectionPage extends StatefulWidget implements PageShape {
 }
 
 /// State for the connection page.
-class _ConnectionPageState extends State<ConnectionPage>
-    with WidgetsBindingObserver {
+class _ConnectionPageState extends State<ConnectionPage> {
   /// Controller for the id input bar.
   final _idController = IDTextEditingController();
   final RxBool _idEmpty = true.obs;
@@ -46,11 +47,14 @@ class _ConnectionPageState extends State<ConnectionPage>
   final TextEditingController _idEditingController = TextEditingController();
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  bool _rememberPassword = false;
+  int _accessMethod = 0;
+  final TextEditingController _codeController = TextEditingController();
+  String _credentialEndpoint = '';
 
   final AllPeersLoader _allPeersLoader = AllPeersLoader();
 
   StreamSubscription? _uniLinksSubscription;
-  Timer? _discoveryTimer;
 
   // https://github.com/flutter/flutter/issues/157244
   Iterable<Peer> _autocompleteOpts = [];
@@ -59,6 +63,15 @@ class _ConnectionPageState extends State<ConnectionPage>
     if (!isWeb) _uniLinksSubscription = listenUniLinks();
     _idController.addListener(() {
       _idEmpty.value = _idController.text.isEmpty;
+      final endpoint = _idController.id;
+      if (_credentialEndpoint != endpoint && _rememberPassword) {
+        if (mounted) {
+          setState(() => _rememberPassword = false);
+        } else {
+          _rememberPassword = false;
+        }
+      }
+      _credentialEndpoint = endpoint;
     });
     Get.put<IDTextEditingController>(_idController);
   }
@@ -79,32 +92,6 @@ class _ConnectionPageState extends State<ConnectionPage>
       });
     }
     Get.put<TextEditingController>(_idEditingController);
-    WidgetsBinding.instance.addObserver(this);
-    _startDiscovery();
-  }
-
-  void _refreshPeers() {
-    bind.mainLoadLanPeers();
-    bind.mainLoadRecentPeers();
-    bind.mainLoadFavPeers();
-    bind.mainDiscover();
-  }
-
-  void _startDiscovery() {
-    if (isWeb) return;
-    _discoveryTimer?.cancel();
-    _refreshPeers();
-    _discoveryTimer = Timer.periodic(
-        lanDiscoveryRefreshInterval, (_) => _refreshPeers());
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _startDiscovery();
-    } else {
-      _discoveryTimer?.cancel();
-    }
   }
 
   @override
@@ -113,7 +100,21 @@ class _ConnectionPageState extends State<ConnectionPage>
     return CustomScrollView(
       slivers: [
         SliverList(
-          delegate: SliverChildListDelegate([_buildRemoteIDTextField()]),
+          delegate: SliverChildListDelegate([_buildRemoteIDTextField(),
+            Align(alignment: Alignment.centerRight, child: Wrap(
+              alignment: WrapAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: () => showScanRangeDialog(context),
+                  icon: const Icon(Icons.travel_explore),
+                  label: Text(translate('Scan IP range'))),
+                TextButton.icon(
+                  onPressed: () => showConnectionDiagnostic(context, _idController.id),
+                  icon: const Icon(Icons.network_check),
+                  label: Text(translate('Check connection'))),
+              ],
+            )),
+          ]),
         ),
         SliverFillRemaining(hasScrollBody: true, child: PeerTabPage()),
       ],
@@ -128,11 +129,15 @@ class _ConnectionPageState extends State<ConnectionPage>
     bool isTerminal = false,
   }) async {
     final endpoint = _idController.id;
-    final username = _usernameController.text.trim();
     final password = _passwordController.text;
-    if (endpoint.isEmpty || (username.isEmpty && password.isNotEmpty)) {
+    final code = _codeController.text.trim();
+    if (_accessMethod == 1 && !RegExp(r'^[0-9]{6}$').hasMatch(code)) {
+      showToast(translate('Enter a 6-digit temporary code'));
+      return;
+    }
+    if (endpoint.isEmpty) {
       showToast(
-        '${translate('Local Address')} · ${translate('Username')} · ${translate('Password')}',
+        translate('Local Address'),
       );
       return;
     }
@@ -142,16 +147,21 @@ class _ConnectionPageState extends State<ConnectionPage>
       isFileTransfer: isFileTransfer,
       isViewCamera: isViewCamera,
       isTerminal: isTerminal,
-      password: password.isEmpty
+      password: _accessMethod != 0
+          ? jsonEncode({'lan_version': 1, 'access_method': _accessMethod,
+              'temporary_code': _accessMethod == 1 ? code : ''})
+          : password.isEmpty
           ? null
           : jsonEncode({
               'lan_version': 1,
-              'username': username,
+              'username': '',
               'password': password,
-              'remember': false,
+              'remember': _rememberPassword,
             }),
     );
     _passwordController.clear();
+    _codeController.clear();
+    if (mounted) setState(() => _rememberPassword = false);
   }
 
   void onFocusChanged() {
@@ -395,16 +405,31 @@ class _ConnectionPageState extends State<ConnectionPage>
             true,
           ).marginOnly(bottom: 10, top: 15, left: 12),
         w,
-        TextField(
-          controller: _usernameController,
-          autocorrect: false,
-          enableSuggestions: false,
-          decoration: InputDecoration(
-            labelText: translate('Username'),
-            prefixIcon: const Icon(Icons.person_outline),
+        if (isAndroid)
+          DropdownButtonFormField<int>(
+            value: _accessMethod,
+            decoration: InputDecoration(labelText: translate('Access method')),
+            items: [
+              DropdownMenuItem(value: 0, child: Text(translate('Password / saved password'))),
+              DropdownMenuItem(value: 1, child: Text(translate('Temporary code'))),
+              DropdownMenuItem(value: 2, child: Text(translate('Manual approval'))),
+            ],
+            onChanged: (value) => setState(() {
+              _accessMethod = value ?? 0;
+              _rememberPassword = false;
+              _passwordController.clear();
+              _codeController.clear();
+            }),
           ),
-        ).marginSymmetric(horizontal: 4, vertical: 4),
-        TextField(
+        if (_accessMethod == 1)
+          TextField(controller: _codeController, keyboardType: TextInputType.number,
+            autocorrect: false, enableSuggestions: false, maxLength: 6,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            decoration: InputDecoration(labelText: translate('Receiver code (6 digits)')),
+            onSubmitted: (_) => onConnect()),
+        if (_accessMethod == 2)
+          Padding(padding: const EdgeInsets.all(8), child: Text(translate('A request appears on the receiver. Control starts only after acceptance.'))),
+        if (_accessMethod == 0) TextField(
           controller: _passwordController,
           obscureText: true,
           autocorrect: false,
@@ -415,6 +440,16 @@ class _ConnectionPageState extends State<ConnectionPage>
           ),
           onSubmitted: (_) => onConnect(),
         ).marginSymmetric(horizontal: 4, vertical: 4),
+        if (isAndroid && _accessMethod == 0)
+          CheckboxListTile(
+            value: _rememberPassword,
+            onChanged: (value) => setState(() => _rememberPassword = value == true),
+            dense: true,
+            contentPadding: EdgeInsets.symmetric(horizontal: 4),
+            controlAffinity: ListTileControlAffinity.leading,
+            title: Text(translate('Remember password')),
+            subtitle: Text(translate('Saved for this verified device only after successful login')),
+          ),
         LayoutBuilder(
           builder: (context, constraints) {
             final singleColumn = constraints.maxWidth < 340;
@@ -443,8 +478,6 @@ class _ConnectionPageState extends State<ConnectionPage>
                     () => onConnect()),
                 action(Icons.folder_outlined, 'Transfer file',
                     () => onConnect(isFileTransfer: true)),
-                action(Icons.videocam_outlined, 'View camera',
-                    () => onConnect(isViewCamera: true)),
                 action(Icons.terminal_outlined, 'Terminal',
                     () => onConnect(isTerminal: true)),
               ],
@@ -461,8 +494,6 @@ class _ConnectionPageState extends State<ConnectionPage>
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _discoveryTimer?.cancel();
     _uniLinksSubscription?.cancel();
     _idController.dispose();
     _idFocusNode.removeListener(onFocusChanged);
@@ -471,6 +502,7 @@ class _ConnectionPageState extends State<ConnectionPage>
     _idEditingController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _codeController.dispose();
     if (Get.isRegistered<IDTextEditingController>()) {
       Get.delete<IDTextEditingController>();
     }

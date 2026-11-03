@@ -1,5 +1,5 @@
 use clipboard::ClipboardFile;
-use base::message_proto::*;
+use hbb_common::message_proto::*;
 
 pub fn clip_2_msg(clip: ClipboardFile) -> Message {
     match clip {

@@ -1,6 +1,6 @@
 [package]
 name = "rustdesk"
-version = "2.0.0"
+version = "1.4.7"
 authors = ["SubnetDesk contributors"]
 edition = "2021"
 build= "build.rs"
@@ -12,6 +12,10 @@ rust-version = "1.75"
 name = "librustdesk"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[[bin]]
+name = "service"
+path = "src/service.rs"
+
 [features]
 inline = []
 use_samplerate = ["samplerate"]
@@ -22,13 +26,6 @@ default = ["use_dasp"]
 hwcodec = ["scrap/hwcodec"]
 vram = ["scrap/vram"]
 mediacodec = ["scrap/mediacodec"]
-drm = ["scrap/drm"]
-# The display wake, as its OWN compile gate on top of `drm`. Everything else in the drm backend
-# READS (it captures a scanout); the wake WRITES, injecting one synthetic pointer event from the
-# root service so a compositor that idle-disabled its outputs re-enables them. That is a different
-# kind of operation and deserves a switch that can remove it from the binary entirely, without
-# giving up DRM capture: `--features drm` builds the capture path with no wake code compiled in.
-drm-wake = ["drm"]
 plugin_framework = ["dep:reqwest"]
 software-update = ["dep:reqwest", "dep:ring"]
 linux-pkg-config = ["magnum-opus/linux-pkg-config", "scrap/linux-pkg-config"]
@@ -47,7 +44,6 @@ screencapturekit = ["cpal/screencapturekit"]
 async-trait = "0.1"
 scrap = { path = "libs/scrap", features = ["wayland"] }
 hbb_common = { path = "libs/hbb_common" }
-base = { path = "libs/base" }
 serde_derive = "1.0"
 serde = "1.0"
 serde_json = "1.0"
@@ -65,7 +61,7 @@ samplerate = { version = "0.2", optional = true }
 uuid = { version = "1.3", features = ["v4"] }
 num_cpus = "1.15"
 bytes = { version = "1.4", features = ["serde"] }
-default-net = "0.22"
+default-net = "0.14"
 wol-rs = "1.0"
 flutter_rust_bridge = { version = "=1.80", features = ["uuid"], optional = true}
 errno = "0.3"
@@ -86,10 +82,12 @@ ring = { version = "0.17", optional = true }
 cpal = { git = "https://github.com/rustdesk-org/cpal", branch = "osx-screencapturekit" }
 ringbuf = "0.3"
 
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+mdns-sd = { version = "=0.20.2", default-features = false, features = ["logging"] }
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 mac_address = "1.1"
-mdns-sd = { version = "=0.20.2", default-features = false, features = ["logging"] }
-sciter-rs = { path = "libs/sciter-rs" }
+sciter-rs = { git = "https://github.com/rustdesk-org/rust-sciter", branch = "dyn" }
 sys-locale = "0.3"
 enigo = { path = "libs/enigo", features = [ "with_serde" ] }
 clipboard = { path = "libs/clipboard" }
@@ -116,15 +114,14 @@ winapi = { version = "0.3", features = [
     "pdh",
     "synchapi",
     "memoryapi",
-    "winerror",
-    "handleapi",
-    "errhandlingapi",
     "shellapi",
     "devguid",
     "setupapi",
     "cguid",
     "cfgmgr32",
     "ioapiset",
+    "winspool",
+    "netioapi",
 ] }
 windows = { version = "0.61", features = [
     "Win32",
@@ -143,8 +140,11 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
 ] }
 winreg = "0.11"
+windows-service = "0.6"
 virtual_display = { path = "libs/virtual_display" }
-legacy_printer_cleanup = { path = "libs/remote_printer" }
+remote_printer = { path = "libs/remote_printer" }
+impersonate_system = { git = "https://github.com/rustdesk-org/impersonate-system" }
+shared_memory = "0.12"
 tauri-winrt-notification = "0.1"
 runas = "1.2"
 
@@ -163,6 +163,7 @@ piet-coregraphics = "0.6"
 foreign-types = "0.3"
 
 [target.'cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))'.dependencies]
+tray-icon = { git = "https://github.com/tauri-apps/tray-icon", version = "0.21.3" }
 tao = { git = "https://github.com/rustdesk-org/tao", branch = "dev" }
 image = "0.24"
 keyring = { version = "2.3.3", default-features = false, features = [
@@ -211,8 +212,8 @@ jni = "0.21"
 android-wakelock = { git = "https://github.com/rustdesk-org/android-wakelock" }
 
 [workspace]
-members = ["libs/scrap", "libs/hbb_common", "libs/base", "libs/enigo", "libs/clipboard", "libs/virtual_display", "libs/virtual_display/dylib", "libs/portable", "libs/remote_printer"]
-exclude = ["vdi/host"]
+members = ["libs/scrap", "libs/hbb_common", "libs/enigo", "libs/clipboard", "libs/virtual_display", "libs/virtual_display/dylib", "libs/portable", "libs/remote_printer"]
+exclude = ["vdi/host", "examples/custom_plugin"]
 
 # Patch libxdo-sys to use a stub implementation that doesn't require libxdo
 # This allows building and running on systems without libxdo installed (e.g., Wayland-only)

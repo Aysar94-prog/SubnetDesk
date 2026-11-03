@@ -66,11 +66,7 @@ impl LanServer {
     }
 
     pub(crate) fn is_discoverable() -> bool {
-        // Discovery advertises presence, independently of incoming access.
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        return !desktop_stopping();
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        return Self::is_running() && service_ready();
+        discoverable_state(Self::is_running(), service_ready())
     }
 
     #[cfg(not(target_os = "ios"))]
@@ -80,15 +76,7 @@ impl LanServer {
         loop {
             let generation = RESTART_GENERATION.load(Ordering::SeqCst);
             let signature = listener_signature();
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            if crate::desktop_runtime::is_stopping() {
-                server.write().unwrap().close_connections();
-                ACTIVE_LISTENERS.store(0, Ordering::SeqCst);
-                set_runtime_status(RUNTIME_STATE_STOPPED, String::new());
-                return;
-            }
             if !service_ready() {
-                server.write().unwrap().close_connections();
                 ACTIVE_LISTENERS.store(0, Ordering::SeqCst);
                 set_runtime_status(RUNTIME_STATE_STOPPED, String::new());
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -108,12 +96,13 @@ impl LanServer {
                 };
             ACTIVE_LISTENERS.store(native_listener_count, Ordering::SeqCst);
             set_runtime_status(RUNTIME_STATE_LISTENING, String::new());
+            crate::lan_access::maintain();
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
+                crate::lan_access::maintain();
                 if generation != RESTART_GENERATION.load(Ordering::SeqCst)
                     || signature != listener_signature()
                     || !service_ready()
-                    || desktop_stopping()
                 {
                     break;
                 }
@@ -122,6 +111,7 @@ impl LanServer {
                 log::debug!("LAN listener stop receivers already closed");
             }
             ACTIVE_LISTENERS.store(0, Ordering::SeqCst);
+            crate::lan_access::maintain();
             set_runtime_status(
                 if service_ready() {
                     RUNTIME_STATE_STARTING
@@ -173,17 +163,15 @@ pub fn normalize_allowed_networks(value: &str) -> ResultType<String> {
         .map(|networks| networks.join(","))
 }
 
-fn desktop_stopping() -> bool {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    return crate::desktop_runtime::is_stopping();
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    false
+fn service_ready() -> bool {
+    // Windows can receive code/manual requests without setting a permanent password.
+    // Actual grants still require the unlocked interactive authority or a verified password.
+    (cfg!(windows) || Config::lan_credentials_configured())
+        && !option2bool("stop-service", &Config::get_option("stop-service"))
 }
 
-fn service_ready() -> bool {
-    !desktop_stopping() && Config::lan_credentials_configured()
-        && crate::host_permissions::ready()
-        && !option2bool("stop-service", &Config::get_option("stop-service"))
+fn discoverable_state(running: bool, ready: bool) -> bool {
+    running && ready
 }
 
 fn listen_port() -> u16 {
@@ -427,5 +415,13 @@ mod tests {
         );
         assert!(normalize_listen_addresses("host.lan").is_err());
         assert!(normalize_allowed_networks("192.168.1.1").is_err());
+    }
+
+    #[test]
+    fn discovery_requires_an_active_ready_listener() {
+        assert!(discoverable_state(true, true));
+        assert!(!discoverable_state(false, true));
+        assert!(!discoverable_state(true, false));
+        assert!(!discoverable_state(false, false));
     }
 }

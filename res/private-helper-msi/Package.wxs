@@ -1,0 +1,40 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- Independent private product: never share the upstream UpgradeCode. -->
+  <Package Name="SubnetDesk Helper" Manufacturer="SubnetDesk Private Build"
+           Version="$(var.ReleaseVersion)" Language="1033" Scope="perUser"
+           UpgradeCode="76b63726-899a-49a7-95df-52ef79d7c8c2" InstallerVersion="500">
+    <MajorUpgrade DowngradeErrorMessage="A newer SubnetDesk Helper is already installed."
+                  Schedule="afterInstallInitialize" AllowSameVersionUpgrades="$(var.AllowSameVersionUpgrades)" />
+    <Launch Condition="NOT ALLUSERS" Message="SubnetDesk Helper installs for the current user only." />
+    <Launch Condition="VersionNT64" Message="SubnetDesk Helper requires 64-bit Windows." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <Property Id="HELPER_BUILD" Value="$(var.ReleaseBuild)" />
+    <Property Id="ARPCOMMENTS" Value="Private helper $(var.ReleaseVersion), build $(var.ReleaseBuild). Updates disabled." />
+    <Property Id="ARPHELPLINK" Value="https://github.com/zibo-chen/SubnetDesk" />
+    <Icon Id="AppIcon.exe" SourceFile="$(var.AppIconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon.exe" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="HelperPrograms" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="SubnetDeskHelper" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="HelperMenu" Name="SubnetDesk Helper">
+        <Component Id="HelperShortcut" Guid="57534d8f-7dca-4b91-8e01-bba5636e7a02">
+          <Shortcut Id="HelperStart" Name="SubnetDesk Helper" Icon="AppIcon.exe" Target="[INSTALLFOLDER]SubnetDesk.exe"
+                    WorkingDirectory="INSTALLFOLDER" Description="Open SubnetDesk Helper" />
+          <RemoveFolder Id="RemoveHelperMenu" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\SubnetDeskPrivate\HelperInstaller"
+                         Name="Shortcut" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Complete" Title="SubnetDesk Helper" Level="1">
+      <ComponentGroupRef Id="HelperPayload" />
+      <ComponentRef Id="HelperShortcut" />
+    </Feature>
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+    <ui:WixUI Id="WixUI_Minimal" />
+  </Package>
+</Wix>

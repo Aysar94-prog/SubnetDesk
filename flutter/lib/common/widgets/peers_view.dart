@@ -9,6 +9,7 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
+import '../peer_subnet_grouping.dart';
 import '../../models/favorite_group_model.dart';
 import '../../models/peer_model.dart';
 import '../../models/platform_model.dart';
@@ -23,12 +24,14 @@ class PeerSortType {
   static const String remoteHost = 'Remote Host';
   static const String username = 'Username';
   static const String status = 'Status';
+  static const String lastConnected = 'Last connection';
 
   static List<String> values = [
     PeerSortType.endpoint,
     PeerSortType.remoteHost,
     PeerSortType.username,
-    PeerSortType.status
+    PeerSortType.status,
+    PeerSortType.lastConnected,
   ];
 }
 
@@ -102,7 +105,13 @@ class _PeersViewState extends State<_PeersView> {
     return ChangeNotifierProvider<Peers>.value(
       value: widget.peers,
       child: Consumer<Peers>(builder: (context, peers, child) {
-        if (peers.peers.isEmpty) {
+        // Apply the tab filter before deciding emptiness, so a tab whose peers
+        // are all filtered out (e.g. a Discovered list where every device is
+        // offline) still shows the empty tip instead of a blank list.
+        final visiblePeers = widget.peerFilter == null
+            ? peers.peers
+            : peers.peers.where(widget.peerFilter!).toList(growable: false);
+        if (visiblePeers.isEmpty) {
           gFFI.peerTabModel.setCurrentTabCachedPeers([]);
           return Center(
             child: Column(
@@ -139,7 +148,9 @@ class _PeersViewState extends State<_PeersView> {
           if (snapshot.hasData) {
             var peers = snapshot.data!;
             if (peers.length > 1000) peers = peers.sublist(0, 1000);
-            gFFI.peerTabModel.setCurrentTabCachedPeers(peers);
+            final groups = groupBySubnet<Peer>(peers, (peer) => peer.id);
+            gFFI.peerTabModel.setCurrentTabCachedPeers(
+                groups.expand((group) => group.items).toList());
             buildOnePeer(Peer peer, bool isPortrait) {
               final peerCard = widget.peerCardBuilder(peer);
               // `Provider.of<PeerTabModel>(context)` will causes infinete loop.
@@ -157,6 +168,28 @@ class _PeersViewState extends State<_PeersView> {
                   : Container(child: peerCard);
             }
 
+            // Each subnet gets a header followed by its own list/grid, so
+            // devices on different subnets/VLANs are visually separated.
+            List<Widget> groupedSlivers(Widget Function(List<Peer>) buildItems) =>
+                [
+                  for (var i = 0; i < groups.length; i++) ...[
+                    SliverToBoxAdapter(
+                        child: _buildSubnetHeader(context, groups[i], i == 0)),
+                    buildItems(groups[i].items),
+                  ],
+                ];
+
+            Widget peerList(List<Peer> items, bool isPortrait) => SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) => buildOnePeer(items[index], isPortrait)
+                        .marginOnly(
+                            right: isPortrait ? 0 : space,
+                            top: index == 0 ? 0 : space / 2,
+                            bottom: space / 2),
+                    childCount: items.length,
+                  ),
+                );
+
             // We should avoid too many rebuilds. Win10(Some machines) on Flutter 3.19.6.
             // Continious rebuilds of `ListView.builder` will cause memory leak.
             // Simple demo can reproduce this issue.
@@ -164,23 +197,14 @@ class _PeersViewState extends State<_PeersView> {
                     isMobilePlatform: isMobile,
                     isWebMobile: isWeb && !isWebDesktop,
                     isPortrait: stateGlobal.isPortrait.isTrue)
-                ? ListView.builder(
-                    itemCount: peers.length,
-                    itemBuilder: (BuildContext context, int index) {
-                      return buildOnePeer(peers[index], true).marginOnly(
-                          top: index == 0 ? 0 : space / 2, bottom: space / 2);
-                    },
+                ? CustomScrollView(
+                    slivers: groupedSlivers((items) => peerList(items, true)),
                   )
                 : peerCardUiType.value == PeerUiType.list
-                    ? ListView.builder(
+                    ? CustomScrollView(
                         controller: _scrollController,
-                        itemCount: peers.length,
-                        itemBuilder: (BuildContext context, int index) {
-                          return buildOnePeer(peers[index], false).marginOnly(
-                              right: space,
-                              top: index == 0 ? 0 : space / 2,
-                              bottom: space / 2);
-                        },
+                        slivers:
+                            groupedSlivers((items) => peerList(items, false)),
                       )
                     : LayoutBuilder(
                         builder: (context, constraints) {
@@ -192,23 +216,22 @@ class _PeersViewState extends State<_PeersView> {
                           final cardWidth = (constraints.maxWidth -
                                   space * (columnCount - 1)) /
                               columnCount;
-                          final extraTextHeight =
-                              (MediaQuery.textScalerOf(context).scale(14) - 14)
-                                  .clamp(0, 28);
-                          return GridView.builder(
+                          return CustomScrollView(
                             controller: _scrollController,
-                            gridDelegate:
-                                SliverGridDelegateWithFixedCrossAxisCount(
-                              crossAxisCount: columnCount,
-                              mainAxisSpacing: space,
-                              crossAxisSpacing: space,
-                              childAspectRatio:
-                                  cardWidth / (270 + extraTextHeight * 7),
-                            ),
-                            itemCount: peers.length,
-                            itemBuilder: (BuildContext context, int index) {
-                              return buildOnePeer(peers[index], false);
-                            },
+                            slivers: groupedSlivers((items) => SliverGrid(
+                                  gridDelegate:
+                                      SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: columnCount,
+                                    mainAxisSpacing: space,
+                                    crossAxisSpacing: space,
+                                    childAspectRatio: cardWidth / 250,
+                                  ),
+                                  delegate: SliverChildBuilderDelegate(
+                                    (context, index) =>
+                                        buildOnePeer(items[index], false),
+                                    childCount: items.length,
+                                  ),
+                                )),
                           );
                         },
                       ));
@@ -227,6 +250,29 @@ class _PeersViewState extends State<_PeersView> {
     return body;
   }
 
+  Widget _buildSubnetHeader(
+      BuildContext context, SubnetGroup<Peer> group, bool isFirst) {
+    final color = Theme.of(context).hintColor;
+    return Padding(
+      padding: EdgeInsets.only(
+          top: isFirst ? 0 : space, bottom: space / 2, right: space),
+      child: Row(
+        children: [
+          Icon(Icons.lan_outlined, size: 16, color: color),
+          const SizedBox(width: 6),
+          Text(
+            group.label ?? translate('Other'),
+            style: TextStyle(fontWeight: FontWeight.w600, color: color),
+          ),
+          const SizedBox(width: 6),
+          Text('(${group.items.length})', style: TextStyle(color: color)),
+          const SizedBox(width: 10),
+          const Expanded(child: Divider(height: 1)),
+        ],
+      ),
+    );
+  }
+
   Future<List<Peer>>? matchPeers(
       String searchText, String sortedBy, List<Peer> peers) async {
     if (widget.peerFilter != null) {
@@ -242,8 +288,8 @@ class _PeersViewState extends State<_PeersView> {
       );
     }
 
-    if (widget.peers.loadEvent != LoadEvent.recent ||
-        sortedBy == PeerSortType.status) {
+    favoriteGroupModel.load();
+    if (widget.peers.loadEvent != LoadEvent.recent || sortedBy == PeerSortType.lastConnected) {
       switch (sortedBy) {
         case PeerSortType.endpoint:
           peers.sort((p1, p2) => p1.getId().compareTo(p2.getId()));
@@ -257,7 +303,11 @@ class _PeersViewState extends State<_PeersView> {
               p1.username.toLowerCase().compareTo(p2.username.toLowerCase()));
           break;
         case PeerSortType.status:
-          peers.sort(comparePeerStatus);
+          peers.sort((p1, p2) => p1.online == p2.online
+              ? p1.getId().compareTo(p2.getId()) : p1.online ? -1 : 1);
+          break;
+        case PeerSortType.lastConnected:
+          peers.sort((p1, p2) => p2.lastConnectedAt.compareTo(p1.lastConnectedAt));
           break;
       }
     }
@@ -268,7 +318,10 @@ class _PeersViewState extends State<_PeersView> {
     }
     searchText = searchText.toLowerCase();
     final matches = await Future.wait(
-        peers.map((peer) => matchPeer(searchText, peer, widget.peerTabIndex)));
+        peers.map((peer) async => await matchPeer(searchText, peer, widget.peerTabIndex) ||
+            favoriteGroupModel.groups.any((group) =>
+                favoriteGroupModel.groupIdForPeer(peer.id) == group.id &&
+                group.name.toLowerCase().contains(searchText))));
     final filteredList = List<Peer>.empty(growable: true);
     for (var i = 0; i < peers.length; i++) {
       if (matches[i]) {
@@ -366,6 +419,7 @@ class DiscoveredPeersView extends BasePeersView {
       : super(
           key: key,
           peerTabIndex: PeerTabIndex.lan,
+          peerFilter: includeInDiscoveredList,
           peerCardBuilder: (Peer peer) => DiscoveredPeerCard(
             peer: peer,
             menuPadding: menuPadding,

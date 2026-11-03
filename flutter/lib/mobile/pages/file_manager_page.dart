@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'package:path/path.dart' as p;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_breadcrumb/flutter_breadcrumb.dart';
@@ -8,6 +10,8 @@ import 'package:toggle_switch/toggle_switch.dart';
 
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
+import '../android_file_bridge.dart';
+import '../shared_file_inbox.dart';
 
 class FileManagerPage extends StatefulWidget {
   FileManagerPage(
@@ -68,6 +72,32 @@ class _FileManagerPageState extends State<FileManagerPage> {
   FileDirectory get currentDir => currentFileController.directory.value;
   DirectoryOptions get currentOptions => currentFileController.options.value;
   final _uniqueKey = UniqueKey();
+  bool _sendingShared = false;
+
+  Future<void> _sendSharedFiles() async {
+    if (_sendingShared || gFFI.ffiModel.pi.platform.isEmpty ||
+        model.remoteController.directory.value.path.isEmpty) return;
+    setState(() => _sendingShared = true);
+    final inbox = SharedFileInbox.instance;
+    final paths = List.of(inbox.files);
+    try {
+      final selection = SelectedItems(isLocal: true);
+      for (final path in paths) {
+        final stat = await File(path).stat();
+        if (stat.type != FileSystemEntityType.file) throw FileSystemException('Shared file is unavailable', path);
+        selection.items.add(Entry()..path = path..name = p.basename(path)..size = stat.size);
+      }
+      if (selection.items.isNotEmpty) {
+        await model.localController.sendFiles(selection, model.remoteController.directoryData());
+        await inbox.acknowledge(paths);
+      }
+    } catch (e) {
+      debugPrint('Unable to send shared files: $e');
+      showToast(translate('Unable to send shared files. Please retry.'));
+    } finally {
+      if (mounted) setState(() => _sendingShared = false);
+    }
+  }
 
   @override
   void initState() {
@@ -108,6 +138,20 @@ class _FileManagerPageState extends State<FileManagerPage> {
       child: Scaffold(
         // backgroundColor: MyTheme.grayBg,
         appBar: AppBar(
+          bottom: isAndroid ? PreferredSize(preferredSize: const Size.fromHeight(54),
+            child: AnimatedBuilder(animation: SharedFileInbox.instance,
+              builder: (context, _) => Obx(() {
+                final inbox = SharedFileInbox.instance;
+                return Row(children: [
+                  Expanded(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Text(inbox.files.isEmpty ? translate('Choose files or a destination folder') :
+                      '${inbox.files.length} ${translate('files ready to send')}', overflow: TextOverflow.ellipsis))),
+                  TextButton(onPressed: inbox.files.isEmpty || _sendingShared ||
+                      gFFI.ffiModel.pi.platform.isEmpty ||
+                      model.remoteController.directory.value.path.isEmpty ? null : _sendSharedFiles,
+                    child: Text(translate('Send here'))),
+                ]);
+              }))) : null,
           leading: Row(children: [
             IconButton(
                 icon: Icon(Icons.close),
@@ -191,10 +235,36 @@ class _FileManagerPageState extends State<FileManagerPage> {
                         ],
                       ),
                       value: "hidden",
-                    )
+                    ),
+                    if (isAndroid && showLocal)
+                      PopupMenuItem(
+                        enabled: currentDir.path.isNotEmpty &&
+                            currentDir.path != "/",
+                        child: Row(
+                          children: [
+                            Icon(Icons.file_upload_outlined,
+                                color: Theme.of(context).iconTheme.color),
+                            SizedBox(width: 5),
+                            Text(translate("Add files from phone"))
+                          ],
+                        ),
+                        value: "import_from_phone",
+                      ),
                   ];
                 },
-                onSelected: (v) {
+                onSelected: (v) async {
+                  if (v == "import_from_phone") {
+                    final controller = currentFileController;
+                    try {
+                      final count =
+                          await importFilesFromPhone(currentDir.path);
+                      if (count > 0) controller.refresh();
+                    } catch (e) {
+                      debugPrint("import from phone failed: $e");
+                      showToast(translate("Failed"));
+                    }
+                    return;
+                  }
                   if (v == "refresh") {
                     currentFileController.refresh();
                   } else if (v == "select") {
@@ -360,16 +430,24 @@ class _FileManagerPageState extends State<FileManagerPage> {
           return BottomSheetBody(
             leading: CircularProgressIndicator(),
             title: translate("Waiting"),
-            text: "${readableFileSize(activeJob.speed)}/s",
-            onCanceled: () {
-              model.jobController.cancelJob(activeJob.id);
-              jobTable.clear();
+            text:
+                '${activeJob.fileName} · ${activeJob.percentText}\n${translate("Speed")}: ${readableFileSize(activeJob.speed)}/s',
+            onCanceled: () async {
+              activeJob.state = JobState.done;
+              activeJob.err = 'cancel';
+              jobTable.refresh();
+              try { await model.jobController.cancelJob(activeJob.id); }
+              catch (e) {
+                activeJob.state = JobState.error;
+                activeJob.err = e.toString();
+                jobTable.refresh();
+              }
             },
           );
         case JobState.done:
           return BottomSheetBody(
-            leading: Icon(Icons.check),
-            title: "${translate("Successful")}!",
+            leading: Icon(activeJob.err == 'cancel' ? Icons.close : Icons.check),
+            title: translate(activeJob.err == 'cancel' ? 'Cancelled' : 'Successful'),
             text: activeJob.display(),
             onCanceled: () => jobTable.clear(),
           );
@@ -377,7 +455,13 @@ class _FileManagerPageState extends State<FileManagerPage> {
           return BottomSheetBody(
             leading: Icon(Icons.error),
             title: "${translate("Error")}!",
-            text: "",
+            text: '${activeJob.fileName}\n${translate(activeJob.err)}',
+            actions: [if (activeJob.type == JobType.transfer && activeJob.retrySource.isNotEmpty)
+              IconButton(tooltip: translate('Retry'), icon: const Icon(Icons.refresh),
+                onPressed: () async {
+                  try { await model.jobController.retryTransfer(activeJob.id); }
+                  catch (e) { debugPrint('Retry transfer: $e'); showToast(translate('Failed')); }
+                })],
             onCanceled: () => jobTable.clear(),
           );
         case JobState.none:
@@ -529,10 +613,31 @@ class _FileManagerViewState extends State<FileManagerView> {
                                   PopupMenuItem(
                                     child: Text(translate("Rename")),
                                     value: "rename",
+                                  ),
+                                if (isAndroid &&
+                                    isLocal &&
+                                    entries[index].isFile)
+                                  PopupMenuItem(
+                                    child: Text(translate("Save to phone")),
+                                    value: "save_to_phone",
                                   )
                               ];
                             },
-                            onSelected: (v) {
+                            onSelected: (v) async {
+                              if (v == "save_to_phone") {
+                                try {
+                                  final ok = await saveFileToPhone(
+                                      PathUtil.join(
+                                          controller.directory.value.path,
+                                          entries[index].name,
+                                          false));
+                                  if (ok) showToast(translate("Successful"));
+                                } catch (e) {
+                                  debugPrint("save to phone failed: $e");
+                                  showToast(translate("Failed"));
+                                }
+                                return;
+                              }
                               if (v == "delete") {
                                 final items = SelectedItems(isLocal: isLocal);
                                 items.add(entries[index]);

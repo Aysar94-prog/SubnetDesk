@@ -7,8 +7,7 @@ Peer _peer({
   String alias = '',
   String username = '',
   String hostname = '',
-  bool? online,
-  int lastChecked = 0,
+  bool online = false,
 }) {
   final peer = Peer(
     id: id,
@@ -21,7 +20,6 @@ Peer _peer({
     rdpUsername: '',
   );
   peer.online = online;
-  peer.lastChecked = lastChecked;
   return peer;
 }
 
@@ -47,11 +45,13 @@ void main() {
     expect(Peer.copy(peer).online, isTrue);
   });
 
-  test('LAN peer JSON preserves backend online state', () {
-    final onlinePeer = Peer.fromJson({'id': 'online', 'online': true});
-    final offlinePeer = Peer.fromJson({'id': 'offline', 'online': false});
+  test('LAN peer JSON derives online state from backend reachability', () {
+    final onlinePeer = Peer.fromJson({'id': 'online', 'reachability': 'online'});
+    final unknownPeer = Peer.fromJson({'id': 'unknown', 'reachability': 'unknown'});
+    final offlinePeer = Peer.fromJson({'id': 'offline', 'reachability': 'offline'});
 
     expect(onlinePeer.online, isTrue);
+    expect(unknownPeer.online, isFalse);
     expect(offlinePeer.online, isFalse);
   });
 
@@ -60,17 +60,6 @@ void main() {
 
     expect(peers, hasLength(1));
     expect(peers.single.id, 'host.lan:21118');
-    expect(peers.single.online, isNull);
-  });
-
-  test('newer offline and unknown checks replace stale online suggestions', () {
-    for (final status in <bool?>[false, null]) {
-      final peers = mergeAutocompletePeers(
-        lanPeers: [_peer(id: 'host:21118', online: true, lastChecked: 100)],
-        recentPeers: [_peer(id: 'host:21118', online: status, lastChecked: 200)],
-      );
-      expect(peers.single.online, status);
-      expect(peers.single.lastChecked, 200);
-    }
+    expect(peers.single.online, isFalse);
   });
 }

@@ -18,7 +18,6 @@ use std::{
 
 const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/zibo-chen/SubnetDesk/releases/latest/download/update-stable.json";
-const RELEASES_URL: &str = "https://github.com/zibo-chen/SubnetDesk/releases/latest";
 const UPDATE_EVENT_NAME: &str = "software_update";
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_BYTES: u64 = 1024 * 1024 * 1024;
@@ -90,19 +89,14 @@ struct UpdateState {
 
 impl Default for UpdateState {
     fn default() -> Self {
-        let disabled_reason = disabled_reason();
         Self {
             public: PublicUpdateState {
-                state: if disabled_reason.is_some() {
-                    UpdatePhase::Disabled
-                } else {
-                    UpdatePhase::Idle
-                },
+                state: UpdatePhase::Idle,
                 current_version: env!("CARGO_PKG_VERSION").to_owned(),
                 available_version: String::new(),
                 progress: 0,
-                message: disabled_reason.unwrap_or_default().to_owned(),
-                release_notes_url: RELEASES_URL.to_owned(),
+                message: String::new(),
+                release_notes_url: String::new(),
                 mandatory: false,
                 auto_check: auto_check_enabled(),
                 auto_download: auto_download_enabled(),
@@ -121,18 +115,13 @@ lazy_static::lazy_static! {
 static START_SCHEDULER: Once = Once::new();
 
 pub fn start_scheduler() {
+    if !crate::private_build::software_updates_enabled() { return; }
     START_SCHEDULER.call_once(|| {
-        if let Some(reason) = disabled_reason() {
-            log::info!("Software updates disabled: {reason}");
-            return;
-        }
         std::thread::spawn(|| {
             std::thread::sleep(INITIAL_CHECK_DELAY);
             loop {
                 if auto_check_enabled() {
-                    if let Err(error) = check(false) {
-                        log::debug!("Skipping scheduled software update check: {error}");
-                    }
+                    let _ = check(false);
                 }
                 std::thread::sleep(AUTO_CHECK_INTERVAL);
             }
@@ -141,6 +130,9 @@ pub fn start_scheduler() {
 }
 
 pub fn state_json() -> String {
+    if !crate::private_build::software_updates_enabled() {
+        return crate::private_build::UPDATE_DISABLED_STATE.to_owned();
+    }
     match STATE.lock() {
         Ok(state) => serde_json::to_string(&state.public).unwrap_or_default(),
         Err(e) => {
@@ -151,6 +143,7 @@ pub fn state_json() -> String {
 }
 
 pub fn set_preferences(auto_check: bool, auto_download: bool) {
+    if !crate::private_build::software_updates_enabled() { return; }
     let auto_check = auto_check || auto_download;
     Config::set_option(
         OPTION_AUTO_CHECK.to_owned(),
@@ -168,8 +161,8 @@ pub fn set_preferences(auto_check: bool, auto_download: bool) {
 }
 
 pub fn check(manual: bool) -> ResultType<()> {
-    if let Some(reason) = disabled_reason() {
-        bail!(reason);
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
     }
     begin_operation(UpdatePhase::Checking, "")?;
     std::thread::spawn(move || {
@@ -181,6 +174,9 @@ pub fn check(manual: bool) -> ResultType<()> {
 }
 
 pub fn download() -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     let artifact = {
         let mut state = STATE.lock().map_err(|e| anyhow!(e.to_string()))?;
         if state.busy {
@@ -206,6 +202,9 @@ pub fn download() -> ResultType<()> {
 }
 
 pub fn install() -> ResultType<()> {
+    if !crate::private_build::software_updates_enabled() {
+        bail!(crate::private_build::UPDATE_DISABLED_MESSAGE);
+    }
     if has_active_connections() {
         let mut state = STATE.lock().map_err(|e| anyhow!(e.to_string()))?;
         state.public.state = UpdatePhase::Deferred;
@@ -240,22 +239,8 @@ fn check_inner(_manual: bool) -> ResultType<()> {
     let manifest_url = manifest_url()?;
     let signature_url = format!("{manifest_url}.sig");
     let client = http_client()?;
-    let manifest_bytes = read_limited(
-        client
-            .get(&manifest_url)
-            .send()
-            .context("Failed to fetch the signed update manifest")?,
-        MAX_MANIFEST_BYTES,
-    )
-    .context("Failed to fetch the signed update manifest")?;
-    let signature = read_limited(
-        client
-            .get(signature_url)
-            .send()
-            .context("Failed to fetch the update manifest signature")?,
-        4096,
-    )
-    .context("Failed to fetch the update manifest signature")?;
+    let manifest_bytes = read_limited(client.get(&manifest_url).send()?, MAX_MANIFEST_BYTES)?;
+    let signature = read_limited(client.get(signature_url).send()?, 4096)?;
     verify_manifest_signature(&manifest_bytes, &signature)?;
     let manifest: UpdateManifest = serde_json::from_slice(&manifest_bytes)?;
     validate_manifest(&manifest)?;
@@ -321,10 +306,7 @@ fn download_inner(artifact: UpdateArtifact) -> ResultType<()> {
     }
 
     let filename = filename_from_url(&artifact.url)?;
-    let cache = hbb_common::app_paths::get()
-        .context("Desktop paths are not initialized")?
-        .cache();
-    let update_dir = cache.join(format!(
+    let update_dir = std::env::temp_dir().join(format!(
         "subnetdesk-update-{}",
         uuid::Uuid::new_v4().simple()
     ));
@@ -337,14 +319,21 @@ fn download_inner(artifact: UpdateArtifact) -> ResultType<()> {
             .and_then(|v| v.to_str())
             .unwrap_or_default()
     ));
-    let result = stream_package(response, &part_path, &artifact)
-        .and_then(|()| finalize_download(&part_path, &final_path, verify_platform_signature));
+    let result = stream_package(response, &part_path, &artifact);
     if let Err(e) = result {
-        if let Err(cleanup_error) = fs::remove_dir_all(&update_dir) {
-            log::warn!("Failed to remove rejected update package: {cleanup_error}");
-        }
+        let _ = fs::remove_file(&part_path);
+        let _ = fs::remove_dir(&update_dir);
         return Err(e);
     }
+    if let Err(e) = verify_platform_signature(&part_path) {
+        let _ = fs::remove_file(&part_path);
+        let _ = fs::remove_dir(&update_dir);
+        return Err(e);
+    }
+    if final_path.exists() {
+        fs::remove_file(&final_path)?;
+    }
+    fs::rename(&part_path, &final_path)?;
 
     let mut state = STATE.lock().map_err(|e| anyhow!(e.to_string()))?;
     state.busy = false;
@@ -354,16 +343,6 @@ fn download_inner(artifact: UpdateArtifact) -> ResultType<()> {
     state.public.message.clear();
     push_state(&state.public);
     Ok(())
-}
-
-fn finalize_download(
-    part_path: &Path,
-    final_path: &Path,
-    verify_signature: impl FnOnce(&Path) -> ResultType<()>,
-) -> ResultType<()> {
-    // Platform signature providers need the real package extension (e.g. .msi).
-    fs::rename(part_path, final_path)?;
-    verify_signature(final_path)
 }
 
 fn stream_package(
@@ -411,9 +390,6 @@ fn stream_package(
 }
 
 fn install_inner(file: &Path) -> ResultType<()> {
-    if hbb_common::app_paths::get().is_some_and(|paths| paths.portable) {
-        bail!("Replace the portable application directory to install this update");
-    }
     let path = file
         .to_str()
         .ok_or_else(|| anyhow!("Update path is not valid UTF-8"))?;
@@ -569,7 +545,7 @@ fn artifact_key() -> ResultType<String> {
     };
     #[cfg(target_os = "windows")]
     {
-        let package = if msi_installation_status(crate::platform::is_msi_installed())? {
+        let package = if crate::platform::is_msi_installed()? {
             "msi"
         } else {
             "exe"
@@ -580,15 +556,6 @@ fn artifact_key() -> ResultType<String> {
     return Ok(format!("macos-{arch}-dmg"));
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     bail!("Automatic updates are not supported on this platform")
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn msi_installation_status(result: std::io::Result<bool>) -> std::io::Result<bool> {
-    match result {
-        // EXE and portable builds do not necessarily have an MSI registry entry.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        other => other,
-    }
 }
 
 fn filename_from_url(value: &str) -> ResultType<String> {
@@ -707,27 +674,6 @@ fn auto_download_enabled() -> bool {
     Config::get_option(OPTION_AUTO_DOWNLOAD) == "Y"
 }
 
-fn disabled_reason() -> Option<&'static str> {
-    update_configuration_error(
-        option_env!("SUBNETDESK_UPDATE_PUBLIC_KEY").unwrap_or_default(),
-        hbb_common::app_paths::get().is_some_and(|paths| paths.portable),
-    )
-}
-
-fn update_configuration_error(public_key: &str, portable: bool) -> Option<&'static str> {
-    if portable {
-        return Some("Replace the portable application directory to install this update");
-    }
-    let public_key = public_key.trim();
-    if public_key.is_empty() {
-        return Some("Automatic updates are not configured in this build");
-    }
-    if public_key.len() != 64 || !public_key.as_bytes().iter().all(u8::is_ascii_hexdigit) {
-        return Some("Invalid update public key");
-    }
-    None
-}
-
 fn discard_download(state: &mut UpdateState) {
     let Some(path) = state.downloaded_file.take() else {
         return;
@@ -766,19 +712,20 @@ fn update_progress(progress: u8) {
 }
 
 fn finish_error(error: impl std::fmt::Display) {
-    log::error!("Software update failed: {error:#}");
+    log::error!("Software update failed: {error}");
     if let Ok(mut state) = STATE.lock() {
         state.busy = false;
-        state.public.state = if disabled_reason().is_some() {
+        state.public.state = if option_env!("SUBNETDESK_UPDATE_PUBLIC_KEY")
+            .unwrap_or_default()
+            .is_empty()
+        {
             UpdatePhase::Disabled
         } else if state.downloaded_file.is_some() {
             UpdatePhase::Ready
-        } else if state.artifact.is_some() {
-            UpdatePhase::Available
         } else {
             UpdatePhase::Failed
         };
-        state.public.message = format!("{error:#}");
+        state.public.message = error.to_string();
         push_state(&state.public);
     }
 }
@@ -801,63 +748,10 @@ fn push_state(state: &PublicUpdateState) {
 #[cfg(test)]
 mod tests {
     use super::{
-        filename_from_url, finalize_download, is_supported_version, msi_installation_status,
-        update_configuration_error, validate_artifact, verify_manifest_signature_with_key,
-        UpdateArtifact,
+        filename_from_url, is_supported_version, validate_artifact,
+        verify_manifest_signature_with_key, UpdateArtifact,
     };
     use ring::signature::{Ed25519KeyPair, KeyPair};
-
-    #[test]
-    fn detects_unavailable_updates_before_network_access() {
-        let valid_key = "ab".repeat(32);
-        assert!(update_configuration_error(&valid_key, false).is_none());
-        assert!(update_configuration_error(&format!(" {valid_key}\n"), false).is_none());
-        assert_eq!(
-            update_configuration_error("", false),
-            Some("Automatic updates are not configured in this build")
-        );
-        assert_eq!(
-            update_configuration_error("not-a-public-key", false),
-            Some("Invalid update public key")
-        );
-        assert!(update_configuration_error(&"zz".repeat(32), false).is_some());
-        assert_eq!(
-            update_configuration_error(&valid_key, true),
-            Some("Replace the portable application directory to install this update")
-        );
-    }
-
-    #[test]
-    fn missing_msi_registry_entry_uses_exe_without_hiding_other_errors() {
-        use std::io::{Error, ErrorKind};
-        assert!(msi_installation_status(Ok(true)).unwrap());
-        assert!(!msi_installation_status(Ok(false)).unwrap());
-        assert!(!msi_installation_status(Err(Error::from(ErrorKind::NotFound))).unwrap());
-        assert_eq!(
-            msi_installation_status(Err(Error::from(ErrorKind::PermissionDenied)))
-                .unwrap_err()
-                .kind(),
-            ErrorKind::PermissionDenied
-        );
-    }
-
-    #[test]
-    fn verifies_final_package_extension_and_propagates_signature_rejection() {
-        let root =
-            std::env::temp_dir().join(format!("subnetdesk-update-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&root).unwrap();
-        let final_path = root.join("subnetdesk.msi");
-        let part_path = root.join("subnetdesk.msi.part");
-        std::fs::write(&part_path, b"downloaded package").unwrap();
-        let result = finalize_download(&part_path, &final_path, |path| {
-            assert_eq!(path.extension().unwrap(), "msi");
-            assert_eq!(std::fs::read(path).unwrap(), b"downloaded package");
-            hbb_common::anyhow::bail!("rejected signature")
-        });
-        assert_eq!(result.unwrap_err().to_string(), "rejected signature");
-        assert!(!part_path.exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
 
     #[test]
     fn accepts_safe_update_filename() {

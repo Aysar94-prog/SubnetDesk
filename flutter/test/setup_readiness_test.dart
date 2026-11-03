@@ -99,11 +99,13 @@ void main() {
       expect(issues, isEmpty);
     });
 
-    test('linux warnings respect outgoing-only mode', () {
+    test('linux warnings respect outgoing-only mode and Wayland priority', () {
       final incomingIssues = resolveSetupReadinessIssues(
         const SetupReadinessSnapshot(
           platform: SetupReadinessPlatform.linux,
           selinuxEnforcing: true,
+          currentSessionWayland: true,
+          loginSessionWayland: true,
         ),
       );
       final outgoingIssues = resolveSetupReadinessIssues(
@@ -111,23 +113,31 @@ void main() {
           platform: SetupReadinessPlatform.linux,
           outgoingOnly: true,
           selinuxEnforcing: true,
+          currentSessionWayland: true,
         ),
       );
 
-      expect(incomingIssues, const [SetupReadinessIssue.selinux]);
+      expect(
+        incomingIssues,
+        const [
+          SetupReadinessIssue.selinux,
+          SetupReadinessIssue.wayland,
+        ],
+      );
       expect(outgoingIssues, isEmpty);
     });
 
-    test('dismissed SELinux warning stays hidden', () {
+    test('dismissed SELinux warning stays hidden without hiding Wayland', () {
       final issues = resolveSetupReadinessIssues(
         const SetupReadinessSnapshot(
           platform: SetupReadinessPlatform.linux,
           selinuxEnforcing: true,
           showSelinuxWarning: false,
+          currentSessionWayland: true,
         ),
       );
 
-      expect(issues, isEmpty);
+      expect(issues, const [SetupReadinessIssue.wayland]);
     });
   });
 }

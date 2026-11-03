@@ -87,7 +87,7 @@ if(VCPKG_HOST_IS_WINDOWS)
     vcpkg_acquire_msys(MSYS_ROOT PACKAGES automake1.16)
     set(SHELL "${MSYS_ROOT}/usr/bin/bash.exe")
     vcpkg_add_to_path("${MSYS_ROOT}/usr/share/automake-1.16")
-    string(APPEND OPTIONS " --pkg-config=${CURRENT_HOST_INSTALLED_DIR}/tools/pkgconf/pkgconf${VCPKG_HOST_EXECUTABLE_SUFFIX} ")
+    string(APPEND OPTIONS " --pkg-config=${CURRENT_HOST_INSTALLED_DIR}/tools/pkgconf/pkgconf${VCPKG_HOST_EXECUTABLE_SUFFIX}")
 else()
     find_program(SHELL bash)
 endif()
@@ -183,7 +183,7 @@ elseif(VCPKG_TARGET_IS_IOS)
 --extra-ldflags=\"-arch arm64 -mios-version-min=8.0 -fembed-bitcode\" \
 ")
 elseif(VCPKG_CMAKE_SYSTEM_NAME STREQUAL "Android")
-    string(APPEND OPTIONS "\
+    string(APPEND OPTIONS " \
 --target-os=android \
 --disable-asm \
 --disable-iconv \

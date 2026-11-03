@@ -71,19 +71,22 @@ class _SettingsState extends State<SettingsPage> {
     Provider.of<FfiModel>(context);
     return SettingsList(
       sections: [
-        SettingsSection(
-          title: const Text('LAN'),
-          tiles: [
-            SettingsTile(
-              title: Text(translate('Network')),
-              description: Text(
-                '${translate('Username')} · ${translate('Local Address')} · ${translate('Port')}',
+        // LAN host settings (credentials, listen address/port, web access)
+        // configure incoming control; Android is an outgoing controller only.
+        if (!isAndroid)
+          SettingsSection(
+            title: const Text('LAN'),
+            tiles: [
+              SettingsTile(
+                title: Text(translate('Network')),
+                description: Text(
+                  '${translate('Username')} · ${translate('Local Address')} · ${translate('Port')}',
+                ),
+                leading: const Icon(Icons.lan),
+                onPressed: (context) => showLanSettingsDialog(context),
               ),
-              leading: const Icon(Icons.lan),
-              onPressed: (context) => showLanSettingsDialog(context),
-            ),
-          ],
-        ),
+            ],
+          ),
         SettingsSection(
           title: Text(translate('Settings')),
           tiles: [
@@ -381,7 +384,7 @@ void showLanguageSettings(OverlayDialogManager dialogManager) async {
           if (language == value) return;
           setState(() => language = value);
           await bind.mainSetLocalOption(key: kCommConfKeyLang, value: value);
-          reloadCurrentWindow();
+          HomePage.homeKey.currentState?.refreshPages();
           Future.delayed(const Duration(milliseconds: 200), close);
         }
 

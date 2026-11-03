@@ -961,6 +961,22 @@ class RustdeskImpl {
     throw UnimplementedError("mainDiscover");
   }
 
+  Future<String> mainDiscoverRange({required String range, dynamic hint}) {
+    throw UnimplementedError("mainDiscoverRange");
+  }
+
+  Future<List<String>> mainGetSavedSubnets({dynamic hint}) {
+    return Future.value(<String>[]);
+  }
+
+  Future<String> mainAddSavedSubnet({required String subnet, dynamic hint}) {
+    throw UnimplementedError("mainAddSavedSubnet");
+  }
+
+  Future<void> mainRemoveSavedSubnet({required String subnet, dynamic hint}) {
+    throw UnimplementedError("mainRemoveSavedSubnet");
+  }
+
   Future<String> mainGetApiServer({dynamic hint}) {
     return Future(() => js.context.callMethod('getByName', ['api_server']));
   }
@@ -1454,10 +1470,6 @@ class RustdeskImpl {
   Future<void> cmLoginRes(
       {required int connId, required bool res, dynamic hint}) {
     throw UnimplementedError("cmLoginRes");
-  }
-
-  Future<void> cmCloseConnectionWindow({required int connId, dynamic hint}) {
-    throw UnimplementedError("cmCloseConnectionWindow");
   }
 
   Future<void> cmCloseConnection({required int connId, dynamic hint}) {
@@ -1961,6 +1973,19 @@ class RustdeskImpl {
   Future<void> sessionSelectFiles(
       {required UuidValue sessionId, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', ['select_files']));
+  }
+
+  String mainGetPrinterNames({dynamic hint}) {
+    return '';
+  }
+
+  Future<void> sessionPrinterResponse(
+      {required UuidValue sessionId,
+      required int id,
+      required String path,
+      required String printerName,
+      dynamic hint}) {
+    throw UnimplementedError("sessionPrinterResponse");
   }
 
   Future<String> mainGetCommon({required String key, dynamic hint}) {

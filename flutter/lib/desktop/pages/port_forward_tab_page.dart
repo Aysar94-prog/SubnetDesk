@@ -57,9 +57,6 @@ class _PortForwardTabPageState extends State<PortForwardTabPage> {
       debugPrint(
           "[Port Forward] call ${call.method} from window $fromWindowId");
       // for simplify, just replace connectionId
-      if (call.method == kWindowEventGetRemoteList) {
-        return tabController.state.value.tabs.map((tab) => tab.label).join(',');
-      }
       if (call.method == kWindowEventNewPortForward) {
         final args = jsonDecode(call.arguments);
         final id = args['id'];
@@ -68,7 +65,7 @@ class _PortForwardTabPageState extends State<PortForwardTabPage> {
         if (tabController.state.value.tabs.indexWhere((e) => e.key == id) >=
             0) {
           debugPrint("port forward $id exists");
-          return null;
+          return;
         }
         tabController.add(TabInfo(
             key: id,

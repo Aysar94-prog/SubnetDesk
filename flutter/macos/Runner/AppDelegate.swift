@@ -1,9 +1,6 @@
 import Cocoa
 import FlutterMacOS
 
-@_silgen_name("subnetdesk_shutdown")
-private func subnetdesk_shutdown()
-
 @main
 class AppDelegate: FlutterAppDelegate {
     var launched = false;
@@ -13,25 +10,20 @@ class AppDelegate: FlutterAppDelegate {
     }
 
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+      dummy_method_to_enforce_bundling()
     // https://github.com/leanflutter/window_manager/issues/214
     return false
   }
     
     override func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
         if (launched) {
-            (NSApplication.shared.windows.first { $0 is MainFlutterWindow } as? MainFlutterWindow)?.reopenMainWindow()
+            handle_applicationShouldOpenUntitledFile();
         }
         return true
     }
     
     override func applicationDidFinishLaunching(_ aNotification: Notification) {
         launched = true;
-        if !ProcessInfo.processInfo.arguments.contains("--background") {
-            NSApplication.shared.activate(ignoringOtherApps: true)
-        }
-    }
-
-    override func applicationWillTerminate(_ notification: Notification) {
-        subnetdesk_shutdown()
+        NSApplication.shared.activate(ignoringOtherApps: true);
     }
 }

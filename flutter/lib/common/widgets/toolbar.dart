@@ -10,7 +10,6 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
-import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:get/get.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -507,6 +506,11 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     bool isTcpTunneling = false,
     bool isTerminal = false,
   }) {
+    if (isWindows && isFileTransfer) {
+      // File-only access is selected independently of the control session.
+      unawaited(connectWindowsFileTransfer(context, id));
+      return;
+    }
     connect(
       context,
       id,
@@ -522,12 +526,6 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
       TTextMenu(
         child: Text(translate('Transfer file')),
         onPressed: () => connectAnotherChannel(isFileTransfer: true),
-      ),
-    );
-    v.add(
-      TTextMenu(
-        child: Text(translate('View camera')),
-        onPressed: () => connectAnotherChannel(isViewCamera: true),
       ),
     );
     v.add(
@@ -619,7 +617,6 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
   }
   // record
   if (!(isDesktop || isWeb) &&
-      bind.mainGetLocalOption(key: kOptionHideRecordingButton) != 'Y' &&
       (ffi.recordingModel.start || (perms["recording"] != false))) {
     v.add(
       TTextMenu(
@@ -1375,7 +1372,7 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
   }
 
   // Relative mouse mode (gaming mode).
-  // Only show when SubnetDesk supports MOUSE_TYPE_MOVE_RELATIVE (version >= 1.0.0).
+  // Only show when server supports MOUSE_TYPE_MOVE_RELATIVE (version >= 1.4.5)
   // Note: This feature is only available in Flutter client. Sciter client does not support this.
   // Web client is not supported yet due to Pointer Lock API integration complexity with Flutter's input system.
   // Wayland is not supported due to cursor warping limitations.

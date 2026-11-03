@@ -15,10 +15,7 @@ use sciter::{
 };
 
 use hbb_common::{
-    allow_err, log, rendezvous_proto::ConnType,
-};
-use base::{
-    fs::TransferJobMeta, message_proto::*,
+    allow_err, fs::TransferJobMeta, log, message_proto::*, rendezvous_proto::ConnType,
 };
 
 use crate::{
@@ -406,6 +403,10 @@ impl InvokeUiSession for SciterHandler {
         self.call("updateRecordStatus", &make_args!(start));
     }
 
+    fn printer_request(&self, id: i32, path: String) {
+        self.call("printerRequest", &make_args!(id, path));
+    }
+
     fn handle_screenshot_resp(&self, _sid: String, msg: String) {
         self.call("screenshot", &make_args!(msg));
     }
@@ -502,7 +503,6 @@ impl sciter::EventHandler for SciterSession {
         fn get_id();
         fn get_default_pi();
         fn get_option(String);
-        fn get_local_option(String);
         fn t(String);
         fn set_option(String, String);
         fn input_os_password(String, bool);
@@ -511,10 +511,6 @@ impl sciter::EventHandler for SciterSession {
         fn is_port_forward();
         fn is_rdp();
         fn login(String, String, String, bool);
-        fn login_lan(String, String, bool);
-        fn login_lan_identity(String, bool);
-        fn get_lan_identities();
-        fn trust_lan_device(bool);
         fn new_rdp();
         fn send_mouse(i32, i32, i32, bool, bool, bool, bool);
         fn enter(String);
@@ -583,36 +579,12 @@ impl sciter::EventHandler for SciterSession {
         fn set_selected_windows_session_id(String);
         fn is_recording();
         fn has_file_clipboard();
+        fn get_printer_names();
+        fn on_printer_selected(i32, String, String);
     }
 }
 
 impl SciterSession {
-    fn reconnect(&self, _force: bool) {
-        self.0.reconnect();
-    }
-
-    fn login_lan(&self, username: String, password: String, remember: bool) -> String {
-        match self.submit_lan_credentials(username, password, remember) {
-            Ok(()) => String::new(),
-            Err(err) => err.to_string(),
-        }
-    }
-
-    fn trust_lan_device(&self, trusted: bool) {
-        self.confirm_lan_device(trusted);
-    }
-
-    fn get_lan_identities(&self) -> String {
-        serde_json::json!(crate::lan_identity::list()).to_string()
-    }
-
-    fn login_lan_identity(&self, identity_id: String, bind_on_success: bool) -> String {
-        self.submit_lan_identity(identity_id, bind_on_success)
-            .err()
-            .map(|err| err.to_string())
-            .unwrap_or_default()
-    }
-
     pub fn new(cmd: String, id: String, password: String, args: Vec<String>) -> Self {
         let session: Session<SciterHandler> = Session {
             password: password.clone(),
@@ -655,10 +627,6 @@ impl SciterSession {
 
     pub fn t(&self, name: String) -> String {
         crate::client::translate(name)
-    }
-
-    pub fn get_local_option(&self, key: String) -> String {
-        crate::ui_interface::get_local_option(key)
     }
 
     pub fn get_icon(&self) -> String {
@@ -909,6 +877,22 @@ impl SciterSession {
 
     fn version_cmp(&self, v1: String, v2: String) -> i32 {
         (hbb_common::get_version_number(&v1) - hbb_common::get_version_number(&v2)) as i32
+    }
+
+    fn get_printer_names(&self) -> Value {
+        #[cfg(target_os = "windows")]
+        let printer_names = crate::platform::windows::get_printer_names().unwrap_or_default();
+        #[cfg(not(target_os = "windows"))]
+        let printer_names: Vec<String> = vec![];
+        let mut v = Value::array(0);
+        for name in printer_names {
+            v.push(name);
+        }
+        v
+    }
+
+    fn on_printer_selected(&self, id: i32, path: String, printer_name: String) {
+        self.printer_response(id, path, printer_name);
     }
 
     fn handle_screenshot(&self, action: String) -> String {

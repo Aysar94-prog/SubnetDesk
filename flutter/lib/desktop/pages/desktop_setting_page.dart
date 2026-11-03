@@ -1,29 +1,36 @@
 import 'dart:async';
-import 'package:flutter_hbb/common/widgets/subnet_ui.dart';
-import 'package:flutter_hbb/desktop/lan_identity_manager.dart';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter_hbb/desktop/widgets/receiver_only_settings.dart';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
-import 'package:flutter_hbb/common/desktop_runtime.dart';
-import 'package:flutter_hbb/common/app_language.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
-import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/mobile/widgets/dialog.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:flutter_hbb/models/printer_model.dart';
+import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
+import 'package:flutter_hbb/plugin/manager.dart';
+import 'package:flutter_hbb/plugin/widgets/desktop_settings.dart';
 import 'package:get/get.dart';
+import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common/widgets/dialog.dart';
+import '../widgets/lan_unattended_access.dart';
+import '../widgets/lan_optional_access.dart';
+
+const double _kTabWidth = 200;
+const double _kTabHeight = 42;
 const double _kCardFixedWidth = 540;
 const double _kCardLeftMargin = 15;
 const double _kContentHMargin = 15;
@@ -33,6 +40,7 @@ const double _kRadioLeftMargin = 10;
 const double _kListViewBottomMargin = 15;
 const double _kTitleFontSize = 20;
 const double _kContentFontSize = 15;
+const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
 
@@ -44,14 +52,16 @@ class _TabInfo {
   _TabInfo(this.key, this.label, this.unselected, this.selected);
 }
 
-enum SettingsTabKey { general, display, credentials, about }
+enum SettingsTabKey { general, display, printer, about }
 
 class DesktopSettingPage extends StatefulWidget {
   final SettingsTabKey initialTabkey;
   static final List<SettingsTabKey> tabKeys = [
     SettingsTabKey.general,
     if (!bind.isIncomingOnly()) SettingsTabKey.display,
-    if (!bind.isIncomingOnly()) SettingsTabKey.credentials,
+    if (isWindows &&
+        bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
+      SettingsTabKey.printer,
     SettingsTabKey.about,
   ];
 
@@ -158,28 +168,22 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
       switch (tab) {
         case SettingsTabKey.general:
           settingTabs.add(
-            _TabInfo(tab,
-              subnetText(context, '外观与交互', 'Appearance & interaction'), Icons.settings_outlined, Icons.settings),
+            _TabInfo(tab, 'General', Icons.settings_outlined, Icons.settings),
           );
           break;
         case SettingsTabKey.display:
           settingTabs.add(
             _TabInfo(
               tab,
-              subnetText(context, '连接偏好', 'Connection preferences'),
+              'Display',
               Icons.desktop_windows_outlined,
               Icons.desktop_windows,
             ),
           );
           break;
-        case SettingsTabKey.credentials:
+        case SettingsTabKey.printer:
           settingTabs.add(
-            _TabInfo(
-              tab,
-              subnetText(context, '安全与凭据', 'Security & credentials'),
-              Icons.key_outlined,
-              Icons.key,
-            ),
+            _TabInfo(tab, 'Printer', Icons.print_outlined, Icons.print),
           );
           break;
         case SettingsTabKey.about:
@@ -202,8 +206,8 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
         case SettingsTabKey.display:
           children.add(const _Display());
           break;
-        case SettingsTabKey.credentials:
-          children.add(const _ConnectionCredentials());
+        case SettingsTabKey.printer:
+          children.add(const _Printer());
           break;
         case SettingsTabKey.about:
           children.add(const _About());
@@ -225,7 +229,7 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
             mask: false,
             use: canBeBlocked,
             child: preventMouseKeyBuilder(
-              child: Column(children: children),
+              child: Row(children: children),
               block: videoConnBlock,
             ),
           ),
@@ -239,36 +243,27 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   Widget build(BuildContext context) {
     super.build(context);
     return Scaffold(
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      backgroundColor: Theme.of(context).colorScheme.background,
       body: _buildBlock(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 36, vertical: 18),
-            child: Row(children: [
-              const Expanded(child: SubnetBrand()),
-              OutlinedButton.icon(
-                onPressed: () => Get.find<DesktopTabController>().jumpTo(0),
-                icon: const Icon(Icons.arrow_back_rounded, size: 18),
-                label: Text(subnetText(context, '返回设备', 'Back to devices')),
-              ),
-            ]),
-          ),
-          Center(child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1064),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        children: <Widget>[
+          SizedBox(
+            width: _kTabWidth,
+            child: Column(
+              children: [
                 _header(context),
-                _listView(tabs: _settingTabs()),
-                const Divider(height: 1),
-              ]),
+                Flexible(child: _listView(tabs: _settingTabs())),
+              ],
             ),
-          )),
+          ),
+          const VerticalDivider(width: 1),
           Expanded(
-            child: PageView(
+            child: Container(
+              color: Theme.of(context).scaffoldBackgroundColor,
+              child: PageView(
                 controller: controller,
-                physics: const NeverScrollableScrollPhysics(),
+                physics: NeverScrollableScrollPhysics(),
                 children: _children(),
+              ),
             ),
           ),
         ],
@@ -277,43 +272,98 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   }
 
   Widget _header(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 24),
-      child: Text(translate('Settings'),
-        style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w600)),
+    final settingsText = Text(
+      translate('Settings'),
+      textAlign: TextAlign.left,
+      style: const TextStyle(
+        color: _accentColor,
+        fontSize: _kTitleFontSize,
+        fontWeight: FontWeight.w400,
+      ),
+    );
+    return Row(
+      children: [
+        if (isWeb)
+          IconButton(
+            onPressed: () {
+              if (Navigator.canPop(context)) {
+                Navigator.pop(context);
+              }
+            },
+            icon: Icon(Icons.arrow_back),
+          ).marginOnly(left: 5),
+        if (isWeb)
+          SizedBox(
+            height: 62,
+            child: Align(alignment: Alignment.center, child: settingsText),
+          ).marginOnly(left: 20),
+        if (!isWeb)
+          SizedBox(
+            height: 62,
+            child: settingsText,
+          ).marginOnly(left: 20, top: 10),
+        const Spacer(),
+      ],
     );
   }
 
-  Widget _listView({required List<_TabInfo> tabs}) => SingleChildScrollView(
-    scrollDirection: Axis.horizontal,
-    child: Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        children: tabs.map((tab) => Obx(() => Padding(
-                  padding: const EdgeInsets.only(right: 16),
-                  child: ChoiceChip(
-                    label: Text(translate(tab.label)),
-                    selected: tab.key == selectedTab.value,
-                    onSelected: (_) {
-                      controller.jumpToPage(
-                        DesktopSettingPage.tabKeys.indexOf(tab.key),
-                      );
-                      selectedTab.value = tab.key;
+  Widget _listView({required List<_TabInfo> tabs}) {
+    final scrollController = ScrollController();
+    return ListView(
+      controller: scrollController,
+      children: tabs.map((tab) => _listItem(tab: tab)).toList(),
+    );
+  }
+
+  Widget _listItem({required _TabInfo tab}) {
+    return Obx(() {
+      bool selected = tab.key == selectedTab.value;
+      return SizedBox(
+        width: _kTabWidth,
+        height: _kTabHeight,
+        child: InkWell(
+          onTap: () {
+            if (selectedTab.value != tab.key) {
+              int index = DesktopSettingPage.tabKeys.indexOf(tab.key);
+              if (index == -1) {
+                return;
+              }
+              controller.jumpToPage(index);
+            }
+            selectedTab.value = tab.key;
           },
-                  ),
+          child: Row(
+            children: [
+              Container(
+                width: 4,
+                height: _kTabHeight * 0.7,
+                color: selected ? _accentColor : null,
+              ),
+              Icon(
+                selected ? tab.selected : tab.unselected,
+                color: selected ? _accentColor : null,
+                size: 20,
+              ).marginOnly(left: 13, right: 10),
+              Text(
+                translate(tab.label),
+                style: TextStyle(
+                  color: selected ? _accentColor : null,
+                  fontWeight: FontWeight.w400,
+                  fontSize: _kContentFontSize,
                 ),
               ),
-            ).toList(),
+            ],
           ),
         ),
       );
+    });
+  }
 }
 
 //#region pages
 
 class _General extends StatefulWidget {
-  const _General({Key? key, this.hostOnly = false}) : super(key: key);
-  final bool hostOnly;
+  const _General({Key? key}) : super(key: key);
 
   @override
   State<_General> createState() => _GeneralState();
@@ -332,26 +382,20 @@ class _GeneralState extends State<_General> {
     return ListView(
       controller: scrollController,
       children: [
-        if (widget.hostOnly) ...[
-          if (!isWeb) service(),
-          if (!isWeb) startup(),
-          if (!isWeb) hwcodec(),
-          if (!isWeb) audio(context),
-          if (!isWeb) record(context),
-          if (!isWeb) WaylandCard(),
-        ] else ...[
-          theme(),
-          if (!bind.isIncomingOnly()) interaction(),
-          Center(child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 1064),
-            child: Padding(padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: ExpansionTile(
-                title: Text(subnetText(context, '高级交互与渲染', 'Advanced interaction and rendering')),
-                children: [other()],
-              ),
-            ),
-          )),
-        ],
+        if (!isWeb) service(),
+        if (isWindows && !bind.isOutgoingOnly())
+          _Card(title: 'Unattended access', children: [const LanUnattendedAccess()]),
+        if (isWindows && !bind.isOutgoingOnly())
+          _Card(title: 'Connection approval', children: [const LanOptionalAccess(showSettings: true)]),
+        if (isWindows)
+          _Card(title: 'Receiver-only mode', children: [incomingOnlyLock()]),
+        theme(),
+        _Card(title: 'Language', children: [language()]),
+        if (!isWeb) hwcodec(),
+        if (!isWeb) audio(context),
+        if (!isWeb) record(context),
+        if (!isWeb) WaylandCard(),
+        other(),
       ],
     ).marginOnly(bottom: _kListViewBottomMargin);
   }
@@ -365,65 +409,38 @@ class _GeneralState extends State<_General> {
 
     final isOptFixed = isOptionFixed(kCommConfKeyTheme);
     return _Card(
-      title: subnetText(context, '外观', 'Appearance'),
+      title: 'Theme',
       children: [
-        SubnetSettingRow(
-          title: subnetText(context, '应用主题', 'App theme'),
-          description: subnetText(context, '选择界面显示风格，或跟随系统设置。', 'Choose an appearance, or follow your system.'),
-          control: Wrap(spacing: 8, runSpacing: 8, children: [
-            for (final value in ['system', 'light', 'dark'])
-              ChoiceChip(
-                label: Text(translate(value == 'system' ? 'Follow System' : value == 'light' ? 'Light' : 'Dark')),
-                selected: current == value,
-                onSelected: isOptFixed ? null : (_) => onChanged(value),
-              ),
-          ]),
+        _Radio<String>(
+          context,
+          value: 'light',
+          groupValue: current,
+          label: 'Light',
+          onChanged: isOptFixed ? null : onChanged,
         ),
-        const Divider(height: 1),
-        SubnetSettingRow(
-          title: subnetText(context, '界面语言', 'App language'),
-          description: subnetText(context, '更改应用的显示语言。', 'Choose the language used in the app.'),
-          control: language(),
+        _Radio<String>(
+          context,
+          value: 'dark',
+          groupValue: current,
+          label: 'Dark',
+          onChanged: isOptFixed ? null : onChanged,
+        ),
+        _Radio<String>(
+          context,
+          value: 'system',
+          groupValue: current,
+          label: 'Follow System',
+          onChanged: isOptFixed ? null : onChanged,
         ),
       ],
     );
   }
 
-  Widget interaction() {
-    final style = bind.mainGetUserDefaultOption(key: kOptionViewStyle);
-    final awake = mainGetLocalBoolOptionSync(kOptionKeepAwakeDuringOutgoingSessions);
-    return _Card(title: subnetText(context, '操作与交互', 'Interaction'), children: [
-      SubnetSettingRow(
-        title: subnetText(context, '远程画面默认缩放', 'Default remote scaling'),
-        description: subnetText(context, '仅影响远程画面，不改变本机界面大小。', 'Changes the remote image without changing local UI size.'),
-        control: DropdownButtonFormField<String>(
-          initialValue: style == kRemoteViewStyleOriginal ? kRemoteViewStyleOriginal : kRemoteViewStyleAdaptive,
-          isExpanded: true,
-          items: [
-            DropdownMenuItem(value: kRemoteViewStyleAdaptive, child: Text(translate('Scale adaptive'))),
-            DropdownMenuItem(value: kRemoteViewStyleOriginal, child: Text(translate('Scale original'))),
-          ],
-          onChanged: isOptionFixed(kOptionViewStyle) ? null : (value) async {
-            if (value == null) return;
-            await bind.mainSetUserDefaultOption(key: kOptionViewStyle, value: value);
-            if (mounted) setState(() {});
-          },
-        ),
-      ),
-      const Divider(height: 1),
-      SubnetSettingRow(
-        title: subnetText(context, '连接期间保持本机唤醒', 'Keep this device awake during sessions'),
-        description: subnetText(context, '远程会话进行时，避免本机进入休眠。', 'Prevent this device from sleeping during outgoing sessions.'),
-        control: Align(alignment: Alignment.centerRight, child: Switch(
-          value: awake,
-          onChanged: isOptionFixed(kOptionKeepAwakeDuringOutgoingSessions) ? null : (value) async {
-            await mainSetLocalBoolOption(kOptionKeepAwakeDuringOutgoingSessions, value);
-            if (mounted) setState(() {});
-          },
-        )),
-      ),
-    ]);
-  }
+  Widget incomingOnlyLock() => ReceiverOnlySettings(
+    initiallyLocked: bind.isIncomingOnly(),
+    readOption: (key) => bind.mainGetOption(key: key),
+    writeOption: (key, value) => bind.mainSetOption(key: key, value: value),
+  );
 
   Widget service() {
     if (bind.isOutgoingOnly()) {
@@ -439,7 +456,7 @@ class _GeneralState extends State<_General> {
       }
 
       return _Card(
-        title: 'Incoming',
+        title: 'Service',
         children: [
           _Button(serviceStop.value ? 'Start' : 'Stop', () {
             () async {
@@ -454,46 +471,6 @@ class _GeneralState extends State<_General> {
         ],
       );
     });
-  }
-
-  Widget startup() {
-    final runtime = desktopRuntimeState();
-    final closeToTray = bind.mainGetLocalOption(key: 'close-to-tray') != 'N';
-    return _Card(
-      title: 'Start on boot',
-      children: [
-        SwitchListTile(
-          title: Text(translate('Start on boot')),
-          value: runtime['autostart'] == true,
-          onChanged: (enabled) async {
-            final error = await setDesktopAutostart(enabled);
-            if (!mounted) return;
-            setState(() {});
-            if (error.isNotEmpty) BotToast.showText(text: error);
-          },
-        ),
-        SwitchListTile(
-          title: Text(translate('Close to tray')),
-          value: closeToTray,
-          onChanged: (enabled) async {
-            await bind.mainSetLocalOption(
-              key: 'close-to-tray',
-              value: enabled ? 'Y' : 'N',
-            );
-            if (mounted) setState(() {});
-          },
-        ),
-        ListTile(
-          title: Text(translate('Open data folder')),
-          subtitle: Text(runtime['data_dir'] as String? ?? ''),
-          onTap: () async {
-            final path = runtime['data_dir'] as String?;
-            if (path != null && path.isNotEmpty)
-              await launchUrl(Uri.directory(path));
-          },
-        ),
-      ],
-    );
   }
 
   Widget other() {
@@ -564,18 +541,19 @@ class _GeneralState extends State<_General> {
           'Capture screen using DirectX',
           kOptionDirectxCapture,
         ),
-      if (!isWeb && !incomingOnly) ...[
-        Tooltip(
-          message: translate('sync-clipboard-between-sessions-tip'),
-          child: _OptionCheckBox(
-            context,
-            'Sync clipboard between sessions',
-            kOptionAllowSyncClipboardBetweenSessions,
-            isServer: false,
-          ),
-        ),
-      ],
     ];
+
+    // Add client-side wakelock option for desktop platforms
+    if (!bind.isIncomingOnly()) {
+      children.add(
+        _OptionCheckBox(
+          context,
+          'keep-awake-during-outgoing-sessions-label',
+          kOptionKeepAwakeDuringOutgoingSessions,
+          isServer: false,
+        ),
+      );
+    }
 
     if (!isWeb && bind.mainShowOption(key: kOptionAllowLinuxHeadless)) {
       children.add(
@@ -855,8 +833,7 @@ class _GeneralState extends State<_General> {
         List<String> values = langsMap.values.toList();
         keys.insert(0, defaultOptionLang);
         values.insert(0, translate('Default'));
-        String currentKey = normalizeAppLanguage(
-            bind.mainGetLocalOption(key: kCommConfKeyLang));
+        String currentKey = bind.mainGetLocalOption(key: kCommConfKeyLang);
         if (!keys.contains(currentKey)) {
           currentKey = defaultOptionLang;
         }
@@ -877,6 +854,8 @@ class _GeneralState extends State<_General> {
     );
   }
 }
+
+enum _AccessMode { custom, full, view }
 
 class _Display extends StatefulWidget {
   const _Display({Key? key}) : super(key: key);
@@ -1221,6 +1200,176 @@ class _DisplayState extends State<_Display> {
   }
 }
 
+class _Printer extends StatefulWidget {
+  const _Printer({super.key});
+
+  @override
+  State<_Printer> createState() => __PrinterState();
+}
+
+class __PrinterState extends State<_Printer> {
+  @override
+  Widget build(BuildContext context) {
+    final scrollController = ScrollController();
+    return ListView(
+      controller: scrollController,
+      children: [outgoing(context), incoming(context)],
+    ).marginOnly(bottom: _kListViewBottomMargin);
+  }
+
+  Widget outgoing(BuildContext context) {
+    final isSupportPrinterDriver =
+        bind.mainGetCommonSync(key: 'is-support-printer-driver') == 'true';
+
+    Widget tipOsNotSupported() {
+      return Align(
+        alignment: Alignment.topLeft,
+        child: Text(translate('printer-os-requirement-tip')),
+      ).marginOnly(left: _kCardLeftMargin);
+    }
+
+    Widget tipClientNotInstalled() {
+      return Align(
+        alignment: Alignment.topLeft,
+        child: Text(
+          translate('printer-requires-installed-{$appName}-client-tip'),
+        ),
+      ).marginOnly(left: _kCardLeftMargin);
+    }
+
+    Widget tipPrinterNotInstalled() {
+      final failedMsg = ''.obs;
+      platformFFI.registerEventHandler(
+        'install-printer-res',
+        'install-printer-res',
+        (evt) async {
+          if (evt['success'] as bool) {
+            setState(() {});
+          } else {
+            failedMsg.value = evt['msg'] as String;
+          }
+        },
+        replace: true,
+      );
+      return Column(
+        children: [
+          Obx(
+            () => failedMsg.value.isNotEmpty
+                ? Offstage()
+                : Align(
+                    alignment: Alignment.topLeft,
+                    child: Text(
+                      translate('printer-{$appName}-not-installed-tip'),
+                    ).marginOnly(bottom: 10.0),
+                  ),
+          ),
+          Obx(
+            () => failedMsg.value.isEmpty
+                ? Offstage()
+                : Align(
+                    alignment: Alignment.topLeft,
+                    child: Text(
+                      failedMsg.value,
+                      style: DefaultTextStyle.of(
+                        context,
+                      ).style.copyWith(color: Colors.red),
+                    ).marginOnly(bottom: 10.0),
+                  ),
+          ),
+          _Button('Install {$appName} Printer', () {
+            failedMsg.value = '';
+            bind.mainSetCommon(key: 'install-printer', value: '');
+          }),
+        ],
+      ).marginOnly(left: _kCardLeftMargin, bottom: 2.0);
+    }
+
+    Widget tipReady() {
+      return Align(
+        alignment: Alignment.topLeft,
+        child: Text(translate('printer-{$appName}-ready-tip')),
+      ).marginOnly(left: _kCardLeftMargin);
+    }
+
+    final installed = bind.mainIsInstalled();
+    // `is-printer-installed` may fail, but it's rare case.
+    // Add additional error message here if it's really needed.
+    final isPrinterInstalled =
+        bind.mainGetCommonSync(key: 'is-printer-installed') == 'true';
+
+    final List<Widget> children = [];
+    if (!isSupportPrinterDriver) {
+      children.add(tipOsNotSupported());
+    } else {
+      children.addAll([
+        if (!installed) tipClientNotInstalled(),
+        if (installed && !isPrinterInstalled) tipPrinterNotInstalled(),
+        if (installed && isPrinterInstalled) tipReady(),
+      ]);
+    }
+    return _Card(title: 'Outgoing Print Jobs', children: children);
+  }
+
+  Widget incoming(BuildContext context) {
+    onRadioChanged(String value) async {
+      await bind.mainSetLocalOption(
+        key: kKeyPrinterIncomingJobAction,
+        value: value,
+      );
+      setState(() {});
+    }
+
+    PrinterOptions printerOptions = PrinterOptions.load();
+    return _Card(
+      title: 'Incoming Print Jobs',
+      children: [
+        _Radio(
+          context,
+          value: kValuePrinterIncomingJobDismiss,
+          groupValue: printerOptions.action,
+          label: 'Dismiss',
+          onChanged: onRadioChanged,
+        ),
+        _Radio(
+          context,
+          value: kValuePrinterIncomingJobDefault,
+          groupValue: printerOptions.action,
+          label: 'use-the-default-printer-tip',
+          onChanged: onRadioChanged,
+        ),
+        _Radio(
+          context,
+          value: kValuePrinterIncomingJobSelected,
+          groupValue: printerOptions.action,
+          label: 'use-the-selected-printer-tip',
+          onChanged: onRadioChanged,
+        ),
+        if (printerOptions.printerNames.isNotEmpty)
+          ComboBox(
+            initialKey: printerOptions.printerName,
+            keys: printerOptions.printerNames,
+            values: printerOptions.printerNames,
+            enabled: printerOptions.action == kValuePrinterIncomingJobSelected,
+            onChanged: (value) async {
+              await bind.mainSetLocalOption(
+                key: kKeyPrinterSelected,
+                value: value,
+              );
+              setState(() {});
+            },
+          ).marginOnly(left: 10),
+        _OptionCheckBox(
+          context,
+          'auto-print-tip',
+          kKeyPrinterAllowAutoPrint,
+          isServer: false,
+          enabled: printerOptions.action != kValuePrinterIncomingJobDismiss,
+        ),
+      ],
+    );
+  }
+}
+
 class _About extends StatefulWidget {
   const _About({Key? key}) : super(key: key);
 
@@ -1229,13 +1378,7 @@ class _About extends StatefulWidget {
 }
 
 class _AboutState extends State<_About> {
-  static const _updateEvent = 'software_update';
-  static const _updateHandler = 'desktop-settings-about';
   late final Future<Map<String, String>> _aboutInfo;
-  Map<String, dynamic> _updateState = const {};
-  bool _updateActionPending = false;
-  bool _exportPending = false;
-  String _exportStatus = '';
 
   @override
   void initState() {
@@ -1250,307 +1393,6 @@ class _AboutState extends State<_About> {
         'fingerprint': fingerprint,
       };
     }();
-    if (isWindows || isMacOS) {
-      platformFFI.registerEventHandler(_updateEvent, _updateHandler, (
-        evt,
-      ) async {
-        if (mounted) {
-          setState(() => _updateState = Map<String, dynamic>.from(evt));
-        }
-      }, replace: true);
-      bind.mainGetSoftwareUpdateState().then((value) {
-        if (!mounted || value.isEmpty) return;
-        try {
-          setState(() => _updateState = jsonDecode(value));
-        } catch (e) {
-          debugPrint('Invalid software update state: $e');
-        }
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    if (isWindows || isMacOS) {
-      platformFFI.unregisterEventHandler(_updateEvent, _updateHandler);
-    }
-    super.dispose();
-  }
-
-  Future<void> _exportDiagnostics() async {
-    if (_exportPending) return;
-    setState(() {
-      _exportPending = true;
-      _exportStatus = '';
-    });
-    try {
-      final path = await FilePicker.saveFile(
-        dialogTitle: translate('Export diagnostic bundle'),
-        fileName:
-            'SubnetDesk-diagnostics-${DateTime.now().millisecondsSinceEpoch}.zip',
-        allowedExtensions: ['zip'],
-        type: FileType.custom,
-      );
-      if (path == null) return;
-      final destination = path;
-      final error = await bind.mainExportDiagnostics(
-        request: jsonEncode({
-          'path': destination,
-          'system': Platform.operatingSystemVersion,
-        }),
-      );
-      if (mounted) {
-        setState(
-          () => _exportStatus = error.isEmpty
-              ? '${translate('Successful')}: $destination'
-              : '${translate('Failed')}: $error',
-        );
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() => _exportStatus = '${translate('Failed')}: $error');
-      }
-    } finally {
-      if (mounted) setState(() => _exportPending = false);
-    }
-  }
-
-  Widget _diagnosticsSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 28),
-        Text(translate('Diagnostic bundle description')),
-        const SizedBox(height: 8),
-        ElevatedButton.icon(
-          onPressed: _exportPending ? null : _exportDiagnostics,
-          icon: _exportPending
-              ? const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.download),
-          label: Text(translate('Export diagnostic bundle')),
-        ),
-        if (_exportStatus.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: SelectableText(_exportStatus),
-          ),
-      ],
-    );
-  }
-
-  Future<void> _runUpdateAction(Future<String> Function() action) async {
-    if (_updateActionPending) return;
-    setState(() => _updateActionPending = true);
-    try {
-      final error = await action();
-      if (error.isNotEmpty && mounted) {
-        final stateJson = await bind.mainGetSoftwareUpdateState();
-        Map<String, dynamic>? latestState;
-        try {
-          latestState = Map<String, dynamic>.from(jsonDecode(stateJson));
-        } catch (_) {}
-        if (mounted) {
-          setState(() {
-            final currentState = latestState ?? _updateState;
-            _updateState = {
-              ...currentState,
-              'state': const ['deferred', 'disabled', 'ready', 'available']
-                      .contains(currentState['state'])
-                  ? currentState['state']
-                  : 'failed',
-              'message': error,
-            };
-          });
-        }
-      }
-    } catch (error) {
-      if (mounted) {
-        setState(() => _updateState = {
-              ..._updateState,
-              'state': const ['deferred', 'disabled', 'ready', 'available']
-                      .contains(_updateState['state'])
-                  ? _updateState['state']
-                  : 'failed',
-              'message': error.toString(),
-            });
-      }
-    } finally {
-      if (mounted) setState(() => _updateActionPending = false);
-    }
-  }
-
-  Widget _softwareUpdateSection() {
-    final state = _updateState['state']?.toString() ?? 'idle';
-    final availableVersion =
-        _updateState['available_version']?.toString() ?? '';
-    final currentVersion = _updateState['current_version']?.toString() ?? '';
-    final message = _updateState['message']?.toString() ?? '';
-    final releaseNotesUrl = _updateState['release_notes_url']?.toString() ?? '';
-    final progress = (_updateState['progress'] as num?)?.toInt() ?? 0;
-    final autoCheck = _updateState['auto_check'] == true;
-    final autoDownload = _updateState['auto_download'] == true;
-    final disabled = state == 'disabled';
-    final busy =
-        _updateActionPending ||
-        state == 'checking' ||
-        state == 'downloading' ||
-        state == 'installing';
-
-    String status;
-    switch (state) {
-      case 'checking':
-        status = '${translate('Update')}…';
-        break;
-      case 'up_to_date':
-        status =
-            '${subnetText(context, '已是最新版本', 'Up to date')}: $currentVersion';
-        break;
-      case 'available':
-        status = message.isEmpty
-            ? '${translate('Update')}: $availableVersion'
-            : message;
-        break;
-      case 'downloading':
-        status = '${translate('Download')}: $progress%';
-        break;
-      case 'ready':
-        status = message.isEmpty
-            ? '${translate('Ready')}: $availableVersion'
-            : message;
-        break;
-      case 'installing':
-        status = '${translate('Install')}…';
-        break;
-      case 'deferred':
-      case 'failed':
-      case 'disabled':
-        status = message.isEmpty ? translate('Failed') : message;
-        if (message == 'Automatic updates are not configured in this build' ||
-            message == 'Invalid update public key') {
-          status = subnetText(
-            context,
-            '此版本暂不支持自动更新，请前往下载页面获取新版本。',
-            'Automatic updates are unavailable in this build. Get new versions from the download page.',
-          );
-        } else if (message ==
-            'Replace the portable application directory to install this update') {
-          status = subnetText(
-            context,
-            '便携版请下载新版本并替换应用目录，保留 userdata 数据目录。',
-            'For portable builds, download the new version and replace the application directory, keeping userdata.',
-          );
-        }
-        break;
-      default:
-        status = message;
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Divider(height: 28),
-        Text(
-          translate('Auto update'),
-          style: const TextStyle(fontWeight: FontWeight.w600),
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text(translate('Check for software update on startup')),
-          value: autoCheck,
-          onChanged: busy || disabled
-              ? null
-              : (value) async {
-                  setState(() {
-                    _updateState = {
-                      ..._updateState,
-                      'auto_check': value,
-                      'auto_download': value && autoDownload,
-                    };
-                  });
-                  await bind.mainSetSoftwareUpdatePreferences(
-                    autoCheck: value,
-                    autoDownload: value && autoDownload,
-                  );
-                },
-        ),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: Text('${translate('Auto update')} · ${translate('Download')}'),
-          value: autoDownload,
-          onChanged: busy || disabled
-              ? null
-              : (value) async {
-                  setState(() {
-                    _updateState = {
-                      ..._updateState,
-                      'auto_check': value || autoCheck,
-                      'auto_download': value,
-                    };
-                  });
-                  await bind.mainSetSoftwareUpdatePreferences(
-                    autoCheck: value || autoCheck,
-                    autoDownload: value,
-                  );
-                },
-        ),
-        if (state == 'downloading')
-          LinearProgressIndicator(value: progress.clamp(0, 100) / 100),
-        if (status.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            child: SelectableText(
-              status,
-              style: TextStyle(
-                color: state == 'failed' ||
-                        state == 'disabled' ||
-                        (message.isNotEmpty &&
-                            (state == 'ready' || state == 'available'))
-                    ? Colors.red
-                    : null,
-              ),
-            ),
-          ),
-        Wrap(
-          spacing: 8,
-          children: [
-            ElevatedButton(
-              onPressed: busy || disabled
-                  ? null
-                  : () => _runUpdateAction(bind.mainCheckSoftwareUpdate),
-              child: Text(subnetText(context, '检查更新', 'Check for updates')),
-            ),
-            if (state == 'available')
-              ElevatedButton(
-                onPressed: busy
-                    ? null
-                    : () => _runUpdateAction(bind.mainDownloadSoftwareUpdate),
-                child: Text(translate('Download')),
-              ),
-            if (state == 'ready' || state == 'deferred')
-              ElevatedButton(
-                onPressed: busy
-                    ? null
-                    : () => _runUpdateAction(bind.mainInstallSoftwareUpdate),
-                child: Text(translate('Install')),
-              ),
-            if (disabled && releaseNotesUrl.isNotEmpty)
-              TextButton(
-                onPressed: () => launchUrlString(releaseNotesUrl),
-                child: Text(subnetText(context, '前往下载页面', 'Open download page')),
-              ),
-            if (!disabled && releaseNotesUrl.isNotEmpty)
-              TextButton(
-                onPressed: () => launchUrlString(releaseNotesUrl),
-                child: Text(translate('Changelog')),
-              ),
-          ],
-        ),
-      ],
-    );
   }
 
   @override
@@ -1587,8 +1429,38 @@ class _AboutState extends State<_About> {
                         '${translate('Fingerprint')}: $fingerprint',
                       ).marginSymmetric(vertical: 4.0),
                     ),
-                  if (isWindows || isMacOS) _softwareUpdateSection(),
-                  if (!isWeb) _diagnosticsSection(),
+                  // Private helper is updated manually; no updater controls are exposed.
+                  Container(
+                    decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 24,
+                      horizontal: 8,
+                    ),
+                    child: SelectionArea(
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Tech Pte. Ltd.',
+                                  style: const TextStyle(color: Colors.white),
+                                ),
+                                Text(
+                                  translate('Slogan_tip'),
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ).marginSymmetric(vertical: 4.0),
                 ],
               ).marginOnly(left: _kContentHMargin),
             ],
@@ -1609,18 +1481,36 @@ Widget _Card({
   required List<Widget> children,
   List<Widget>? title_suffix,
 }) {
-  return Builder(builder: (context) => Align(alignment: Alignment.topCenter, child: ConstrainedBox(
-    constraints: const BoxConstraints(maxWidth: 1064),
-    child: Card(elevation: 0, margin: const EdgeInsets.symmetric(horizontal: 32, vertical: 10),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: Theme.of(context).dividerColor)),
-      child: Padding(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Row(children: [Expanded(child: Text(translate(title), style: const TextStyle(fontSize: _kTitleFontSize, fontWeight: FontWeight.w600))), ...?title_suffix]),
-        const SizedBox(height: 12),
-        ...children.map((child) => Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: child)),
-      ])),
-    ),
-  )));
-
+  return Row(
+    children: [
+      Flexible(
+        child: SizedBox(
+          width: _kCardFixedWidth,
+          child: Card(
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        translate(title),
+                        textAlign: TextAlign.start,
+                        style: const TextStyle(fontSize: _kTitleFontSize),
+                      ),
+                    ),
+                    ...?title_suffix,
+                  ],
+                ).marginOnly(left: _kContentHMargin, top: 10, bottom: 10),
+                ...children.map(
+                  (e) => e.marginOnly(top: 4, right: _kContentHMargin),
+                ),
+              ],
+            ).marginOnly(bottom: 10),
+          ).marginOnly(left: _kCardLeftMargin, top: 15),
+        ),
+      ),
+    ],
+  );
 }
 
 // ignore: non_constant_identifier_names
@@ -2117,140 +2007,3 @@ class _CountDownButtonState extends State<_CountDownButton> {
 //#endregion
 
 //#region dialogs
-
-class _ConnectionCredentials extends StatefulWidget {
-  const _ConnectionCredentials();
-  @override
-  State<_ConnectionCredentials> createState() => _ConnectionCredentialsState();
-}
-
-class _ConnectionCredentialsState extends State<_ConnectionCredentials> {
-  List<LanIdentityProfile> _identities = [];
-  @override
-  void initState() {
-    super.initState();
-    _identities = loadLanIdentityProfiles();
-  }
-
-  Future<void> _edit([LanIdentityProfile? profile]) async {
-    await showLanIdentityEditor(context, identity: profile);
-    if (mounted) setState(() => _identities = loadLanIdentityProfiles());
-  }
-
-  @override
-  Widget build(BuildContext context) => SingleChildScrollView(
-    padding: const EdgeInsets.all(32),
-    child: Center(
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 1000),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Wrap(
-              spacing: 24,
-              runSpacing: 16,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  subnetText(context, '连接凭据', 'Connection credentials'),
-                  style: const TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                ElevatedButton.icon(
-                  onPressed: _edit,
-                  icon: const Icon(Icons.add_rounded),
-                  label: Text(subnetText(context, '新建连接凭据', 'New credentials')),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Text(
-              subnetText(
-                context,
-                '用于连接其他设备，与本机接入账号分开管理。',
-                'Used to connect to other devices, separately from credentials for incoming access.',
-              ),
-              style: TextStyle(color: Theme.of(context).hintColor),
-            ),
-            const SizedBox(height: 28),
-            if (_identities.isEmpty)
-              SubnetEmpty(
-                icon: Icons.key_outlined,
-                title: subnetText(context, '还没有保存凭据', 'No saved credentials'),
-                message: subnetText(
-                  context,
-                  '先添加连接账号，连接设备时即可直接选择使用。',
-                  'Add a connection account, then select it when connecting to a device.',
-                ),
-              ),
-            for (final profile in _identities)
-              Card(
-                elevation: 0,
-                margin: const EdgeInsets.only(bottom: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  side: BorderSide(color: Theme.of(context).dividerColor),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: ListTile(
-                    leading: const Icon(Icons.key_outlined),
-                    title: Text(
-                      profile.name,
-                      style: const TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: Text(
-                      translate('Username') +
-                          ': ' +
-                          profile.username +
-                          (profile.isDefault
-                              ? ' · ' + translate('Default')
-                              : ''),
-                    ),
-                    trailing: IconButton(
-                      tooltip: translate('Edit'),
-                      onPressed: () => _edit(profile),
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                  ),
-                ),
-              ),
-            const SizedBox(height: 16),
-            OutlinedButton.icon(
-              onPressed: () async {
-                await showLanIdentityManager(context);
-                if (mounted)
-                  setState(() => _identities = loadLanIdentityProfiles());
-              },
-              icon: const Icon(Icons.manage_accounts_outlined),
-              label: Text(
-                subnetText(
-                  context,
-                  '管理凭据与设备关联',
-                  'Manage credentials and device associations',
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-  );
-}
-
-/// Host-only preferences stay with This device rather than appearance settings.
-class LocalHostPreferencesPage extends StatelessWidget {
-  const LocalHostPreferencesPage({super.key});
-  @override
-  Widget build(BuildContext context) => Container(
-    color: Theme.of(context).scaffoldBackgroundColor,
-    // macOS draws the traffic lights over the Flutter content area.
-    padding: EdgeInsets.only(top: isMacOS ? kDesktopRemoteTabBarHeight : 0),
-    child: Scaffold(
-      appBar: AppBar(title: Text(subnetText(context, '本机高级设置', 'Advanced host settings'))),
-      body: const _General(hostOnly: true),
-    ),
-  );
-}

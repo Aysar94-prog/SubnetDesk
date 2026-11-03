@@ -1,7 +1,13 @@
 #[cfg(target_os = "windows")]
 mod setup;
 #[cfg(target_os = "windows")]
-pub use setup::setup::uninstall_printer;
+pub use setup::{
+    is_rd_printer_installed,
+    setup::{install_update_printer, uninstall_printer},
+};
+
+#[cfg(target_os = "windows")]
+const RD_DRIVER_INF_PATH: &str = "drivers/RustDeskPrinterDriver/RustDeskPrinterDriver.inf";
 
 #[cfg(target_os = "windows")]
 fn get_printer_name(app_name: &str) -> Vec<u16> {

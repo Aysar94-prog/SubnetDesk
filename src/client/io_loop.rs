@@ -16,14 +16,6 @@ use crate::{
 const RESTART_REMOTE_DEVICE_NO_DATA_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::try_empty_clipboard_files, clipboard_file::unix_file_clip};
-use base::{
-    config::keys,
-    fs::{
-        self, can_enable_overwrite_detection, get_job, get_string, new_send_confirm,
-        DigestCheckResult, RemoveJobMeta,
-    },
-    message_proto::{permission_info::Permission, *},
-};
 #[cfg(any(
     target_os = "windows",
     all(target_os = "macos", feature = "unix-file-copy-paste")
@@ -35,7 +27,12 @@ use hbb_common::tokio::sync::mpsc::error::TryRecvError;
 use hbb_common::{
     allow_err,
     config::{self, LocalConfig, PeerConfig, TransferSerde},
+    fs::{
+        self, can_enable_overwrite_detection, get_job, get_string, new_send_confirm,
+        DigestCheckResult, RemoveJobMeta,
+    },
     get_time, log,
+    message_proto::*,
     protobuf::Message as _,
     rendezvous_proto::ConnType,
     timeout,
@@ -50,9 +47,8 @@ use hbb_common::{
 use hbb_common::{tokio::sync::Mutex as TokioMutex, ResultType};
 use scrap::CodecFormat;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     ffi::c_void,
-    future::Future,
     num::NonZeroI64,
     path::PathBuf,
     sync::{
@@ -61,42 +57,10 @@ use std::{
     },
 };
 
-#[derive(Debug, PartialEq)]
-enum LanLoginOutcome {
-    Ready,
-    Cancelled,
-    TimedOut,
-}
-
-// A credential-store call may block on OS authorization. Keep cancellation
-// responsive and bound the wait without dropping other queued UI messages.
-async fn wait_for_lan_login(
-    login: impl Future<Output = ()>,
-    receiver: &mut mpsc::UnboundedReceiver<Data>,
-    pending: &mut VecDeque<Data>,
-    limit: Duration,
-) -> LanLoginOutcome {
-    tokio::pin!(login);
-    let deadline = time::sleep(limit);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            biased;
-            _ = &mut deadline => return LanLoginOutcome::TimedOut,
-            message = receiver.recv() => match message {
-                None | Some(Data::Close) => return LanLoginOutcome::Cancelled,
-                Some(message) => pending.push_back(message),
-            },
-            _ = &mut login => return LanLoginOutcome::Ready,
-        }
-    }
-}
-
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
     audio_sender: MediaSender,
     receiver: mpsc::UnboundedReceiver<Data>,
-    pending_ui_messages: VecDeque<Data>,
     sender: mpsc::UnboundedSender<Data>,
     // Stop sending local audio to remote client.
     stop_voice_call_sender: Option<std::sync::mpsc::Sender<()>>,
@@ -118,6 +82,7 @@ pub struct Remote<T: InvokeUiSession> {
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
     sent_close_reason: bool,
+    chat_attention_cooldown: crate::chat_attention::Cooldown,
 }
 
 #[derive(Default)]
@@ -127,6 +92,7 @@ struct ParsedPeerInfo {
     idd_impl: String,
     support_view_camera: bool,
     support_terminal: bool,
+    support_chat_attention: bool,
 }
 
 impl ParsedPeerInfo {
@@ -147,7 +113,6 @@ impl<T: InvokeUiSession> Remote<T> {
             handler,
             audio_sender: crate::client::start_audio_thread(),
             receiver,
-            pending_ui_messages: VecDeque::new(),
             sender,
             read_jobs: Vec::new(),
             write_jobs: Vec::new(),
@@ -168,6 +133,7 @@ impl<T: InvokeUiSession> Remote<T> {
             chroma: Default::default(),
             last_record_state: false,
             sent_close_reason: false,
+            chat_attention_cooldown: Default::default(),
         }
     }
 
@@ -206,13 +172,14 @@ impl<T: InvokeUiSession> Remote<T> {
         };
 
         match Client::start(&self.handler.get_id(), conn_type, self.handler.clone()).await {
-            Ok((mut peer, device_public_key, connected_endpoint)) => {
+            Ok((mut peer, device_public_key, connected_endpoint, verified_fingerprint)) => {
                 if device_public_key.is_empty()
                     || !client::confirm_lan_device(
                         &self.handler,
                         &mut self.receiver,
                         &connected_endpoint,
                         &device_public_key,
+                        verified_fingerprint.as_deref(),
                     )
                     .await
                 {
@@ -223,10 +190,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 let fingerprint = crate::lan_protocol::fingerprint(&device_public_key);
                 self.handler.get_lch().write().unwrap().lan_fingerprint = fingerprint.clone();
-                if !self.send_initial_lan_login(&mut peer).await {
-                    self.handle_disconnected(round);
-                    return;
-                }
+                self.handler.send_initial_lan_login(&mut peer).await;
                 self.handler
                     .connection_round_state
                     .lock()
@@ -272,16 +236,6 @@ impl<T: InvokeUiSession> Remote<T> {
                 let mut last_recv_time = Instant::now();
 
                 loop {
-                    let mut cancelled = false;
-                    while let Some(data) = self.pending_ui_messages.pop_front() {
-                        if !self.handle_msg_from_ui(data, &mut peer).await {
-                            cancelled = true;
-                            break;
-                        }
-                    }
-                    if cancelled {
-                        break;
-                    }
                     tokio::select! {
                         res = peer.next() => {
                             if let Some(res) = res {
@@ -599,32 +553,28 @@ impl<T: InvokeUiSession> Remote<T> {
         self.sent_close_reason = true;
     }
 
-    async fn send_initial_lan_login(&mut self, peer: &mut Stream) -> bool {
-        match wait_for_lan_login(
-            self.handler.send_initial_lan_login(peer),
-            &mut self.receiver,
-            &mut self.pending_ui_messages,
-            Duration::from_secs(10),
-        )
-        .await
-        {
-            LanLoginOutcome::Ready => true,
-            LanLoginOutcome::Cancelled => false,
-            LanLoginOutcome::TimedOut => {
-                log::warn!("LAN login timed out while waiting for the system credential store");
-                self.handler.msgbox(
-                    "error",
-                    "Login Error",
-                    "Timed out reading saved credentials. Check access to your system credential store, then reconnect.",
-                    "",
-                );
-                false
-            }
-        }
-    }
-
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
         match data {
+            Data::RequestChatAttention => {
+                let now = std::time::Instant::now();
+                if self.is_connected && self.peer_info.support_chat_attention
+                    && self.chat_attention_cooldown.ready(now) {
+                    let mut misc = Misc::new();
+                    misc.set_chat_attention(ChatAttention {
+                        version: crate::chat_attention::VERSION,
+                        ..Default::default()
+                    });
+                    let mut message = Message::new();
+                    message.set_misc(misc);
+                    match peer.send(&message).await {
+                        Ok(()) => self.chat_attention_cooldown.record(now),
+                        Err(error) => {
+                            log::warn!("Failed to send chat attention: {error}");
+                            self.handler.msgbox("error", "Buzzer", "Failed", "");
+                        }
+                    }
+                }
+            }
             Data::Close => {
                 self.send_close_reason(peer, "").await;
                 return false;
@@ -635,7 +585,18 @@ impl<T: InvokeUiSession> Remote<T> {
                     .await;
             }
             Data::SubmitLanCredentials => {
-                return self.send_initial_lan_login(peer).await;
+                if let Some(optional) = self.handler.lan_credential()
+                    .filter(|credential| credential.access_method != hbb_common::lan::ACCESS_PASSWORD) {
+                    // Authentication may finish between UI submission and queue
+                    // delivery. Never reauthenticate an active file channel.
+                    if let Err(error) = crate::file_transfer_access::validate_optional_retry(
+                        self.handler.is_file_transfer(), self.is_connected,
+                        optional.access_method, &optional.temporary_code) {
+                        self.handler.msgbox("error", "File transfer", error, "");
+                        return true;
+                    }
+                }
+                self.handler.send_initial_lan_login(peer).await;
             }
             #[cfg(all(target_os = "windows", not(feature = "flutter")))]
             Data::ToggleClipboardFile => {
@@ -665,7 +626,12 @@ impl<T: InvokeUiSession> Remote<T> {
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
                 if is_remote {
                     log::debug!("New job {}, write to {} from remote {}", id, to, path);
-                    let to = fs::DataSource::FilePath(PathBuf::from(&to));
+                    let to = match r#type {
+                        fs::JobType::Generic => fs::DataSource::FilePath(PathBuf::from(&to)),
+                        fs::JobType::Printer => {
+                            fs::DataSource::MemoryCursor(std::io::Cursor::new(Vec::new()))
+                        }
+                    };
                     self.write_jobs.push(fs::TransferJob::new_write(
                         id,
                         r#type,
@@ -829,9 +795,10 @@ impl<T: InvokeUiSession> Remote<T> {
                                     .await
                                 );
                             }
-                            // In-memory transfer jobs (base crate) have no on-disk path to
-                            // resume, so there is nothing to send back.
-                            fs::DataSource::MemoryCursor(_) => {}
+                            fs::DataSource::MemoryCursor(_) => {
+                                // unreachable!()
+                                log::error!("Resume job with memory cursor");
+                            }
                         }
                     }
                 }
@@ -1410,6 +1377,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                 }
+                Some(message::Union::LanAccessPending(pending)) => {
+                    let is_manual = self.handler.lan_credential().map(|c| c.access_method == hbb_common::lan::ACCESS_MANUAL).unwrap_or(false);
+                    if is_manual && pending.version == hbb_common::lan::ACCESS_VERSION && pending.timeout_seconds <= 60 {
+                        self.handler.msgbox("lan-access-pending", "Waiting for approval", "Waiting for the receiver to approve this connection (up to 60 seconds).", "");
+                    }
+                }
                 Some(message::Union::LoginResponse(lr)) => {
                     self.handler.set_auth_retry_after(lr.retry_after_seconds);
                     match lr.union {
@@ -1521,18 +1494,6 @@ impl<T: InvokeUiSession> Remote<T> {
                         !lc.disable_clipboard.v && !lc.view_only.v
                     };
                     if clipboard_allowed {
-                        #[cfg(all(
-                            feature = "flutter",
-                            not(any(target_os = "android", target_os = "ios"))
-                        ))]
-                        if self.handler.is_text_clipboard_required()
-                            && crate::clipboard::is_sync_clipboard_between_sessions_enabled()
-                        {
-                            let mut msg = Message::new();
-                            msg.set_clipboard(cb.clone());
-                            let session_id = self.handler.lc.read().unwrap().session_id;
-                            crate::flutter::send_clipboard_msg_to_other_sessions(msg, session_id);
-                        }
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(vec![cb], ClipboardSide::Client);
                         #[cfg(target_os = "ios")]
@@ -1556,18 +1517,6 @@ impl<T: InvokeUiSession> Remote<T> {
                         !lc.disable_clipboard.v && !lc.view_only.v
                     };
                     if clipboard_allowed {
-                        #[cfg(all(
-                            feature = "flutter",
-                            not(any(target_os = "android", target_os = "ios"))
-                        ))]
-                        if self.handler.is_text_clipboard_required()
-                            && crate::clipboard::is_sync_clipboard_between_sessions_enabled()
-                        {
-                            let mut msg = Message::new();
-                            msg.set_multi_clipboards(_mcb.clone());
-                            let session_id = self.handler.lc.read().unwrap().session_id;
-                            crate::flutter::send_clipboard_msg_to_other_sessions(msg, session_id);
-                        }
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(_mcb.clipboards, ClipboardSide::Client);
                         #[cfg(target_os = "ios")]
@@ -1654,129 +1603,127 @@ impl<T: InvokeUiSession> Remote<T> {
                             if digest.is_upload {
                                 if let Some(job) = fs::get_job(digest.id, &mut self.read_jobs) {
                                     if let Some(file) = job.files().get(digest.file_num as usize) {
-                                        let fs::DataSource::FilePath(p) = &job.data_source
-                                        else {
-                                            // In-memory transfer jobs have no on-disk path.
-                                            return false;
-                                        };
-                                        let read_path =
-                                            get_string(&fs::TransferJob::join(p, &file.name));
-                                        let mut overwrite_strategy =
-                                            job.default_overwrite_strategy();
-                                        let mut offset = 0;
-                                        if digest.is_identical && job.is_resume {
-                                            if digest.transferred_size > 0 {
-                                                overwrite_strategy = Some(true);
-                                                offset = digest.transferred_size as _;
+                                        if let fs::DataSource::FilePath(p) = &job.data_source {
+                                            let read_path =
+                                                get_string(&fs::TransferJob::join(p, &file.name));
+                                            let mut overwrite_strategy =
+                                                job.default_overwrite_strategy();
+                                            let mut offset = 0;
+                                            if digest.is_identical && job.is_resume {
+                                                if digest.transferred_size > 0 {
+                                                    overwrite_strategy = Some(true);
+                                                    offset = digest.transferred_size as _;
+                                                }
                                             }
-                                        }
-                                        if let Some(overwrite) = overwrite_strategy {
-                                            let req = FileTransferSendConfirmRequest {
-                                                id: digest.id,
-                                                file_num: digest.file_num,
-                                                union: Some(if overwrite {
-                                                    file_transfer_send_confirm_request::Union::OffsetBlk(offset)
-                                                } else {
-                                                    file_transfer_send_confirm_request::Union::Skip(
-                                                        true,
-                                                    )
-                                                }),
-                                                ..Default::default()
-                                            };
-                                            job.confirm(&req).await;
-                                            let msg = new_send_confirm(req);
-                                            allow_err!(peer.send(&msg).await);
-                                        } else {
-                                            self.handler.override_file_confirm(
-                                                digest.id,
-                                                digest.file_num,
-                                                read_path,
-                                                true,
-                                                digest.is_identical,
-                                            );
+                                            if let Some(overwrite) = overwrite_strategy {
+                                                let req = FileTransferSendConfirmRequest {
+                                                    id: digest.id,
+                                                    file_num: digest.file_num,
+                                                    union: Some(if overwrite {
+                                                        file_transfer_send_confirm_request::Union::OffsetBlk(offset)
+                                                    } else {
+                                                        file_transfer_send_confirm_request::Union::Skip(
+                                                            true,
+                                                        )
+                                                    }),
+                                                    ..Default::default()
+                                                };
+                                                job.confirm(&req).await;
+                                                let msg = new_send_confirm(req);
+                                                allow_err!(peer.send(&msg).await);
+                                            } else {
+                                                self.handler.override_file_confirm(
+                                                    digest.id,
+                                                    digest.file_num,
+                                                    read_path,
+                                                    true,
+                                                    digest.is_identical,
+                                                );
+                                            }
                                         }
                                     }
                                 }
                             } else {
                                 if let Some(job) = fs::get_job(digest.id, &mut self.write_jobs) {
                                     if let Some(file) = job.files().get(digest.file_num as usize) {
-                                        let fs::DataSource::FilePath(p) = &job.data_source
-                                        else {
-                                            // In-memory transfer jobs have no on-disk path.
-                                            return false;
-                                        };
-                                        let write_path =
-                                            get_string(&fs::TransferJob::join(p, &file.name));
-                                        job.set_digest(digest.file_size, digest.last_modified);
-                                        let peer_ver = self.handler.lc.read().unwrap().version;
-                                        let is_support_resume =
-                                            crate::is_support_file_transfer_resume_num(peer_ver);
-                                        match fs::is_write_need_confirmation(
-                                            is_support_resume && job.is_resume,
-                                            &write_path,
-                                            &digest,
-                                        ) {
-                                            Ok(res) => match res {
-                                                DigestCheckResult::IsSame => {
-                                                    let req = FileTransferSendConfirmRequest {
+                                        if let fs::DataSource::FilePath(p) = &job.data_source {
+                                            let write_path =
+                                                get_string(&fs::TransferJob::join(p, &file.name));
+                                            job.set_digest(digest.file_size, digest.last_modified);
+                                            let peer_ver = self.handler.lc.read().unwrap().version;
+                                            let is_support_resume =
+                                                crate::is_support_file_transfer_resume_num(
+                                                    peer_ver,
+                                                );
+                                            match fs::is_write_need_confirmation(
+                                                is_support_resume && job.is_resume,
+                                                &write_path,
+                                                &digest,
+                                            ) {
+                                                Ok(res) => match res {
+                                                    DigestCheckResult::IsSame => {
+                                                        let req = FileTransferSendConfirmRequest {
                                                             id: digest.id,
                                                             file_num: digest.file_num,
                                                             union: Some(file_transfer_send_confirm_request::Union::Skip(true)),
                                                             ..Default::default()
                                                         };
-                                                    job.confirm(&req).await;
-                                                    let msg = new_send_confirm(req);
-                                                    allow_err!(peer.send(&msg).await);
-                                                }
-                                                DigestCheckResult::NeedConfirm(digest) => {
-                                                    let mut overwrite_strategy =
-                                                        job.default_overwrite_strategy();
-                                                    let mut offset = 0;
-                                                    if digest.is_identical
-                                                        && job.is_resume
-                                                        && digest.transferred_size > 0
-                                                    {
-                                                        overwrite_strategy = Some(true);
-                                                        offset = digest.transferred_size as _;
-                                                    }
-                                                    if let Some(overwrite) = overwrite_strategy {
-                                                        let req = FileTransferSendConfirmRequest {
-                                                            id: digest.id,
-                                                            file_num: digest.file_num,
-                                                            union: Some(if overwrite {
-                                                                file_transfer_send_confirm_request::Union::OffsetBlk(offset)
-                                                            } else {
-                                                                file_transfer_send_confirm_request::Union::Skip(true)
-                                                            }),
-                                                            ..Default::default()
-                                                        };
                                                         job.confirm(&req).await;
                                                         let msg = new_send_confirm(req);
                                                         allow_err!(peer.send(&msg).await);
-                                                    } else {
-                                                        self.handler.override_file_confirm(
-                                                            digest.id,
-                                                            digest.file_num,
-                                                            write_path,
-                                                            false,
-                                                            digest.is_identical,
-                                                        );
                                                     }
-                                                }
-                                                DigestCheckResult::NoSuchFile => {
-                                                    let req = FileTransferSendConfirmRequest {
+                                                    DigestCheckResult::NeedConfirm(digest) => {
+                                                        let mut overwrite_strategy =
+                                                            job.default_overwrite_strategy();
+                                                        let mut offset = 0;
+                                                        if digest.is_identical
+                                                            && job.is_resume
+                                                            && digest.transferred_size > 0
+                                                        {
+                                                            overwrite_strategy = Some(true);
+                                                            offset = digest.transferred_size as _;
+                                                        }
+                                                        if let Some(overwrite) = overwrite_strategy
+                                                        {
+                                                            let req =
+                                                                FileTransferSendConfirmRequest {
+                                                                    id: digest.id,
+                                                                    file_num: digest.file_num,
+                                                                    union: Some(if overwrite {
+                                                                        file_transfer_send_confirm_request::Union::OffsetBlk(offset)
+                                                                    } else {
+                                                                        file_transfer_send_confirm_request::Union::Skip(true)
+                                                                    }),
+                                                                    ..Default::default()
+                                                                };
+                                                            job.confirm(&req).await;
+                                                            let msg = new_send_confirm(req);
+                                                            allow_err!(peer.send(&msg).await);
+                                                        } else {
+                                                            self.handler.override_file_confirm(
+                                                                digest.id,
+                                                                digest.file_num,
+                                                                write_path,
+                                                                false,
+                                                                digest.is_identical,
+                                                            );
+                                                        }
+                                                    }
+                                                    DigestCheckResult::NoSuchFile => {
+                                                        let req = FileTransferSendConfirmRequest {
                                                         id: digest.id,
                                                         file_num: digest.file_num,
                                                         union: Some(file_transfer_send_confirm_request::Union::OffsetBlk(0)),
                                                         ..Default::default()
                                                     };
-                                                    job.confirm(&req).await;
-                                                    let msg = new_send_confirm(req);
-                                                    allow_err!(peer.send(&msg).await);
+                                                        job.confirm(&req).await;
+                                                        let msg = new_send_confirm(req);
+                                                        allow_err!(peer.send(&msg).await);
+                                                    }
+                                                },
+                                                Err(err) => {
+                                                    println!("error receiving digest: {}", err);
                                                 }
-                                            },
-                                            Err(err) => {
-                                                println!("error receiving digest: {}", err);
                                             }
                                         }
                                     }
@@ -1788,21 +1735,77 @@ impl<T: InvokeUiSession> Remote<T> {
                                 if let Err(_err) = job.write(block).await {
                                     // to-do: add "skip" for writing job
                                 }
-                                self.update_jobs_status();
+                                if job.r#type == fs::JobType::Generic {
+                                    self.update_jobs_status();
+                                }
                             }
                         }
                         Some(file_response::Union::Done(d)) => {
                             let mut err: Option<String> = None;
+                            let mut job_type = fs::JobType::Generic;
+                            let mut printer_data = None;
                             if let Some(job) = fs::remove_job(d.id, &mut self.write_jobs) {
                                 job.modify_time();
                                 err = job.job_error();
+                                job_type = job.r#type;
+                                printer_data = match job.get_buf_data().await {
+                                    Ok(d) => d,
+                                    Err(e) => {
+                                        log::error!("Failed to get the printer data: {}", e);
+                                        None
+                                    }
+                                };
                             }
-                            self.handle_job_status(d.id, d.file_num, err);
+                            match job_type {
+                                fs::JobType::Generic => {
+                                    self.handle_job_status(d.id, d.file_num, err);
+                                }
+                                fs::JobType::Printer => {
+                                    if let Some(err) = err {
+                                        log::error!("Receive print job failed, error {err}");
+                                    } else {
+                                        log::info!(
+                                            "Receive print job done, data len: {:?}",
+                                            printer_data.as_ref().map(|d| d.len()).unwrap_or(0)
+                                        );
+                                        #[cfg(target_os = "windows")]
+                                        if let Some(data) = printer_data {
+                                            let printer_name = self
+                                                .handler
+                                                .printer_names
+                                                .write()
+                                                .unwrap()
+                                                .remove(&d.id);
+                                            // Spawn a new thread to handle the print job.
+                                            // Or print job will block the ui thread.
+                                            std::thread::spawn(move || {
+                                                if let Err(e) =
+                                                    crate::platform::send_raw_data_to_printer(
+                                                        printer_name,
+                                                        data,
+                                                    )
+                                                {
+                                                    log::error!("Print job error: {}", e);
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
                         }
                         Some(file_response::Union::Error(e)) => {
-                            fs::remove_job(e.id, &mut self.write_jobs)
-                                .or_else(|| fs::remove_job(e.id, &mut self.read_jobs));
-                            self.handle_job_status(e.id, e.file_num, Some(e.error));
+                            let job_type = fs::remove_job(e.id, &mut self.write_jobs)
+                                .or_else(|| fs::remove_job(e.id, &mut self.read_jobs))
+                                .map(|j| j.r#type)
+                                .unwrap_or(fs::JobType::Generic);
+                            match job_type {
+                                fs::JobType::Generic => {
+                                    self.handle_job_status(e.id, e.file_num, Some(e.error));
+                                }
+                                fs::JobType::Printer => {
+                                    log::error!("Printer job error: {}", e.error);
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1977,12 +1980,41 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
                 Some(message::Union::FileAction(action)) => match action.union {
-                    Some(file_action::Union::Send(s))
-                        if s.file_type.enum_value()
-                            == Ok(file_transfer_send_request::FileType::Printer) =>
-                    {
-                        log::debug!("Ignoring unsupported legacy remote print request");
-                    }
+                    Some(file_action::Union::Send(_s)) => match _s.file_type.enum_value() {
+                        #[cfg(target_os = "windows")]
+                        Ok(file_transfer_send_request::FileType::Printer) => {
+                            #[cfg(feature = "flutter")]
+                            let action = LocalConfig::get_option(
+                                config::keys::OPTION_PRINTER_INCOMING_JOB_ACTION,
+                            );
+                            #[cfg(not(feature = "flutter"))]
+                            let action = "";
+                            if action == "dismiss" {
+                                // Just ignore the incoming print job.
+                            } else {
+                                let id = fs::get_next_job_id();
+                                #[cfg(feature = "flutter")]
+                                let allow_auto_print = LocalConfig::get_bool_option(
+                                    config::keys::OPTION_PRINTER_ALLOW_AUTO_PRINT,
+                                );
+                                #[cfg(not(feature = "flutter"))]
+                                let allow_auto_print = false;
+                                if allow_auto_print {
+                                    let printer_name = if action == "" {
+                                        "".to_string()
+                                    } else {
+                                        LocalConfig::get_option(
+                                            config::keys::OPTION_PRINTER_SELECTED_NAME,
+                                        )
+                                    };
+                                    self.handler.printer_response(id, _s.path, printer_name);
+                                } else {
+                                    self.handler.printer_request(id, _s.path);
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
                     Some(file_action::Union::SendConfirm(c)) => {
                         if let Some(job) = fs::get_job(c.id, &mut self.read_jobs) {
                             job.confirm(&c).await;
@@ -2032,7 +2064,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         .handle_screenshot_resp(response.sid, response.msg);
                 }
                 Some(message::Union::TerminalResponse(response)) => {
-                    use base::message_proto::terminal_response::Union;
+                    use hbb_common::message_proto::terminal_response::Union;
                     if let Some(Union::Opened(opened)) = &response.union {
                         if opened.success && !opened.service_id.is_empty() {
                             let mut lc = self.handler.lc.write().unwrap();
@@ -2059,6 +2091,10 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(platform_additions) =
             serde_json::from_str::<HashMap<String, serde_json::Value>>(&pi.platform_additions)
         {
+            self.peer_info.support_chat_attention = platform_additions
+                .get(crate::chat_attention::CAPABILITY)
+                .and_then(|value| value.as_u64())
+                == Some(crate::chat_attention::VERSION as u64);
             self.peer_info.is_installed = platform_additions
                 .get("is_installed")
                 .map(|v| v.as_bool())
@@ -2260,10 +2296,14 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
-    async fn handle_cliprdr_msg(&mut self, clip: base::message_proto::Cliprdr, _peer: &mut Stream) {
+    async fn handle_cliprdr_msg(
+        &mut self,
+        clip: hbb_common::message_proto::Cliprdr,
+        _peer: &mut Stream,
+    ) {
         log::debug!("handling cliprdr msg from server peer");
         #[cfg(feature = "flutter")]
-        if let Some(base::message_proto::cliprdr::Union::FormatList(_)) = &clip.union {
+        if let Some(hbb_common::message_proto::cliprdr::Union::FormatList(_)) = &clip.union {
             if self.client_conn_id
                 != clipboard::get_client_conn_id(&crate::flutter::get_cur_peer_id()).unwrap_or(0)
             {
@@ -2373,7 +2413,8 @@ impl<T: InvokeUiSession> Remote<T> {
         );
         self.video_threads.insert(display, video_thread);
         if self.video_threads.len() == 1 {
-            let auto_record = LocalConfig::get_bool_option(keys::OPTION_ALLOW_AUTO_RECORD_OUTGOING);
+            let auto_record =
+                LocalConfig::get_bool_option(config::keys::OPTION_ALLOW_AUTO_RECORD_OUTGOING);
             self.handler.lc.write().unwrap().record_state = auto_record;
             self.update_record_state();
         }
@@ -2457,83 +2498,5 @@ impl Drop for VideoThread {
     fn drop(&mut self) {
         // since channels are buffered, messages sent before the disconnect will still be properly received.
         *self.discard_queue.write().unwrap() = true;
-    }
-}
-
-#[cfg(test)]
-mod lan_login_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn stalled_credential_store_times_out() {
-        let (_sender, mut receiver) = mpsc::unbounded_channel();
-        let mut pending = VecDeque::new();
-        assert_eq!(
-            wait_for_lan_login(
-                std::future::pending(),
-                &mut receiver,
-                &mut pending,
-                Duration::from_millis(10),
-            )
-            .await,
-            LanLoginOutcome::TimedOut,
-        );
-    }
-
-    #[tokio::test]
-    async fn close_cancels_a_stalled_credential_store() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let mut pending = VecDeque::new();
-        sender.send(Data::Close).unwrap();
-        assert_eq!(
-            wait_for_lan_login(
-                std::future::pending(),
-                &mut receiver,
-                &mut pending,
-                Duration::from_secs(10),
-            )
-            .await,
-            LanLoginOutcome::Cancelled,
-        );
-    }
-
-    #[tokio::test]
-    async fn successful_login_preserves_queued_ui_messages() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        let mut pending = VecDeque::new();
-        sender.send(Data::SubmitLanCredentials).unwrap();
-        sender.send(Data::TrustLanDevice).unwrap();
-        assert_eq!(
-            wait_for_lan_login(
-                std::future::ready(()),
-                &mut receiver,
-                &mut pending,
-                Duration::from_secs(10),
-            )
-            .await,
-            LanLoginOutcome::Ready,
-        );
-        assert!(matches!(
-            pending.pop_front(),
-            Some(Data::SubmitLanCredentials)
-        ));
-        assert!(matches!(pending.pop_front(), Some(Data::TrustLanDevice)));
-        assert!(pending.is_empty());
-    }
-
-    #[tokio::test]
-    async fn closed_ui_channel_cancels_login() {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
-        drop(sender);
-        assert_eq!(
-            wait_for_lan_login(
-                std::future::pending(),
-                &mut receiver,
-                &mut VecDeque::new(),
-                Duration::from_secs(10),
-            )
-            .await,
-            LanLoginOutcome::Cancelled,
-        );
     }
 }

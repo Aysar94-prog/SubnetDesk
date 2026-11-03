@@ -12,10 +12,9 @@ use hbb_common::dlopen::{
     Error as LibError,
 };
 use hbb_common::{
-    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log,
+    anyhow::anyhow, bail, config::LocalConfig, get_version_number, log, message_proto::*,
     rendezvous_proto::ConnType, ResultType,
 };
-use base::message_proto::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 #[cfg(target_os = "windows")]
@@ -50,6 +49,10 @@ pub type FlutterSession = Arc<Session<FlutterHandler>>;
 #[derive(Deserialize)]
 struct LanCredentialPayload {
     lan_version: u32,
+    #[serde(default)]
+    access_method: u32,
+    #[serde(default)]
+    temporary_code: String,
     #[serde(default)]
     identity_id: String,
     #[serde(default)]
@@ -1162,6 +1165,14 @@ impl InvokeUiSession for FlutterHandler {
         self.push_event("record_status", &[("start", &start.to_string())], &[]);
     }
 
+    fn printer_request(&self, id: i32, path: String) {
+        self.push_event(
+            "printer_request",
+            &[("id", json!(id)), ("path", json!(path))],
+            &[],
+        );
+    }
+
     fn handle_screenshot_resp(&self, sid: String, msg: String) {
         match SessionID::from_str(&sid) {
             Ok(sid) => self.push_event_to("screenshot", &[("msg", json!(msg))], &[&sid]),
@@ -1173,7 +1184,7 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     fn handle_terminal_response(&self, response: TerminalResponse) {
-        use base::message_proto::terminal_response::Union;
+        use hbb_common::message_proto::terminal_response::Union;
 
         match response.union {
             Some(Union::Opened(opened)) => {
@@ -1324,6 +1335,9 @@ pub fn session_add_existed(
     displays: Vec<i32>,
     is_view_camera: bool,
 ) -> ResultType<()> {
+    if !crate::camera_access::allowed(is_view_camera) {
+        bail!(crate::camera_access::DISABLED_MESSAGE);
+    }
     let conn_type = if is_view_camera {
         ConnType::VIEW_CAMERA
     } else {
@@ -1351,6 +1365,10 @@ pub fn session_add(
     is_terminal: bool,
     mut password: String,
 ) -> ResultType<FlutterSession> {
+    if !crate::camera_access::allowed(is_view_camera) {
+        zeroize::Zeroize::zeroize(&mut password);
+        bail!(crate::camera_access::DISABLED_MESSAGE);
+    }
     let endpoint = hbb_common::lan::Endpoint::parse(id)?;
     let id = endpoint.authority().to_owned();
     let conn_type = if is_file_transfer {
@@ -1388,7 +1406,18 @@ pub fn session_add(
         if payload.lan_version != hbb_common::lan::PROTOCOL_VERSION {
             bail!("Unsupported LAN credential payload version");
         }
-        if !payload.identity_id.is_empty() {
+        if payload.access_method != hbb_common::lan::ACCESS_PASSWORD {
+            if !payload.identity_id.is_empty() || !payload.username.is_empty() || !payload.password.is_empty()
+                || payload.remember || payload.bind_identity {
+                bail!("Optional access must not include or save credentials");
+            }
+            hbb_common::lan::validate_optional_access(payload.access_method, &payload.temporary_code)?;
+            (Some(LanSessionCredential { access_method: payload.access_method, temporary_code: payload.temporary_code,
+                username: String::new(), password: Vec::new(), remember: false, identity_id: String::new(),
+                bind_identity_on_success: false }), None)
+        } else if !payload.temporary_code.is_empty() {
+            bail!("Password login must not include a temporary code");
+        } else if !payload.identity_id.is_empty() {
             if !payload.username.is_empty() || !payload.password.is_empty() {
                 bail!("LAN identity payload must not include plaintext credentials");
             }
@@ -1403,10 +1432,12 @@ pub fn session_add(
                 }),
             )
         } else {
-            let username = hbb_common::lan::validate_username(&payload.username)?;
+            let username = hbb_common::lan::validate_credential_username(&payload.username)?;
             hbb_common::lan::validate_password(payload.password.as_bytes())?;
             (
                 Some(LanSessionCredential {
+                    access_method: hbb_common::lan::ACCESS_PASSWORD,
+                    temporary_code: String::new(),
                     username,
                     password: payload.password.into_bytes(),
                     remember: payload.remember,
@@ -1531,25 +1562,9 @@ pub fn update_file_clipboard_required() {
 
 #[cfg(not(target_os = "ios"))]
 pub fn send_clipboard_msg(msg: Message, _is_file: bool) {
-    send_clipboard_msg_impl(msg, _is_file, None);
-}
-
-// `except_session_id` is the session the content came from, to avoid sending it back.
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn send_clipboard_msg_to_other_sessions(msg: Message, except_session_id: u64) {
-    send_clipboard_msg_impl(msg, false, Some(except_session_id));
-}
-
-#[cfg(not(target_os = "ios"))]
-fn send_clipboard_msg_impl(msg: Message, _is_file: bool, except_session_id: Option<u64>) {
     for s in sessions::get_sessions() {
         if !s.is_default() {
             continue;
-        }
-        if let Some(except_session_id) = except_session_id {
-            if s.lc.read().unwrap().session_id == except_session_id {
-                continue;
-            }
         }
         #[cfg(feature = "unix-file-copy-paste")]
         if _is_file {
@@ -1624,6 +1639,10 @@ pub mod connection_manager {
                 "chat_server_mode",
                 &[("id", &id.to_string()), ("text", &text)],
             );
+        }
+
+        fn chat_attention(&self, id: i32) {
+            self.push_event("chat_attention", &[("id", &id.to_string())]);
         }
 
         fn change_theme(&self, dark: String) {

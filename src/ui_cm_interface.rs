@@ -5,24 +5,20 @@ use crate::ipc::{self, Data};
 #[cfg(target_os = "windows")]
 use crate::{clipboard::ClipboardSide, ipc::ClipboardNonFile};
 #[cfg(target_os = "windows")]
-use base::config::keys::*;
-#[cfg(not(any(target_os = "ios")))]
-use base::fs::serialize_transfer_job;
-use base::{
-    config::keys::{OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW, OPTION_FILE_TRANSFER_MAX_FILES},
-    fs::{self, get_string, is_write_need_confirmation, new_send_confirm, DigestCheckResult},
-    message_proto::*,
-};
-#[cfg(target_os = "windows")]
 use clipboard::ContextSend;
+#[cfg(not(any(target_os = "ios")))]
+use hbb_common::fs::serialize_transfer_job;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::tokio::sync::mpsc::unbounded_channel;
-#[cfg(target_os = "windows")]
-use hbb_common::tokio::sync::Mutex as TokioMutex;
 use hbb_common::{
     allow_err, bail,
-    config::{option2bool, Config},
+    config::{
+        keys::{OPTION_ENABLE_PERM_CHANGE_IN_ACCEPT_WINDOW, OPTION_FILE_TRANSFER_MAX_FILES},
+        option2bool, Config,
+    },
+    fs::{self, get_string, is_write_need_confirmation, new_send_confirm, DigestCheckResult},
     log,
+    message_proto::*,
     protobuf::Message as _,
     tokio::{
         self,
@@ -31,6 +27,8 @@ use hbb_common::{
     },
     ResultType,
 };
+#[cfg(target_os = "windows")]
+use hbb_common::{config::keys::*, tokio::sync::Mutex as TokioMutex};
 use serde_derive::Serialize;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 use std::iter::FromIterator;
@@ -149,6 +147,10 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    pub lan_approval_nonce: String,
+    pub lan_approval_source: String,
+    pub lan_approval_scope: String,
+    pub lan_approval_timeout_seconds: u32,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
@@ -173,6 +175,7 @@ struct IpcTaskRunner<T: InvokeUiCM> {
 
 lazy_static::lazy_static! {
     static ref CLIENTS: RwLock<HashMap<i32, Client>> = Default::default();
+    static ref UI_SNAPSHOT: std::sync::Mutex<crate::cm_state_snapshot::StateSnapshot> = Default::default();
 }
 
 static CLICK_TIME: AtomicI64 = AtomicI64::new(0);
@@ -188,6 +191,8 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
     fn remove_connection(&self, id: i32, close: bool);
 
     fn new_message(&self, id: i32, text: String);
+
+    fn chat_attention(&self, _id: i32) {}
 
     fn change_theme(&self, dark: String);
 
@@ -261,6 +266,10 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
+            lan_approval_nonce: String::new(),
+            lan_approval_source: String::new(),
+            lan_approval_scope: String::new(),
+            lan_approval_timeout_seconds: 0,
         };
         CLIENTS
             .write()
@@ -370,15 +379,6 @@ pub fn close(id: i32) {
     };
 }
 
-/// Like `close`, but says the CM's WINDOW closed rather than a person disconnecting this peer.
-/// See `ipc::Data::CmWindowClosed`.
-#[cfg(target_os = "linux")]
-pub fn close_window(id: i32) {
-    if let Some(client) = CLIENTS.read().unwrap().get(&id) {
-        allow_err!(client.tx.send(Data::CmWindowClosed));
-    };
-}
-
 #[inline]
 pub fn remove(id: i32) {
     CLIENTS.write().unwrap().remove(&id);
@@ -397,6 +397,20 @@ pub fn send_chat(id: i32, text: String) {
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 #[inline]
 pub fn get_clients_state() -> String {
+    let state = clients_state_json();
+    UI_SNAPSHOT.lock().unwrap().observe(&state);
+    state
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+pub fn changed_clients_state(length: usize) -> Option<String> {
+    let state = clients_state_json();
+    let changed = UI_SNAPSHOT.lock().unwrap().changed(&state);
+    if changed || length != get_clients_length() { Some(state) } else { None }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
+fn clients_state_json() -> String {
     let clients = CLIENTS.read().unwrap();
     let res = Vec::from_iter(clients.values().cloned());
     serde_json::to_string(&res).unwrap_or("".into())
@@ -492,6 +506,19 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.running = true;
                                     break;
                                 }
+                                Data::LanApprovalRequest { nonce, source, scope, timeout_seconds } => {
+                                    let updated = {
+                                        let mut clients = CLIENTS.write().unwrap();
+                                        clients.get_mut(&self.conn_id).filter(|c| !c.authorized && !c.disconnected).map(|client| {
+                                            client.lan_approval_nonce = nonce;
+                                            client.lan_approval_source = source;
+                                            client.lan_approval_scope = scope;
+                                            client.lan_approval_timeout_seconds = timeout_seconds;
+                                            client.clone()
+                                        })
+                                    };
+                                    if let Some(client) = updated { self.cm.ui_handler.add_connection(&client); }
+                                }
                                 Data::Close => {
                                     log::info!("cm ipc connection closed from connection request");
                                     break;
@@ -510,6 +537,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
+                                }
+                                Data::ChatAttention => {
+                                    self.cm.chat_attention(self.conn_id);
                                 }
                                 Data::FS(mut fs) => {
                                     if let ipc::FS::WriteBlock { id, file_num, data: _, compressed } = fs {
@@ -824,6 +854,9 @@ pub async fn start_listen<T: InvokeUiCM>(
             Some(Data::ChatMessage { text }) => {
                 cm.new_message(current_id, text);
             }
+            Some(Data::ChatAttention) => {
+                cm.chat_attention(current_id);
+            }
             Some(Data::FS(fs)) => {
                 // Android doesn't need CM-side file reading (no need_validate_file_read_access)
                 let mut read_jobs_placeholder: Vec<fs::TransferJob> = Vec::new();
@@ -1000,37 +1033,35 @@ async fn handle_fs(
                     ..Default::default()
                 };
                 if let Some(file) = job.files().get(file_num as usize) {
-                    let fs::DataSource::FilePath(p) = &job.data_source else {
-                        // In-memory transfer jobs have no on-disk path.
-                        return;
-                    };
-                    let path = get_string(&fs::TransferJob::join(p, &file.name));
-                    match is_write_need_confirmation(is_resume, &path, &digest) {
-                        Ok(digest_result) => {
-                            job.set_digest(file_size, last_modified);
-                            match digest_result {
-                                DigestCheckResult::IsSame => {
-                                    req.set_skip(true);
-                                    let msg_out = new_send_confirm(req);
-                                    send_raw(msg_out, &tx);
-                                }
-                                DigestCheckResult::NeedConfirm(mut digest) => {
-                                    // upload to server, but server has the same file, request
-                                    digest.is_upload = is_upload;
-                                    let mut msg_out = Message::new();
-                                    let mut fr = FileResponse::new();
-                                    fr.set_digest(digest);
-                                    msg_out.set_file_response(fr);
-                                    send_raw(msg_out, &tx);
-                                }
-                                DigestCheckResult::NoSuchFile => {
-                                    let msg_out = new_send_confirm(req);
-                                    send_raw(msg_out, &tx);
+                    if let fs::DataSource::FilePath(p) = &job.data_source {
+                        let path = get_string(&fs::TransferJob::join(p, &file.name));
+                        match is_write_need_confirmation(is_resume, &path, &digest) {
+                            Ok(digest_result) => {
+                                job.set_digest(file_size, last_modified);
+                                match digest_result {
+                                    DigestCheckResult::IsSame => {
+                                        req.set_skip(true);
+                                        let msg_out = new_send_confirm(req);
+                                        send_raw(msg_out, &tx);
+                                    }
+                                    DigestCheckResult::NeedConfirm(mut digest) => {
+                                        // upload to server, but server has the same file, request
+                                        digest.is_upload = is_upload;
+                                        let mut msg_out = Message::new();
+                                        let mut fr = FileResponse::new();
+                                        fr.set_digest(digest);
+                                        msg_out.set_file_response(fr);
+                                        send_raw(msg_out, &tx);
+                                    }
+                                    DigestCheckResult::NoSuchFile => {
+                                        let msg_out = new_send_confirm(req);
+                                        send_raw(msg_out, &tx);
+                                    }
                                 }
                             }
-                        }
-                        Err(err) => {
-                            send_raw(fs::new_error(id, err, file_num), &tx);
+                            Err(err) => {
+                                send_raw(fs::new_error(id, err, file_num), &tx);
+                            }
                         }
                     }
                 }
@@ -1237,7 +1268,7 @@ async fn start_read_job(
 /// Process read jobs periodically, reading file blocks and sending them via IPC.
 ///
 /// NOTE: This is the CM-side equivalent of `handle_read_jobs()` in
-/// `libs/base/src/fs.rs`. The logic mirrors that implementation
+/// `libs/hbb_common/src/fs.rs`. The logic mirrors that implementation
 /// but communicates via IPC instead of direct network stream.
 /// When modifying job processing logic, ensure both implementations stay in sync.
 #[cfg(not(any(target_os = "ios")))]
@@ -1336,7 +1367,7 @@ async fn handle_read_jobs_tick(
 /// Initialize a read job's data stream and handle digest sending for overwrite detection.
 ///
 /// NOTE: This is the CM-side equivalent of `TransferJob::init_data_stream()` in
-/// `libs/base/src/fs.rs`. It calls `init_data_stream_for_cm()` and sends
+/// `libs/hbb_common/src/fs.rs`. It calls `init_data_stream_for_cm()` and sends
 /// digest via IPC instead of direct network stream.
 /// When modifying initialization or digest logic, ensure both paths stay in sync.
 #[cfg(not(any(target_os = "ios")))]
@@ -1438,19 +1469,13 @@ async fn read_dir(dir: &str, include_hidden: bool, tx: &UnboundedSender<Data>) {
             fs::get_path(dir)
         }
     };
-    let result = spawn_blocking(move || fs::read_dir(&path, include_hidden)).await;
-    let msg_out = match result {
-        Ok(Ok(fd)) => {
-            let mut msg_out = Message::new();
-            let mut file_response = FileResponse::new();
-            file_response.set_dir(fd);
-            msg_out.set_file_response(file_response);
-            msg_out
-        }
-        Ok(Err(err)) => fs::new_error(0, err, -1),
-        Err(err) => fs::new_error(0, err, -1),
-    };
-    send_raw(msg_out, tx);
+    if let Ok(Ok(fd)) = spawn_blocking(move || fs::read_dir(&path, include_hidden)).await {
+        let mut msg_out = Message::new();
+        let mut file_response = FileResponse::new();
+        file_response.set_dir(fd);
+        msg_out.set_file_response(file_response);
+        send_raw(msg_out, tx);
+    }
 }
 
 #[cfg(not(any(target_os = "ios")))]
@@ -1556,6 +1581,37 @@ pub fn can_elevate() -> bool {
     return false;
 }
 
+pub(crate) fn decide_lan_request(id: i32, nonce: String, accept: bool) -> Result<(), &'static str> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let clients = CLIENTS.read().unwrap();
+        let Some(client) = clients.get(&id) else { return Err("Request no longer exists"); };
+        if client.authorized || client.disconnected || nonce.is_empty() || client.lan_approval_nonce != nonce {
+            return Err("Request no longer awaits approval");
+        }
+        client.tx.send(Data::LanApprovalDecision { nonce, accept }).map_err(|_| "Connection manager channel closed")
+    }
+    #[cfg(target_os = "ios")]
+    { let _ = (id, nonce, accept); Err("Unsupported platform") }
+}
+
+pub(crate) fn decide_lan_request_with_permissions(
+    id: i32, nonce: String, accept: bool, permissions: crate::ipc::LanApprovalPermissions,
+) -> Result<(), &'static str> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        let clients = CLIENTS.read().unwrap();
+        let Some(client) = clients.get(&id) else { return Err("Request no longer exists"); };
+        if client.authorized || client.disconnected || nonce.is_empty() || client.lan_approval_nonce != nonce {
+            return Err("Request no longer awaits approval");
+        }
+        client.tx.send(Data::LanApprovalDecisionWithPermissions { nonce, accept, permissions })
+            .map_err(|_| "Connection manager channel closed")
+    }
+    #[cfg(target_os = "ios")]
+    { let _ = (id, nonce, accept, permissions); Err("Unsupported platform") }
+}
+
 pub fn elevate_portable(_id: i32) {
     #[cfg(windows)]
     {
@@ -1593,19 +1649,6 @@ pub fn quit_cm() {
     // in case of std::process::exit not work
     log::info!("quit cm");
     CLIENTS.write().unwrap().clear();
-    // `quit_gui()` ends the process on Windows and macOS, but on Linux it calls
-    // `gtk_main_quit()`, which has no effect in the Flutter connection manager:
-    // `flutter/linux/main.cc` runs `g_application_run()` (GtkApplication), so
-    // `gtk_main()` is never called. Exit directly instead, otherwise this
-    // process keeps running while no longer serving the `_cm` ipc endpoint, so
-    // the server can't reuse it and spawns one more connection manager.
-    //
-    // NOTE: a client merely disconnecting does not come here, the Flutter side
-    // closes the window then, so this is a fallback rather than an explanation
-    // for the stale processes of #15698.
-    #[cfg(all(target_os = "linux", feature = "flutter"))]
-    std::process::exit(0);
-    #[cfg(not(all(target_os = "linux", feature = "flutter")))]
     crate::platform::quit_gui();
 }
 
@@ -1614,8 +1657,10 @@ mod tests {
     use super::*;
 
     use crate::ipc::Data;
-    use base::message_proto::{FileDirectory, Message};
-    use hbb_common::tokio::{runtime::Runtime, sync::mpsc::unbounded_channel};
+    use hbb_common::{
+        message_proto::{FileDirectory, Message},
+        tokio::{runtime::Runtime, sync::mpsc::unbounded_channel},
+    };
     use std::fs;
 
     #[test]
@@ -1646,7 +1691,7 @@ mod tests {
 
     #[test]
     #[cfg(not(any(target_os = "ios")))]
-    fn read_dir_reports_success_and_error() {
+    fn read_dir_success() {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
             let (tx, mut rx) = unbounded_channel();
@@ -1669,18 +1714,6 @@ mod tests {
                 _ => panic!("unexpected data"),
             }
             let _ = fs::remove_dir_all(&dir);
-
-            super::read_dir(&dir.to_string_lossy(), false, &tx).await;
-
-            match rx.recv().await.unwrap() {
-                Data::RawMessage(bytes) => {
-                    let mut msg = Message::new();
-                    msg.merge_from_bytes(&bytes).unwrap();
-                    assert_eq!(msg.file_response().error().id, 0);
-                    assert!(!msg.file_response().error().error.is_empty());
-                }
-                _ => panic!("unexpected data"),
-            }
         });
     }
 

@@ -6,6 +6,7 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../mobile/pages/home_page.dart';
+import 'buzzer_button.dart';
 
 enum ChatPageType {
   mobileMain,
@@ -104,6 +105,11 @@ class ChatPage extends StatelessWidget implements PageShape {
                         [],
                     readOnly: readOnly,
                     inputOptions: InputOptions(
+                      leading: chatModel.currentKey.isOut ? [BuzzerButton(
+                        supported: chatModel.buzzerSupported && !readOnly,
+                        coolingDown: chatModel.buzzerCoolingDown,
+                        onPressed: chatModel.sendBuzzer,
+                      )] : [],
                       focusNode: chatModel.inputNode,
                       textController: chatModel.textController,
                       inputTextStyle: TextStyle(

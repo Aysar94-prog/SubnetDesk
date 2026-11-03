@@ -1,5 +1,27 @@
 # RustDesk Guide
 
+## Release outputs
+
+Publish validated deliverables to `outputs/new/<product>-<version-and-build>/`.
+Before promoting a replacement, move the previous current folder for that same
+product to `outputs/old/`. Helper, Deploy and Agent rotate independently. Keep
+build caches, tests, intermediate bundles and candidates in `output/`; they are
+not releases. Never delete historical artifacts. Final delivery links must use
+`outputs/new`. Use the personal `release-output-rotation` skill and its verified
+publisher when available. Each current release must include `release.json` with
+product, version/build and artifact hashes. Show the actual version and build in
+Deploy's UI and advance its build number for each delivered build. Refresh
+`outputs/README.md` after promoting a release.
+
+## Helper installation policy
+
+Every MSI install, reinstall, repair and upgrade must re-apply Receiver-only on
+the whole device, including previously unlocked Windows accounts and an unlocked
+Deploy-managed policy. Preserve identity, unattended access credentials and stored
+receiver unlock verifiers. Explicit password-verified unlocking is allowed after
+installation and survives ordinary restarts until the next installer operation.
+Do not preserve an unlocked mode across an install/update.
+
 ## Project Layout
 
 ### Directory Structure
@@ -8,24 +30,18 @@
 * `src/platform/` platform-specific code
 * `src/ui/` legacy Sciter UI (deprecated)
 * `flutter/` current UI
-* `libs/hbb_common/` shared with the server: rendezvous proto, sockets, `Config` core
-* `libs/base/` (crate `base`) client-only: option keys, message proto, file transfer, platform code
+* `libs/hbb_common/` config / proto / shared utils
 * `libs/scrap/` screen capture
 * `libs/enigo/` input control
 * `libs/clipboard/` clipboard
-* `libs/base/src/config/keys.rs` the single import path for all options
+* `libs/hbb_common/src/config.rs` all options
 
 ### Key Components
 - **Remote Desktop Protocol**: Custom protocol implemented in `src/rendezvous_mediator.rs` for communicating with rustdesk-server
 - **Screen Capture**: Platform-specific screen capture in `libs/scrap/`
 - **Input Handling**: Cross-platform input simulation in `libs/enigo/`
 - **Audio/Video Services**: Real-time audio/video streaming in `src/server/`
-- **File Transfer**: Secure file transfer implementation in `libs/base/src/fs.rs`
-
-`hbb_common` is a git submodule shared with the server, so changing it costs a
-round-trip. Put client-only code in `libs/base` instead; it is a normal
-workspace member. `base::config::keys` re-exports the handful of keys
-`hbb_common` still reads, so callers get the whole set from that one path.
+- **File Transfer**: Secure file transfer implementation in `libs/hbb_common/`
 
 ### UI Architecture
 - **Legacy UI**: Sciter-based (deprecated) - files in `src/ui/`

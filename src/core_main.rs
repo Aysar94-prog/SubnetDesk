@@ -3,11 +3,11 @@ use crate::client::translate;
 #[cfg(not(debug_assertions))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::platform::breakdown_callback;
-use base::config::keys;
 #[cfg(not(debug_assertions))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use base::platform::register_breakdown_handler;
+use hbb_common::platform::register_breakdown_handler;
 use hbb_common::{config, log};
+use zeroize::Zeroize;
 #[cfg(windows)]
 use tauri_winrt_notification::{Duration, Sound, Toast};
 
@@ -30,14 +30,12 @@ macro_rules! my_println{
 /// If it returns [`Some`], then the process will continue, and flutter gui will be started.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn core_main() -> Option<Vec<String>> {
-    if let Err(err) = hbb_common::app_paths::initialize(&crate::get_app_name(), "com.zibochen") {
-        eprintln!("Cannot open SubnetDesk data directory: {err}");
-        return None;
-    }
     if !crate::common::global_init() {
         return None;
     }
     crate::load_custom_client();
+    #[cfg(windows)]
+    config::initialize_installed_helper();
     #[cfg(windows)]
     if !crate::platform::windows::bootstrap() {
         // return None to terminate the process
@@ -50,29 +48,13 @@ pub fn core_main() -> Option<Vec<String>> {
     let mut _is_run_as_system = false;
     let mut _is_quick_support = false;
     let mut _is_flutter_invoke_new_connection = false;
-    let mut background = false;
-    let mut skip_data_dir_value = false;
-    for arg in std::env::args() {
-        if i > 0 {
-            if skip_data_dir_value {
-                skip_data_dir_value = false;
-                i += 1;
-                continue;
-            }
-            if arg == "--data-dir" {
-                skip_data_dir_value = true;
-                i += 1;
-                continue;
-            }
-            if arg.starts_with("--data-dir=") || arg == "--portable" {
-                i += 1;
-                continue;
-            }
-            if matches!(arg.as_str(), "--background" | "--tray" | "--server") {
-                background = true;
-                i += 1;
-                continue;
-            }
+    let mut no_server = false;
+    let mut arg_exe = Default::default();
+    let mut args_iter = std::env::args();
+    while let Some(arg) = args_iter.next() {
+        if i == 0 {
+            arg_exe = arg;
+        } else if i > 0 {
             #[cfg(feature = "flutter")]
             if [
                 "--connect",
@@ -94,15 +76,69 @@ pub fn core_main() -> Option<Vec<String>> {
             } else if arg == "--quick_support" {
                 _is_quick_support = true;
             } else if arg == "--no-server" {
-                // Obsolete supervisor argument; the interactive process owns the host.
+                no_server = true;
+            } else if arg == "--connect-saved" {
+                // Resolve the saved device's current best-known endpoint here,
+                // in Rust, from its verified fingerprint, then continue as an
+                // ordinary `--connect <endpoint>` invocation — this reuses the
+                // existing saved-device fingerprint verification in
+                // `Client::start` without needing a separate code path all
+                // the way down. An unrecognized or malformed fingerprint is
+                // rejected outright rather than ever being treated as a
+                // literal endpoint.
+                let fingerprint = args_iter.next();
+                match fingerprint.as_deref().and_then(crate::lan::resolve_saved_endpoint) {
+                    Some(endpoint) => {
+                        #[cfg(feature = "flutter")]
+                        {
+                            _is_flutter_invoke_new_connection = true;
+                        }
+                        args.push("--connect".to_owned());
+                        args.push(endpoint);
+                    }
+                    None => {
+                        log::error!(
+                            "Rejected --connect-saved: unknown or invalid device fingerprint"
+                        );
+                    }
+                }
             } else {
                 args.push(arg);
             }
         }
         i += 1;
     }
-    if background {
-        flutter_args.push("--background".to_owned());
+    #[cfg(target_os = "macos")]
+    if args.is_empty() {
+        if !crate::check_process("--server", false) {
+            match crate::run_me(vec!["--server"]) {
+                Ok(_) => no_server = true,
+                Err(err) => {
+                    log::error!("Failed to start macOS background server: {err}");
+                    if !crate::check_process("--tray", true) {
+                        hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+                    }
+                }
+            }
+        } else if !crate::check_process("--tray", true) {
+            hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    if args.is_empty() {
+        #[cfg(target_os = "linux")]
+        let should_check_start_tray = crate::check_process("--server", false);
+        // We can use `crate::check_process("--server", false)` on Windows.
+        // Because `--server` process is the System user's process. We can't get the arguments in `check_process()`.
+        // We can assume that self service running means the server is also running on Windows.
+        #[cfg(target_os = "windows")]
+        let should_check_start_tray = crate::platform::is_self_service_running()
+            && crate::platform::is_cur_exe_the_installed();
+        if should_check_start_tray && !crate::check_process("--tray", true) {
+            #[cfg(target_os = "linux")]
+            hbb_common::allow_err!(crate::platform::check_autostart_config());
+            hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+        }
     }
     #[cfg(not(debug_assertions))]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -122,14 +158,17 @@ pub fn core_main() -> Option<Vec<String>> {
     }
     #[cfg(windows)]
     if args.contains(&"--connect".to_string()) || args.contains(&"--view-camera".to_string()) {
-        base::platform::windows::start_cpu_performance_monitor();
+        hbb_common::platform::windows::start_cpu_performance_monitor();
     }
     #[cfg(feature = "flutter")]
     if _is_flutter_invoke_new_connection {
         return core_main_invoke_new_connection(std::env::args());
     }
-    #[cfg(windows)]
-    let click_setup = false;
+    let click_setup = cfg!(windows) && args.is_empty() && crate::common::is_setup(&arg_exe);
+    if click_setup && !config::is_disable_installation() {
+        args.push("--install".to_owned());
+        flutter_args.push("--install".to_string());
+    }
     if args.contains(&"--noinstall".to_string()) {
         args.clear();
     }
@@ -148,6 +187,15 @@ pub fn core_main() -> Option<Vec<String>> {
             println!("{}", crate::BUILD_DATE);
             return None;
         }
+    }
+    #[cfg(windows)]
+    {
+        _is_quick_support |= !crate::platform::is_installed()
+            && args.is_empty()
+            && (is_quick_support_exe(&arg_exe)
+                || config::LocalConfig::get_option("pre-elevate-service") == "Y"
+                || (!click_setup && crate::platform::is_elevated(None).unwrap_or(false)));
+        crate::portable_service::client::set_quick_support(_is_quick_support);
     }
     let mut log_name = "".to_owned();
     // Keep portable-service logs under a stable directory name.
@@ -171,12 +219,20 @@ pub fn core_main() -> Option<Vec<String>> {
     }
 
     #[cfg(windows)]
-    if _is_elevate || _is_run_as_system {
-        crate::platform::elevate_or_run_as_system(click_setup, _is_elevate, _is_run_as_system);
-        return None;
+    if !crate::platform::is_installed()
+        && args.is_empty()
+        && _is_quick_support
+        && !_is_elevate
+        && !_is_run_as_system
+    {
+        use crate::portable_service::client;
+        if let Err(e) = client::start_portable_service(client::StartPara::Direct) {
+            log::error!("Failed to start portable service: {:?}", e);
+        }
     }
-    if args.first().is_some_and(|arg| matches!(arg.as_str(), "--silent-install" | "--silent-update" | "--service" | "--install-service")) {
-        log::error!("System installation commands are unavailable in the user-session runtime");
+    #[cfg(windows)]
+    if !crate::platform::is_installed() && (_is_elevate || _is_run_as_system) {
+        crate::platform::elevate_or_run_as_system(click_setup, _is_elevate, _is_run_as_system);
         return None;
     }
     #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
@@ -193,35 +249,7 @@ pub fn core_main() -> Option<Vec<String>> {
             crate::platform::try_remove_temp_update_files();
             hbb_common::config::PeerConfig::preload_peers();
         }
-        match crate::desktop_runtime::claim() {
-            Ok(true) => {},
-            Ok(false) => {
-                #[cfg(windows)]
-                {
-                    flutter_args.push("--existing-instance".to_owned());
-                    return Some(flutter_args);
-                }
-                #[cfg(not(windows))]
-                {
-                    if !background {
-                        if let Err(err) = crate::ipc::send_url_scheme(String::new()) {
-                            log::debug!("Existing application is still starting: {err}");
-                        }
-                    }
-                    return None;
-                }
-            },
-            Err(err) => { log::error!("Cannot start desktop runtime: {err:#}"); return None; },
-        }
-        std::thread::spawn(|| crate::start_server(true, false));
-        #[cfg(windows)]
-        std::thread::spawn(|| {
-            if let Err(err) = crate::portable_service::client::start_portable_service(
-                crate::portable_service::client::StartPara::Direct,
-            ) {
-                log::error!("Secure desktop agent is unavailable: {err:#}");
-            }
-        });
+        std::thread::spawn(move || crate::start_server(false, no_server));
     } else {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         // Root CLI management commands must talk to the user `--server` main IPC;
@@ -244,6 +272,10 @@ pub fn core_main() -> Option<Vec<String>> {
                 }
                 return None;
             } else if args[0] == "--update" {
+                if !crate::private_build::software_updates_enabled() {
+                    log::warn!("{}", crate::private_build::UPDATE_DISABLED_MESSAGE);
+                    return None;
+                }
                 if config::is_disable_installation() {
                     return None;
                 }
@@ -284,8 +316,8 @@ pub fn core_main() -> Option<Vec<String>> {
                 if config::is_disable_installation() {
                     return None;
                 }
-                let debug = parse_silent_install_debug(&args);
-                let options = platform::get_silent_install_options();
+                let (printer_override, debug) = parse_silent_install_args(&args);
+                let options = platform::get_silent_install_options(printer_override);
                 let res = platform::install_me(options, "".to_owned(), true, debug);
                 let text = match res {
                     Ok(_) => translate("Installation Successful!".to_string()),
@@ -327,10 +359,27 @@ pub fn core_main() -> Option<Vec<String>> {
                     crate::virtual_display_manager::amyuni_idd::uninstall_driver()
                 );
                 return None;
+            } else if args[0] == "--install-remote-printer" {
+                #[cfg(windows)]
+                if crate::platform::is_win_10_or_greater() {
+                    match remote_printer::install_update_printer(&crate::get_app_name()) {
+                        Ok(_) => {
+                            log::info!("Remote printer installed/updated successfully");
+                        }
+                        Err(e) => {
+                            log::error!("Failed to install/update the remote printer: {}", e);
+                        }
+                    }
+                } else {
+                    log::error!("Win10 or greater required!");
+                }
+                return None;
             } else if args[0] == "--uninstall-remote-printer" {
                 #[cfg(windows)]
-                legacy_printer_cleanup::uninstall_printer(&crate::get_app_name());
-                log::info!("Legacy remote printer cleanup completed");
+                if crate::platform::is_win_10_or_greater() {
+                    remote_printer::uninstall_printer(&crate::get_app_name());
+                    log::info!("Remote printer uninstalled");
+                }
                 return None;
             }
         }
@@ -377,8 +426,52 @@ pub fn core_main() -> Option<Vec<String>> {
                 std::fs::remove_file(&args[1]).ok();
                 return None;
             }
-        } else if ["--service", "--install-service", "--uninstall-service"].contains(&args[0].as_str()) {
-            log::error!("System services are no longer supported. Start SubnetDesk in the user session.");
+        } else if args[0] == "--tray" {
+            if !crate::check_process("--tray", true) {
+                crate::tray::start_tray();
+            }
+            return None;
+        } else if args[0] == "--install-service" {
+            log::info!("start --install-service");
+            crate::platform::install_service();
+            return None;
+        } else if args[0] == "--uninstall-service" {
+            log::info!("start --uninstall-service");
+            crate::platform::uninstall_service(false, true);
+            return None;
+        } else if args[0] == "--service" {
+            log::info!("start --service");
+            crate::start_os_service();
+            return None;
+        } else if args[0] == "--server" {
+            log::info!("start --server with user {}", crate::username());
+            #[cfg(target_os = "linux")]
+            {
+                hbb_common::allow_err!(crate::platform::check_autostart_config());
+                std::process::Command::new("pkill")
+                    .arg("-f")
+                    .arg(&format!("{} --tray", crate::get_app_name().to_lowercase()))
+                    .status()
+                    .ok();
+                hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+            }
+            #[cfg(windows)]
+            crate::privacy_mode::restore_reg_connectivity(true, false);
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                crate::start_server(true, false);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if !crate::check_process("--tray", true) {
+                    hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+                }
+                let handler = std::thread::spawn(move || crate::start_server(true, false));
+                crate::tray::start_server_event_loop();
+                // Prevent the server from exiting when its main-thread event
+                // loop encounters an error.
+                hbb_common::allow_err!(handler.join());
+            }
             return None;
         } else if args[0] == "--import-config" || args[0] == "--import-config-force" {
             if args.len() == 2 {
@@ -413,6 +506,9 @@ pub fn core_main() -> Option<Vec<String>> {
             }
             return None;
         } else if args[0] == "--option" {
+            if args.len() == 3 && args[1].starts_with("incoming-only") && config::Config::get_option("incoming-only-scope") == "device" {
+                log::error!("Receiver policy is managed by SubnetDesk Deploy"); std::process::exit(1);
+            }
             if is_cli_setting_change_disabled() {
                 println!("Settings are disabled!");
                 return None;
@@ -422,11 +518,129 @@ pub fn core_main() -> Option<Vec<String>> {
                     let options = crate::ipc::get_options();
                     println!("{}", options.get(&args[1]).unwrap_or(&"".to_owned()));
                 } else if args.len() == 3 {
+                    if args[1] == "incoming-only"
+                        && !config::Config::get_option("incoming-only-password").is_empty()
+                    {
+                        println!("Incoming-only mode is password-locked. Use --incoming-only-unlock <password>.");
+                        return None;
+                    }
                     crate::ipc::set_option(&args[1], &args[2]);
                 }
             } else {
                 println!("Installation and administrative privileges required!");
             }
+            return None;
+        } else if args[0] == "--incoming-only-lock" {
+            if config::Config::get_option("incoming-only-scope") == "device" { log::error!("Receiver policy is managed by SubnetDesk Deploy"); std::process::exit(1); }
+            if args.len() != 2 {
+                println!("Usage: --incoming-only-lock <password>");
+                return None;
+            }
+            if !(crate::platform::is_installed() && is_root()) {
+                println!("Installation and administrative privileges required!");
+                return None;
+            }
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(args[1].as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            config::Config::set_option("incoming-only".to_owned(), "Y".to_owned());
+            config::Config::set_option("incoming-only-password".to_owned(), hash);
+            config::Config::set_option("incoming-only-initialized".to_owned(), "locked".to_owned());
+            println!("Incoming-only mode locked.");
+            return None;
+        } else if args[0] == "--incoming-only-unlock" {
+            if config::Config::get_option("incoming-only-scope") == "device" { log::error!("Receiver policy is managed by SubnetDesk Deploy"); std::process::exit(1); }
+            if args.len() != 2 {
+                println!("Usage: --incoming-only-unlock <password>");
+                return None;
+            }
+            if !(crate::platform::is_installed() && is_root()) {
+                println!("Installation and administrative privileges required!");
+                return None;
+            }
+            let mut stored = config::Config::get_option("incoming-only-password");
+            if stored.is_empty() {
+                stored = "b008f337c227dcb4fa0fa4b1e9b915dd24a34e698b6739236f96b29fa9d2f532".to_owned();
+            }
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(args[1].as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            if hash == stored {
+                config::Config::set_option("incoming-only".to_owned(), "".to_owned());
+                config::Config::set_option("incoming-only-password".to_owned(), "".to_owned());
+                config::Config::set_option("incoming-only-initialized".to_owned(), "unlocked".to_owned());
+                println!("Incoming-only mode unlocked.");
+            } else {
+                println!("Incorrect password.");
+            }
+            return None;
+        } else if args[0] == "--set-unattended-password" {
+            if args.len() != 2 {
+                println!("Usage: --set-unattended-password <password>");
+                return None;
+            }
+            if !(crate::platform::is_installed() && is_root()) {
+                println!("Installation and administrative privileges required!");
+                return None;
+            }
+            match config::Config::set_lan_password(args[1].as_bytes()) {
+                Ok(_) => {
+                    let _ = config::Config::set_lan_password_access_enabled(true);
+                    println!("Unattended password set.");
+                }
+                Err(err) => println!("Failed to set unattended password: {err}"),
+            }
+            return None;
+        } else if args[0] == "--reset-receiver-only-for-install" {
+            #[cfg(windows)]
+            {
+                if !is_root() {
+                    log::error!("Installed Helper and administrator rights required to reset receiver mode");
+                    std::process::exit(1);
+                }
+                if let Err(err) = crate::platform::windows::reset_receiver_only_for_install() {
+                    log::error!("Receiver-only installation reset failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            return None;
+        } else if args[0] == "--set-unattended-password-stdin" {
+            if !(crate::platform::is_installed() && is_root()) {
+                log::error!("Installation and administrative privileges required for unattended password configuration");
+                std::process::exit(1);
+            }
+            use std::io::Read;
+            let mut password = String::new();
+            if let Err(err) = std::io::stdin().read_to_string(&mut password) {
+                password.zeroize();
+                log::error!("Failed to read unattended password input: {err}");
+                std::process::exit(1);
+            }
+            if password.ends_with('\n') {
+                password.pop();
+            }
+            if password.is_empty() {
+                log::error!("Unattended password input was empty");
+                std::process::exit(1);
+            }
+            match config::Config::set_lan_password(password.as_bytes()) {
+                Ok(_) => match config::Config::set_lan_password_access_enabled(true) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        password.zeroize();
+                        log::error!("Failed to enable unattended password access: {err}");
+                        std::process::exit(1);
+                    }
+                },
+                Err(err) => {
+                    password.zeroize();
+                    log::error!("Failed to set unattended password: {err}");
+                    std::process::exit(1);
+                }
+            }
+            password.zeroize();
             return None;
         } else if args[0] == "--check-hwcodec-config" {
             #[cfg(feature = "hwcodec")]
@@ -554,6 +768,25 @@ fn core_main_invoke_new_connection(mut args: std::env::Args) -> Option<Vec<Strin
                 authority = Some((&arg.to_string()[2..]).to_owned());
                 id = args.next();
             }
+            "--connect-saved" => {
+                // Same resolve-then-relay-as-`--connect` approach as the
+                // single-process path in `core_main`: an already-running
+                // process also must verify the fingerprint and resolve it to
+                // an endpoint itself, never forward an unresolved fingerprint
+                // through the URI relay as if it were an endpoint.
+                let fingerprint = args.next();
+                match fingerprint.as_deref().and_then(crate::lan::resolve_saved_endpoint) {
+                    Some(endpoint) => {
+                        authority = Some("connect".to_owned());
+                        id = Some(endpoint);
+                    }
+                    None => {
+                        log::error!(
+                            "Rejected --connect-saved: unknown or invalid device fingerprint"
+                        );
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -634,15 +867,27 @@ fn is_user_main_ipc_scope_cli_command(args: &[String]) -> bool {
 
 #[inline]
 fn is_cli_setting_change_disabled() -> bool {
-    let option = keys::OPTION_ALLOW_COMMAND_LINE_SETTINGS_WHEN_SETTINGS_DISABLED;
+    let option = config::keys::OPTION_ALLOW_COMMAND_LINE_SETTINGS_WHEN_SETTINGS_DISABLED;
     let allow_command_line_settings =
         config::option2bool(option, &crate::get_builtin_option(option));
     config::is_disable_settings() && !allow_command_line_settings
 }
 
 #[cfg(windows)]
-fn parse_silent_install_debug(args: &[String]) -> bool {
-    args.iter().skip(1).any(|arg| arg == "debug")
+fn parse_silent_install_args(args: &[String]) -> (Option<bool>, bool) {
+    let mut printer_override = None;
+    let mut debug = false;
+
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "printer=1" => printer_override = Some(true),
+            "printer=0" => printer_override = Some(false),
+            "debug" => debug = true,
+            _ => {}
+        }
+    }
+
+    (printer_override, debug)
 }
 
 #[cfg(test)]

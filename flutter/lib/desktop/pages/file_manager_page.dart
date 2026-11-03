@@ -64,6 +64,7 @@ class FileManagerPage extends StatefulWidget {
   final SimpleWrapper<State<FileManagerPage>?> _lastState = SimpleWrapper(null);
 
   FFI get ffi => (_lastState.value! as _FileManagerPageState)._ffi;
+  bool get isReady => _lastState.value?.mounted == true;
 
   @override
   State<StatefulWidget> createState() {
@@ -269,39 +270,7 @@ class _FileManagerPageState extends State<FileManagerPage>
                                     item.state != JobState.inProgress,
                                 child: LinearPercentIndicator(
                                   animateFromLastPercent: true,
-                                  center: SizedBox.expand(
-                                    child: ShaderMask(
-                                      blendMode: BlendMode.srcATop,
-                                      shaderCallback: (bounds) =>
-                                          LinearGradient(
-                                        colors: [
-                                          Colors.white,
-                                          Colors.transparent,
-                                        ],
-                                        stops: [item.percent, item.percent],
-                                      ).createShader(bounds),
-                                      child: FittedBox(
-                                        fit: BoxFit.scaleDown,
-                                        child: Text.rich(
-                                          TextSpan(
-                                            text: item.percentText,
-                                            children: [
-                                              if (item.recvJobRes)
-                                                TextSpan(
-                                                  text:
-                                                      ' ${readableFileSize(item.speed)}/s',
-                                                  style: TextStyle(
-                                                    fontSize: 12,
-                                                    fontWeight: FontWeight.w300,
-                                                    color: MyTheme.darkGray,
-                                                  ),
-                                                ),
-                                            ],
-                                          ),
-                                        ),
-                                      ),
-                                    ),
-                                  ),
+                                  center: Text(item.percentText),
                                   barRadius: Radius.circular(15),
                                   percent: item.percent,
                                   progressColor: MyTheme.accent,
@@ -1117,7 +1086,6 @@ class _FileManagerViewState extends State<FileManagerView> {
                 return element.name.contains(_searchText.value);
               }).toList(growable: false)
             : entries;
-        // Keep rows lazy so large directories only build visible list items.
         final rows = filteredEntries.map((entry) {
           final sizeStr =
               entry.isFile ? readableFileSize(entry.size.toDouble()) : "";
@@ -1300,7 +1268,7 @@ class _FileManagerViewState extends State<FileManagerView> {
                   ],
                 ))),
           );
-        });
+        }).toList(growable: false);
 
         return Column(
           children: [
@@ -1316,7 +1284,7 @@ class _FileManagerViewState extends State<FileManagerView> {
                 controller: scrollController,
                 itemExtent: kDesktopFileTransferRowHeight,
                 itemBuilder: (context, index) {
-                  return rows.elementAt(index);
+                  return rows[index];
                 },
                 itemCount: rows.length,
               ),

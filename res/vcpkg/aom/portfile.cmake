@@ -9,24 +9,25 @@ get_filename_component(PERL_PATH ${PERL} DIRECTORY)
 vcpkg_add_to_path(${PERL_PATH})
 
 if(DEFINED ENV{USE_AOM_391})
-    set(AOM_CONFIG_PATH "lib/cmake/aom")
     vcpkg_from_git(
         OUT_SOURCE_PATH SOURCE_PATH
         URL "https://aomedia.googlesource.com/aom"
         REF 8ad484f8a18ed1853c094e7d3a4e023b2a92df28 # 3.9.1
         PATCHES
-            aom-uninitialized-pointer-3.9.1.diff
+            aom-uninitialized-pointer.diff
             aom-avx2.diff
             aom-install.diff
     )
 else()
-    set(AOM_CONFIG_PATH "lib/cmake/AOM")
     vcpkg_from_git(
         OUT_SOURCE_PATH SOURCE_PATH
         URL "https://aomedia.googlesource.com/aom"
-        REF 03087864cf4bea6abb0d28f95cf7843511413d8f # 3.14.1
+        REF 10aece4157eb79315da205f39e19bf6ab3ee30d0 # 3.12.1
         PATCHES
             aom-uninitialized-pointer.diff
+            # aom-avx2.diff
+            # Can be dropped when https://bugs.chromium.org/p/aomedia/issues/detail?id=3029 is merged into the upstream
+            aom-install.diff
     )
 endif()
 
@@ -41,10 +42,18 @@ if(VCPKG_TARGET_ARCHITECTURE STREQUAL "arm" AND VCPKG_TARGET_IS_LINUX)
   set(aom_target_cpu "-DENABLE_NEON=OFF")
 endif()
 
+set(aom_asm_compiler "")
+if(VCPKG_TARGET_IS_ANDROID AND CMAKE_HOST_WIN32)
+    # AOM otherwise selects GNU `as`, which is not provided by the Windows NDK.
+    file(TO_CMAKE_PATH "$ENV{ANDROID_NDK_HOME}" aom_ndk_root)
+    set(aom_asm_compiler "-DCMAKE_ASM_COMPILER=${aom_ndk_root}/toolchains/llvm/prebuilt/windows-x86_64/bin/clang.exe")
+endif()
+
 vcpkg_cmake_configure(
     SOURCE_PATH ${SOURCE_PATH}
     OPTIONS
         ${aom_target_cpu}
+        ${aom_asm_compiler}
         -DENABLE_DOCS=OFF
         -DENABLE_EXAMPLES=OFF
         -DENABLE_TESTDATA=OFF
@@ -59,20 +68,14 @@ vcpkg_copy_pdbs()
 vcpkg_fixup_pkgconfig()
 
 if(VCPKG_TARGET_IS_WINDOWS)
-  file(READ "${CURRENT_PACKAGES_DIR}/lib/pkgconfig/aom.pc" aom_pkgconfig)
-  if(aom_pkgconfig MATCHES " -lm")
-    vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/lib/pkgconfig/aom.pc" " -lm" "")
-  endif()
+  vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/lib/pkgconfig/aom.pc" " -lm" "")
   if(NOT VCPKG_BUILD_TYPE)
-    file(READ "${CURRENT_PACKAGES_DIR}/debug/lib/pkgconfig/aom.pc" aom_pkgconfig)
-    if(aom_pkgconfig MATCHES " -lm")
-      vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/debug/lib/pkgconfig/aom.pc" " -lm" "")
-    endif()
+    vcpkg_replace_string("${CURRENT_PACKAGES_DIR}/debug/lib/pkgconfig/aom.pc" " -lm" "")
   endif()
 endif()
 
 # Move cmake configs
-vcpkg_cmake_config_fixup(CONFIG_PATH ${AOM_CONFIG_PATH})
+vcpkg_cmake_config_fixup(CONFIG_PATH lib/cmake/${PORT})
 
 # Remove duplicate files
 file(REMOVE_RECURSE ${CURRENT_PACKAGES_DIR}/debug/include

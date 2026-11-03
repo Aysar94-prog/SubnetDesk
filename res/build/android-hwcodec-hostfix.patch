@@ -1,0 +1,37 @@
+diff --git a/build.rs b/build.rs
+index 738dbb5..5cd7f4f 100644
+--- a/build.rs
++++ b/build.rs
+@@ -36,8 +36,7 @@ fn build_common(builder: &mut Build) {
+         .unwrap();
+ 
+     // system
+-    #[cfg(windows)]
+-    {
++    if target_os == "windows" {
+         ["d3d11", "dxgi"].map(|lib| println!("cargo:rustc-link-lib={}", lib));
+     }
+ 
+@@ -45,8 +44,7 @@ fn build_common(builder: &mut Build) {
+ 
+     // platform
+     let _platform_path = common_dir.join("platform");
+-    #[cfg(windows)]
+-    {
++    if target_os == "windows" {
+         let win_path = _platform_path.join("win");
+         builder.include(&win_path);
+         builder.file(win_path.join("win.cpp"));
+@@ -143,7 +141,11 @@ mod ffmpeg {
+             target = target.replace("x64", "x86");
+         }
+         println!("cargo:info={}", target);
+-        path.push("installed");
++        if let Ok(installed_root) = env::var("VCPKG_INSTALLED_ROOT") {
++            path = installed_root.into();
++        } else {
++            path.push("installed");
++        }
+         path.push(target);
+ 
+         println!(

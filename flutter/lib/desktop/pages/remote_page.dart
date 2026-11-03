@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
@@ -18,7 +17,6 @@ import '../../common/widgets/toolbar.dart';
 import '../../models/model.dart';
 import '../../models/input_model.dart';
 import '../../models/platform_model.dart';
-import '../../models/view_rotation.dart';
 import '../../common/shared_state.dart';
 import '../../utils/image.dart';
 import '../widgets/remote_toolbar.dart';
@@ -135,12 +133,7 @@ class _RemotePageState extends State<RemotePage>
       displays: widget.displays,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _ffi.closed) return;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
-      // A fast connection can deliver a login dialog, an error, or an image
-      // before this frame. Do not cover that state with a stale loading dialog.
-      if (_ffi.ffiModel.hasConnectionResponse ||
-          _ffi.ffiModel.waitForFirstImage.isFalse) return;
       _ffi.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
     });
@@ -762,7 +755,7 @@ class _ViewStyleUpdaterState extends State<_ViewStyleUpdater> {
               _callbackScheduled = false;
               final currentSize = _lastSize;
               if (mounted && currentSize != null) {
-                widget.canvasModel.updateViewStyle(knownSize: currentSize);
+                widget.canvasModel.updateViewStyle();
                 widget.inputModel.updateImageWidgetSize(currentSize);
               }
             });
@@ -905,28 +898,11 @@ class _ImagePaintState extends State<ImagePaint> {
     }
   }
 
-  /// The displayed (virtual) size of [image] under the current client-side
-  /// rotation, used to keep a rotated image centered on its display box.
-  Size? _rotatedImageSize(ui.Image? image) {
-    final rotation = widget.ffi.ffiModel.clientRotationValue;
-    if (rotation == ViewRotation.none || image == null) {
-      return null;
-    }
-    return rotation
-        .rotatedSize(Size(image.width.toDouble(), image.height.toDouble()));
-  }
-
   Widget _buildScrollbarNonTextureRender(
       ImageModel m, Size imageSize, double s) {
     return CustomPaint(
       size: imageSize,
-      painter: ImagePainter(
-          image: m.image,
-          x: 0,
-          y: 0,
-          scale: s,
-          quarterTurns: widget.ffi.ffiModel.clientRotationValue.quarterTurns,
-          virtualSize: _rotatedImageSize(m.image)),
+      painter: ImagePainter(image: m.image, x: 0, y: 0, scale: s),
     );
   }
 
@@ -945,9 +921,7 @@ class _ImagePaintState extends State<ImagePaint> {
           image: m.image,
           x: c.x / sizeScale,
           y: c.y / sizeScale,
-          scale: sizeScale,
-          quarterTurns: widget.ffi.ffiModel.clientRotationValue.quarterTurns,
-          virtualSize: _rotatedImageSize(m.image)),
+          scale: sizeScale),
     );
   }
 
@@ -962,36 +936,22 @@ class _ImagePaintState extends State<ImagePaint> {
     }
     final isPeerLinux = ffiModel.isPeerLinux;
     final curDisplay = ffiModel.pi.currentDisplay;
-    // Client-side rotation is only applied to a single display; the
-    // underlying texture keeps its native dimensions and is rotated with a
-    // [RotatedBox] so it is not stretched.
-    final rotation = ffiModel.clientRotationValue;
-    final rotated = rotation != ViewRotation.none && displays.length == 1;
     for (var i = 0; i < displays.length; i++) {
       final textureId = widget.ffi.textureModel
           .getTextureId(curDisplay == kAllDisplayValue ? i : curDisplay);
       if (true) {
         // both "textureId.value != -1" and "true" seems ok
         final sizeScale = isPeerLinux ? s / displays[i].scale : s;
-        final baseW = displays[i].width * sizeScale;
-        final baseH = displays[i].height * sizeScale;
-        final viewW =
-            rotated && rotation.isQuarterTurn ? baseH : baseW;
-        final viewH =
-            rotated && rotation.isQuarterTurn ? baseW : baseH;
         children.add(Positioned(
           left: (displays[i].x - rect.left) * s + offset.dx,
           top: (displays[i].y - rect.top) * s + offset.dy,
-          width: viewW,
-          height: viewH,
-          child: RotatedBox(
-            quarterTurns: rotated ? rotation.quarterTurns : 0,
-            child: Obx(() => Texture(
-                  textureId: textureId.value,
-                  filterQuality:
-                      isViewOriginal ? FilterQuality.none : FilterQuality.low,
-                )),
-          ),
+          width: displays[i].width * sizeScale,
+          height: displays[i].height * sizeScale,
+          child: Obx(() => Texture(
+                textureId: textureId.value,
+                filterQuality:
+                    isViewOriginal ? FilterQuality.none : FilterQuality.low,
+              )),
         ));
       }
     }
@@ -1005,22 +965,13 @@ class _ImagePaintState extends State<ImagePaint> {
   MouseCursor _buildCustomCursor(BuildContext context, double scale) {
     final cursor = Provider.of<CursorModel>(context);
     final cache = cursor.cache ?? preDefaultCursor.cache;
-    // The peer cursor image is a visual element captured in the peer's base
-    // (video) frame orientation, like the frame itself, so the local pointer
-    // glyph must be rotated by the view rotation alone -- the panel
-    // orientation only remaps input coordinates and has no bearing on how
-    // the peer renders its cursor glyph.
-    final ffiModel = widget.ffi.ffiModel;
-    return buildCursorOfCache(cursor, scale, cache,
-        rotation: ffiModel.clientRotationValue);
+    return buildCursorOfCache(cursor, scale, cache);
   }
 
   MouseCursor _buildDisabledCursor(BuildContext context, double scale) {
     final cursor = Provider.of<CursorModel>(context);
     final cache = preForbiddenCursor.cache;
-    final ffiModel = widget.ffi.ffiModel;
-    return buildCursorOfCache(cursor, scale, cache,
-        rotation: ffiModel.clientRotationValue);
+    return buildCursorOfCache(cursor, scale, cache);
   }
 
   Widget _buildCrossScrollbarFromLayout(
@@ -1158,64 +1109,22 @@ class CursorPaint extends StatelessWidget {
       }
     }
 
-    final ffiModel = c.parent.target!.ffiModel;
-    // The peer cursor image is a visual element in the peer's base (video)
-    // frame orientation, like the frame itself; rotate it by the view
-    // rotation alone (see _buildCustomCursor above).
-    final rotation = ffiModel.clientRotationValue;
-    final cursorImage = m.image ?? preDefaultCursor.image;
-
-    // The hotspot of the glyph as drawn, rotated together with the glyph so
-    // the tip still lands on the (virtual) cursor position.
-    var hotxSub = hotx;
-    var hotySub = hoty;
-    Size? virtualSize;
-    if (rotation != ViewRotation.none && cursorImage != null) {
-      final rotated = rotation.rotateHotspot(
-          cursorImage.width.toDouble(),
-          cursorImage.height.toDouble(),
-          Offset(hotx, hoty));
-      hotxSub = rotated.dx;
-      hotySub = rotated.dy;
-      virtualSize =
-          rotation.rotatedSize(Size(cursorImage.width.toDouble(), cursorImage.height.toDouble()));
-    }
-
-    double x;
-    double y;
+    double x = (m.x - hotx) * c.scale + cx;
+    double y = (m.y - hoty) * c.scale + cy;
     double scale = 1.0;
     final isViewOriginal = c.viewStyle.style == kRemoteViewStyleOriginal;
-    if (rotation != ViewRotation.none) {
-      // Position the (rotated) glyph so its rotated hotspot lands exactly on
-      // the virtual cursor position.
-      if (zoomCursor.value || isViewOriginal) {
-        // Glyph scaled with the view (painter scale = c.scale).
-        scale = c.scale;
-        x = m.x + cx / c.scale - hotxSub;
-        y = m.y + cy / c.scale - hotySub;
-      } else {
-        // Glyph at natural size (painter scale = 1.0).
-        x = m.x * c.scale + cx - hotxSub;
-        y = m.y * c.scale + cy - hotySub;
-      }
-    } else {
-      x = (m.x - hotx) * c.scale + cx;
-      y = (m.y - hoty) * c.scale + cy;
-      if (zoomCursor.value || isViewOriginal) {
-        x = m.x - hotx + cx / c.scale;
-        y = m.y - hoty + cy / c.scale;
-        scale = c.scale;
-      }
+    if (zoomCursor.value || isViewOriginal) {
+      x = m.x - hotx + cx / c.scale;
+      y = m.y - hoty + cy / c.scale;
+      scale = c.scale;
     }
 
     return CustomPaint(
       painter: ImagePainter(
-        image: cursorImage,
+        image: m.image ?? preDefaultCursor.image,
         x: x,
         y: y,
         scale: scale,
-        quarterTurns: rotation.quarterTurns,
-        virtualSize: virtualSize,
       ),
     );
   }

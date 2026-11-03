@@ -795,6 +795,11 @@ export interface VideoFrame {
   display: number;
 }
 
+export interface IdPk {
+  id: string;
+  pk: Uint8Array;
+}
+
 export interface DisplayInfo {
   x: number;
   y: number;
@@ -810,7 +815,6 @@ export interface DisplayInfo {
 export interface PortForward {
   host: string;
   port: number;
-  multiplex: boolean;
 }
 
 export interface FileTransfer {
@@ -887,7 +891,6 @@ export interface ChatMessage {
 export interface Features {
   privacy_mode: boolean;
   terminal: boolean;
-  port_forward_mux: boolean;
 }
 
 export interface CodecAbility {
@@ -1576,7 +1579,7 @@ export interface MessageBox {
   /**
    * If not empty, msgbox provides a button to following the link.
    * The link here can't be directly http url.
-   * It must be the key of http url configed in peer side or "rustdesk://*" (jump in app).
+   * It must be the key of http url configured in peer side or "subnetdesk://*" (jump in app).
    */
   link: string;
 }
@@ -1922,46 +1925,6 @@ export interface TerminalResponse {
   error?: TerminalError | undefined;
 }
 
-export interface PortForwardOpen {
-  channel_id: number;
-  host: string;
-  port: number;
-  window: number;
-}
-
-export interface PortForwardOpened {
-  channel_id: number;
-  success: boolean;
-  message: string;
-  window: number;
-}
-
-export interface PortForwardData {
-  channel_id: number;
-  data: Uint8Array;
-}
-
-export interface PortForwardClose {
-  channel_id: number;
-}
-
-export interface PortForwardWindowUpdate {
-  channel_id: number;
-  add: number;
-}
-
-/**
- * One symmetric message for both directions. `open` only travels controller -> controlled,
- * `opened` only controlled -> controller; a frame in the wrong direction is ignored.
- */
-export interface PortForwardChannel {
-  open?: PortForwardOpen | undefined;
-  opened?: PortForwardOpened | undefined;
-  data?: PortForwardData | undefined;
-  close?: PortForwardClose | undefined;
-  window_update?: PortForwardWindowUpdate | undefined;
-}
-
 export interface Message {
   signed_id?: SignedId | undefined;
   public_key?: PublicKey | undefined;
@@ -1995,7 +1958,6 @@ export interface Message {
   terminal_response?: TerminalResponse | undefined;
   lan_client_hello?: LanClientHello | undefined;
   lan_server_hello?: LanServerHello | undefined;
-  port_forward_channel?: PortForwardChannel | undefined;
 }
 
 function createBaseEncodedVideoFrame(): EncodedVideoFrame {
@@ -2480,6 +2442,82 @@ export const VideoFrame: MessageFns<VideoFrame> = {
   },
 };
 
+function createBaseIdPk(): IdPk {
+  return { id: "", pk: new Uint8Array(0) };
+}
+
+export const IdPk: MessageFns<IdPk> = {
+  encode(message: IdPk, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.id !== "") {
+      writer.uint32(10).string(message.id);
+    }
+    if (message.pk.length !== 0) {
+      writer.uint32(18).bytes(message.pk);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): IdPk {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    const end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseIdPk();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.id = reader.string();
+          continue;
+        }
+        case 2: {
+          if (tag !== 18) {
+            break;
+          }
+
+          message.pk = reader.bytes();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): IdPk {
+    return {
+      id: isSet(object.id) ? globalThis.String(object.id) : "",
+      pk: isSet(object.pk) ? bytesFromBase64(object.pk) : new Uint8Array(0),
+    };
+  },
+
+  toJSON(message: IdPk): unknown {
+    const obj: any = {};
+    if (message.id !== "") {
+      obj.id = message.id;
+    }
+    if (message.pk.length !== 0) {
+      obj.pk = base64FromBytes(message.pk);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<IdPk>, I>>(base?: I): IdPk {
+    return IdPk.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<IdPk>, I>>(object: I): IdPk {
+    const message = createBaseIdPk();
+    message.id = object.id ?? "";
+    message.pk = object.pk ?? new Uint8Array(0);
+    return message;
+  },
+};
+
 function createBaseDisplayInfo(): DisplayInfo {
   return {
     x: 0,
@@ -2683,7 +2721,7 @@ export const DisplayInfo: MessageFns<DisplayInfo> = {
 };
 
 function createBasePortForward(): PortForward {
-  return { host: "", port: 0, multiplex: false };
+  return { host: "", port: 0 };
 }
 
 export const PortForward: MessageFns<PortForward> = {
@@ -2693,9 +2731,6 @@ export const PortForward: MessageFns<PortForward> = {
     }
     if (message.port !== 0) {
       writer.uint32(16).int32(message.port);
-    }
-    if (message.multiplex !== false) {
-      writer.uint32(24).bool(message.multiplex);
     }
     return writer;
   },
@@ -2723,14 +2758,6 @@ export const PortForward: MessageFns<PortForward> = {
           message.port = reader.int32();
           continue;
         }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.multiplex = reader.bool();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -2744,7 +2771,6 @@ export const PortForward: MessageFns<PortForward> = {
     return {
       host: isSet(object.host) ? globalThis.String(object.host) : "",
       port: isSet(object.port) ? globalThis.Number(object.port) : 0,
-      multiplex: isSet(object.multiplex) ? globalThis.Boolean(object.multiplex) : false,
     };
   },
 
@@ -2756,9 +2782,6 @@ export const PortForward: MessageFns<PortForward> = {
     if (message.port !== 0) {
       obj.port = Math.round(message.port);
     }
-    if (message.multiplex !== false) {
-      obj.multiplex = message.multiplex;
-    }
     return obj;
   },
 
@@ -2769,7 +2792,6 @@ export const PortForward: MessageFns<PortForward> = {
     const message = createBasePortForward();
     message.host = object.host ?? "";
     message.port = object.port ?? 0;
-    message.multiplex = object.multiplex ?? false;
     return message;
   },
 };
@@ -3839,7 +3861,7 @@ export const ChatMessage: MessageFns<ChatMessage> = {
 };
 
 function createBaseFeatures(): Features {
-  return { privacy_mode: false, terminal: false, port_forward_mux: false };
+  return { privacy_mode: false, terminal: false };
 }
 
 export const Features: MessageFns<Features> = {
@@ -3849,9 +3871,6 @@ export const Features: MessageFns<Features> = {
     }
     if (message.terminal !== false) {
       writer.uint32(16).bool(message.terminal);
-    }
-    if (message.port_forward_mux !== false) {
-      writer.uint32(24).bool(message.port_forward_mux);
     }
     return writer;
   },
@@ -3879,14 +3898,6 @@ export const Features: MessageFns<Features> = {
           message.terminal = reader.bool();
           continue;
         }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.port_forward_mux = reader.bool();
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -3900,7 +3911,6 @@ export const Features: MessageFns<Features> = {
     return {
       privacy_mode: isSet(object.privacy_mode) ? globalThis.Boolean(object.privacy_mode) : false,
       terminal: isSet(object.terminal) ? globalThis.Boolean(object.terminal) : false,
-      port_forward_mux: isSet(object.port_forward_mux) ? globalThis.Boolean(object.port_forward_mux) : false,
     };
   },
 
@@ -3912,9 +3922,6 @@ export const Features: MessageFns<Features> = {
     if (message.terminal !== false) {
       obj.terminal = message.terminal;
     }
-    if (message.port_forward_mux !== false) {
-      obj.port_forward_mux = message.port_forward_mux;
-    }
     return obj;
   },
 
@@ -3925,7 +3932,6 @@ export const Features: MessageFns<Features> = {
     const message = createBaseFeatures();
     message.privacy_mode = object.privacy_mode ?? false;
     message.terminal = object.terminal ?? false;
-    message.port_forward_mux = object.port_forward_mux ?? false;
     return message;
   },
 };
@@ -13667,566 +13673,6 @@ export const TerminalResponse: MessageFns<TerminalResponse> = {
   },
 };
 
-function createBasePortForwardOpen(): PortForwardOpen {
-  return { channel_id: 0, host: "", port: 0, window: 0 };
-}
-
-export const PortForwardOpen: MessageFns<PortForwardOpen> = {
-  encode(message: PortForwardOpen, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.channel_id !== 0) {
-      writer.uint32(8).int32(message.channel_id);
-    }
-    if (message.host !== "") {
-      writer.uint32(18).string(message.host);
-    }
-    if (message.port !== 0) {
-      writer.uint32(24).int32(message.port);
-    }
-    if (message.window !== 0) {
-      writer.uint32(32).uint32(message.window);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PortForwardOpen {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePortForwardOpen();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.channel_id = reader.int32();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.host = reader.string();
-          continue;
-        }
-        case 3: {
-          if (tag !== 24) {
-            break;
-          }
-
-          message.port = reader.int32();
-          continue;
-        }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.window = reader.uint32();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PortForwardOpen {
-    return {
-      channel_id: isSet(object.channel_id) ? globalThis.Number(object.channel_id) : 0,
-      host: isSet(object.host) ? globalThis.String(object.host) : "",
-      port: isSet(object.port) ? globalThis.Number(object.port) : 0,
-      window: isSet(object.window) ? globalThis.Number(object.window) : 0,
-    };
-  },
-
-  toJSON(message: PortForwardOpen): unknown {
-    const obj: any = {};
-    if (message.channel_id !== 0) {
-      obj.channel_id = Math.round(message.channel_id);
-    }
-    if (message.host !== "") {
-      obj.host = message.host;
-    }
-    if (message.port !== 0) {
-      obj.port = Math.round(message.port);
-    }
-    if (message.window !== 0) {
-      obj.window = Math.round(message.window);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PortForwardOpen>, I>>(base?: I): PortForwardOpen {
-    return PortForwardOpen.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PortForwardOpen>, I>>(object: I): PortForwardOpen {
-    const message = createBasePortForwardOpen();
-    message.channel_id = object.channel_id ?? 0;
-    message.host = object.host ?? "";
-    message.port = object.port ?? 0;
-    message.window = object.window ?? 0;
-    return message;
-  },
-};
-
-function createBasePortForwardOpened(): PortForwardOpened {
-  return { channel_id: 0, success: false, message: "", window: 0 };
-}
-
-export const PortForwardOpened: MessageFns<PortForwardOpened> = {
-  encode(message: PortForwardOpened, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.channel_id !== 0) {
-      writer.uint32(8).int32(message.channel_id);
-    }
-    if (message.success !== false) {
-      writer.uint32(16).bool(message.success);
-    }
-    if (message.message !== "") {
-      writer.uint32(26).string(message.message);
-    }
-    if (message.window !== 0) {
-      writer.uint32(32).uint32(message.window);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PortForwardOpened {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePortForwardOpened();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.channel_id = reader.int32();
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.success = reader.bool();
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.message = reader.string();
-          continue;
-        }
-        case 4: {
-          if (tag !== 32) {
-            break;
-          }
-
-          message.window = reader.uint32();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PortForwardOpened {
-    return {
-      channel_id: isSet(object.channel_id) ? globalThis.Number(object.channel_id) : 0,
-      success: isSet(object.success) ? globalThis.Boolean(object.success) : false,
-      message: isSet(object.message) ? globalThis.String(object.message) : "",
-      window: isSet(object.window) ? globalThis.Number(object.window) : 0,
-    };
-  },
-
-  toJSON(message: PortForwardOpened): unknown {
-    const obj: any = {};
-    if (message.channel_id !== 0) {
-      obj.channel_id = Math.round(message.channel_id);
-    }
-    if (message.success !== false) {
-      obj.success = message.success;
-    }
-    if (message.message !== "") {
-      obj.message = message.message;
-    }
-    if (message.window !== 0) {
-      obj.window = Math.round(message.window);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PortForwardOpened>, I>>(base?: I): PortForwardOpened {
-    return PortForwardOpened.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PortForwardOpened>, I>>(object: I): PortForwardOpened {
-    const message = createBasePortForwardOpened();
-    message.channel_id = object.channel_id ?? 0;
-    message.success = object.success ?? false;
-    message.message = object.message ?? "";
-    message.window = object.window ?? 0;
-    return message;
-  },
-};
-
-function createBasePortForwardData(): PortForwardData {
-  return { channel_id: 0, data: new Uint8Array(0) };
-}
-
-export const PortForwardData: MessageFns<PortForwardData> = {
-  encode(message: PortForwardData, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.channel_id !== 0) {
-      writer.uint32(8).int32(message.channel_id);
-    }
-    if (message.data.length !== 0) {
-      writer.uint32(18).bytes(message.data);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PortForwardData {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePortForwardData();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.channel_id = reader.int32();
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.data = reader.bytes();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PortForwardData {
-    return {
-      channel_id: isSet(object.channel_id) ? globalThis.Number(object.channel_id) : 0,
-      data: isSet(object.data) ? bytesFromBase64(object.data) : new Uint8Array(0),
-    };
-  },
-
-  toJSON(message: PortForwardData): unknown {
-    const obj: any = {};
-    if (message.channel_id !== 0) {
-      obj.channel_id = Math.round(message.channel_id);
-    }
-    if (message.data.length !== 0) {
-      obj.data = base64FromBytes(message.data);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PortForwardData>, I>>(base?: I): PortForwardData {
-    return PortForwardData.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PortForwardData>, I>>(object: I): PortForwardData {
-    const message = createBasePortForwardData();
-    message.channel_id = object.channel_id ?? 0;
-    message.data = object.data ?? new Uint8Array(0);
-    return message;
-  },
-};
-
-function createBasePortForwardClose(): PortForwardClose {
-  return { channel_id: 0 };
-}
-
-export const PortForwardClose: MessageFns<PortForwardClose> = {
-  encode(message: PortForwardClose, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.channel_id !== 0) {
-      writer.uint32(8).int32(message.channel_id);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PortForwardClose {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePortForwardClose();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.channel_id = reader.int32();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PortForwardClose {
-    return { channel_id: isSet(object.channel_id) ? globalThis.Number(object.channel_id) : 0 };
-  },
-
-  toJSON(message: PortForwardClose): unknown {
-    const obj: any = {};
-    if (message.channel_id !== 0) {
-      obj.channel_id = Math.round(message.channel_id);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PortForwardClose>, I>>(base?: I): PortForwardClose {
-    return PortForwardClose.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PortForwardClose>, I>>(object: I): PortForwardClose {
-    const message = createBasePortForwardClose();
-    message.channel_id = object.channel_id ?? 0;
-    return message;
-  },
-};
-
-function createBasePortForwardWindowUpdate(): PortForwardWindowUpdate {
-  return { channel_id: 0, add: 0 };
-}
-
-export const PortForwardWindowUpdate: MessageFns<PortForwardWindowUpdate> = {
-  encode(message: PortForwardWindowUpdate, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.channel_id !== 0) {
-      writer.uint32(8).int32(message.channel_id);
-    }
-    if (message.add !== 0) {
-      writer.uint32(16).uint32(message.add);
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PortForwardWindowUpdate {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePortForwardWindowUpdate();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 8) {
-            break;
-          }
-
-          message.channel_id = reader.int32();
-          continue;
-        }
-        case 2: {
-          if (tag !== 16) {
-            break;
-          }
-
-          message.add = reader.uint32();
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PortForwardWindowUpdate {
-    return {
-      channel_id: isSet(object.channel_id) ? globalThis.Number(object.channel_id) : 0,
-      add: isSet(object.add) ? globalThis.Number(object.add) : 0,
-    };
-  },
-
-  toJSON(message: PortForwardWindowUpdate): unknown {
-    const obj: any = {};
-    if (message.channel_id !== 0) {
-      obj.channel_id = Math.round(message.channel_id);
-    }
-    if (message.add !== 0) {
-      obj.add = Math.round(message.add);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PortForwardWindowUpdate>, I>>(base?: I): PortForwardWindowUpdate {
-    return PortForwardWindowUpdate.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PortForwardWindowUpdate>, I>>(object: I): PortForwardWindowUpdate {
-    const message = createBasePortForwardWindowUpdate();
-    message.channel_id = object.channel_id ?? 0;
-    message.add = object.add ?? 0;
-    return message;
-  },
-};
-
-function createBasePortForwardChannel(): PortForwardChannel {
-  return { open: undefined, opened: undefined, data: undefined, close: undefined, window_update: undefined };
-}
-
-export const PortForwardChannel: MessageFns<PortForwardChannel> = {
-  encode(message: PortForwardChannel, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
-    if (message.open !== undefined) {
-      PortForwardOpen.encode(message.open, writer.uint32(10).fork()).join();
-    }
-    if (message.opened !== undefined) {
-      PortForwardOpened.encode(message.opened, writer.uint32(18).fork()).join();
-    }
-    if (message.data !== undefined) {
-      PortForwardData.encode(message.data, writer.uint32(26).fork()).join();
-    }
-    if (message.close !== undefined) {
-      PortForwardClose.encode(message.close, writer.uint32(34).fork()).join();
-    }
-    if (message.window_update !== undefined) {
-      PortForwardWindowUpdate.encode(message.window_update, writer.uint32(42).fork()).join();
-    }
-    return writer;
-  },
-
-  decode(input: BinaryReader | Uint8Array, length?: number): PortForwardChannel {
-    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
-    const end = length === undefined ? reader.len : reader.pos + length;
-    const message = createBasePortForwardChannel();
-    while (reader.pos < end) {
-      const tag = reader.uint32();
-      switch (tag >>> 3) {
-        case 1: {
-          if (tag !== 10) {
-            break;
-          }
-
-          message.open = PortForwardOpen.decode(reader, reader.uint32());
-          continue;
-        }
-        case 2: {
-          if (tag !== 18) {
-            break;
-          }
-
-          message.opened = PortForwardOpened.decode(reader, reader.uint32());
-          continue;
-        }
-        case 3: {
-          if (tag !== 26) {
-            break;
-          }
-
-          message.data = PortForwardData.decode(reader, reader.uint32());
-          continue;
-        }
-        case 4: {
-          if (tag !== 34) {
-            break;
-          }
-
-          message.close = PortForwardClose.decode(reader, reader.uint32());
-          continue;
-        }
-        case 5: {
-          if (tag !== 42) {
-            break;
-          }
-
-          message.window_update = PortForwardWindowUpdate.decode(reader, reader.uint32());
-          continue;
-        }
-      }
-      if ((tag & 7) === 4 || tag === 0) {
-        break;
-      }
-      reader.skip(tag & 7);
-    }
-    return message;
-  },
-
-  fromJSON(object: any): PortForwardChannel {
-    return {
-      open: isSet(object.open) ? PortForwardOpen.fromJSON(object.open) : undefined,
-      opened: isSet(object.opened) ? PortForwardOpened.fromJSON(object.opened) : undefined,
-      data: isSet(object.data) ? PortForwardData.fromJSON(object.data) : undefined,
-      close: isSet(object.close) ? PortForwardClose.fromJSON(object.close) : undefined,
-      window_update: isSet(object.window_update) ? PortForwardWindowUpdate.fromJSON(object.window_update) : undefined,
-    };
-  },
-
-  toJSON(message: PortForwardChannel): unknown {
-    const obj: any = {};
-    if (message.open !== undefined) {
-      obj.open = PortForwardOpen.toJSON(message.open);
-    }
-    if (message.opened !== undefined) {
-      obj.opened = PortForwardOpened.toJSON(message.opened);
-    }
-    if (message.data !== undefined) {
-      obj.data = PortForwardData.toJSON(message.data);
-    }
-    if (message.close !== undefined) {
-      obj.close = PortForwardClose.toJSON(message.close);
-    }
-    if (message.window_update !== undefined) {
-      obj.window_update = PortForwardWindowUpdate.toJSON(message.window_update);
-    }
-    return obj;
-  },
-
-  create<I extends Exact<DeepPartial<PortForwardChannel>, I>>(base?: I): PortForwardChannel {
-    return PortForwardChannel.fromPartial(base ?? ({} as any));
-  },
-  fromPartial<I extends Exact<DeepPartial<PortForwardChannel>, I>>(object: I): PortForwardChannel {
-    const message = createBasePortForwardChannel();
-    message.open = (object.open !== undefined && object.open !== null)
-      ? PortForwardOpen.fromPartial(object.open)
-      : undefined;
-    message.opened = (object.opened !== undefined && object.opened !== null)
-      ? PortForwardOpened.fromPartial(object.opened)
-      : undefined;
-    message.data = (object.data !== undefined && object.data !== null)
-      ? PortForwardData.fromPartial(object.data)
-      : undefined;
-    message.close = (object.close !== undefined && object.close !== null)
-      ? PortForwardClose.fromPartial(object.close)
-      : undefined;
-    message.window_update = (object.window_update !== undefined && object.window_update !== null)
-      ? PortForwardWindowUpdate.fromPartial(object.window_update)
-      : undefined;
-    return message;
-  },
-};
-
 function createBaseMessage(): Message {
   return {
     signed_id: undefined,
@@ -14261,7 +13707,6 @@ function createBaseMessage(): Message {
     terminal_response: undefined,
     lan_client_hello: undefined,
     lan_server_hello: undefined,
-    port_forward_channel: undefined,
   };
 }
 
@@ -14365,9 +13810,6 @@ export const Message: MessageFns<Message> = {
     }
     if (message.lan_server_hello !== undefined) {
       LanServerHello.encode(message.lan_server_hello, writer.uint32(274).fork()).join();
-    }
-    if (message.port_forward_channel !== undefined) {
-      PortForwardChannel.encode(message.port_forward_channel, writer.uint32(282).fork()).join();
     }
     return writer;
   },
@@ -14635,14 +14077,6 @@ export const Message: MessageFns<Message> = {
           message.lan_server_hello = LanServerHello.decode(reader, reader.uint32());
           continue;
         }
-        case 35: {
-          if (tag !== 282) {
-            break;
-          }
-
-          message.port_forward_channel = PortForwardChannel.decode(reader, reader.uint32());
-          continue;
-        }
       }
       if ((tag & 7) === 4 || tag === 0) {
         break;
@@ -14700,9 +14134,6 @@ export const Message: MessageFns<Message> = {
         : undefined,
       lan_client_hello: isSet(object.lan_client_hello) ? LanClientHello.fromJSON(object.lan_client_hello) : undefined,
       lan_server_hello: isSet(object.lan_server_hello) ? LanServerHello.fromJSON(object.lan_server_hello) : undefined,
-      port_forward_channel: isSet(object.port_forward_channel)
-        ? PortForwardChannel.fromJSON(object.port_forward_channel)
-        : undefined,
     };
   },
 
@@ -14804,9 +14235,6 @@ export const Message: MessageFns<Message> = {
     if (message.lan_server_hello !== undefined) {
       obj.lan_server_hello = LanServerHello.toJSON(message.lan_server_hello);
     }
-    if (message.port_forward_channel !== undefined) {
-      obj.port_forward_channel = PortForwardChannel.toJSON(message.port_forward_channel);
-    }
     return obj;
   },
 
@@ -14905,9 +14333,6 @@ export const Message: MessageFns<Message> = {
       : undefined;
     message.lan_server_hello = (object.lan_server_hello !== undefined && object.lan_server_hello !== null)
       ? LanServerHello.fromPartial(object.lan_server_hello)
-      : undefined;
-    message.port_forward_channel = (object.port_forward_channel !== undefined && object.port_forward_channel !== null)
-      ? PortForwardChannel.fromPartial(object.port_forward_channel)
       : undefined;
     return message;
   },

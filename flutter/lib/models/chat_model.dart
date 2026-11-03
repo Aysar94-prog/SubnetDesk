@@ -20,38 +20,8 @@ import '../common.dart';
 import '../common/widgets/overlay.dart';
 import '../main.dart';
 import 'model.dart';
-
-class MessageKey {
-  final String peerId;
-  final int connId;
-  bool get isOut => connId == ChatModel.clientModeID;
-
-  MessageKey(this.peerId, this.connId);
-
-  @override
-  bool operator ==(other) {
-    return other is MessageKey &&
-        other.peerId == peerId &&
-        other.isOut == isOut;
-  }
-
-  @override
-  int get hashCode => peerId.hashCode ^ isOut.hashCode;
-}
-
-class MessageBody {
-  ChatUser chatUser;
-  List<ChatMessage> chatMessages;
-  MessageBody(this.chatUser, this.chatMessages);
-
-  void insert(ChatMessage cm) {
-    chatMessages.insert(0, cm);
-  }
-
-  void clear() {
-    chatMessages.clear();
-  }
-}
+import 'session_chat_memory.dart';
+export 'session_chat_memory.dart' show MessageKey, MessageBody;
 
 class ChatModel with ChangeNotifier {
   static final clientModeID = -1;
@@ -70,6 +40,30 @@ class ChatModel with ChangeNotifier {
   TextEditingController textController = TextEditingController();
   RxInt mobileUnreadSum = 0.obs;
   MessageKey? latestReceivedKey;
+  Timer? _buzzerTimer;
+  bool buzzerCoolingDown = false;
+  int _outgoingChatGeneration = 0;
+
+  bool get buzzerSupported => currentKey.isOut && parent.target != null &&
+      currentKey.peerId == parent.target!.id &&
+      parent.target!.ffiModel.pi.platformAdditions['chat_attention_version'] == 1;
+
+  Future<void> sendBuzzer() async {
+    if (!buzzerSupported || buzzerCoolingDown) return;
+    buzzerCoolingDown = true;
+    notifyListeners();
+    _buzzerTimer?.cancel();
+    _buzzerTimer = Timer(const Duration(seconds: 5), () {
+      buzzerCoolingDown = false;
+      notifyListeners();
+    });
+    try {
+      await bind.sessionRequestChatAttention(sessionId: sessionId);
+    } catch (error) {
+      debugPrint('Failed to request chat attention: $error');
+      showToast(translate('Failed'));
+    }
+  }
 
   Offset chatWindowPosition = Offset(20, 80);
 
@@ -80,16 +74,22 @@ class ChatModel with ChangeNotifier {
 
   @override
   void dispose() {
+    _buzzerTimer?.cancel();
+    hideChatIconOverlay();
+    hideChatWindowOverlay();
+    _memory.clear();
+    textController.clear();
+    _currentKey = MessageKey('', -2);
+    latestReceivedKey = null;
+    inputNode.dispose();
     textController.dispose();
     super.dispose();
   }
 
-  final ChatUser me = ChatUser(
-    id: Uuid().v4().toString(),
-    firstName: translate("Me"),
-  );
+  final ChatUser me;
 
-  late final Map<MessageKey, MessageBody> _messages = {};
+  final _memory = SessionChatMemory();
+  Map<MessageKey, MessageBody> get _messages => _memory.messages;
 
   MessageKey _currentKey = MessageKey('', -2); // -2 is invalid value
   late bool _isShowCMSidePage = false;
@@ -118,7 +118,8 @@ class ChatModel with ChangeNotifier {
   late final SessionID sessionId;
   late FocusNode inputNode;
 
-  ChatModel(this.parent) {
+  ChatModel(this.parent, {String? localUserName}) : me = ChatUser(
+      id: Uuid().v4().toString(), firstName: localUserName ?? translate("Me")) {
     sessionId = parent.target!.sessionId;
     inputNode = FocusNode(
       onKey: (_, event) {
@@ -292,6 +293,11 @@ class ChatModel with ChangeNotifier {
 
   var _togglingCMSidePage = false; // protect order for await
   toggleCMSidePage() async {
+    if (isWindows && isConnManager) {
+      _isShowCMSidePage = !_isShowCMSidePage;
+      notifyListeners();
+      return;
+    }
     if (_togglingCMSidePage) return false;
     _togglingCMSidePage = true;
     if (_isShowCMSidePage) {
@@ -351,9 +357,14 @@ class ChatModel with ChangeNotifier {
       return;
     }
     if (text.isEmpty) return;
+    if (!_isLiveChatConnection(id)) return;
+    final outgoingGeneration = _outgoingChatGeneration;
+    bool isCurrentConnection() => _isLiveChatConnection(id) &&
+        (id != clientModeID || outgoingGeneration == _outgoingChatGeneration);
     if (desktopType == DesktopType.cm) {
       await showCmWindow();
     }
+    if (!isCurrentConnection()) return;
     String? peerId;
     if (id == clientModeID) {
       peerId = session.id;
@@ -375,6 +386,8 @@ class ChatModel with ChangeNotifier {
     }
     // show chat page
     await showChatPage(messagekey);
+    // Showing the dock/overlay can yield while this connection ends.
+    if (!isCurrentConnection()) return;
     late final ChatUser chatUser;
     if (id == clientModeID) {
       chatUser = ChatUser(
@@ -391,8 +404,10 @@ class ChatModel with ChangeNotifier {
               index >= 0 && tabController.state.value.selected != index;
           // minisized: top and switch tab
           // not minisized: add count
-          if (await WindowController.fromWindowId(stateGlobal.windowId)
-              .isMinimized()) {
+          final minimized = await WindowController.fromWindowId(stateGlobal.windowId)
+              .isMinimized();
+          if (!isCurrentConnection()) return;
+          if (minimized) {
             windowOnTop(stateGlobal.windowId);
             if (notSelected) {
               tabController.jumpTo(index);
@@ -412,11 +427,14 @@ class ChatModel with ChangeNotifier {
         return;
       }
       if (isDesktop) {
-        windowOnTop(null);
+        final foldedWindowsPanel =
+            isWindows && isConnManager && session.serverModel.windowsCmCollapsed;
+        if (!foldedWindowsPanel) windowOnTop(null);
         // disable auto jumpTo other tab when hasFocus, and mark unread message
         final currentSelectedTab =
             session.serverModel.tabController.state.value.selectedTabInfo;
-        if (currentSelectedTab.key != id.toString() && inputNode.hasFocus) {
+        if (foldedWindowsPanel ||
+            (currentSelectedTab.key != id.toString() && inputNode.hasFocus)) {
           client.unreadChatMessageCount.value += 1;
         } else {
           parent.target?.serverModel.jumpTo(id);
@@ -430,6 +448,7 @@ class ChatModel with ChangeNotifier {
       }
       chatUser = ChatUser(id: client.peerId, firstName: client.name);
     }
+    if (!isCurrentConnection()) return;
     insertMessage(messagekey,
         ChatMessage(text: text, user: chatUser, createdAt: DateTime.now()));
     if (id == clientModeID || _currentKey.peerId.isEmpty) {
@@ -442,6 +461,7 @@ class ChatModel with ChangeNotifier {
   }
 
   send(ChatMessage message) {
+    if (!_isLiveChatConnection(_currentKey.connId)) return;
     String trimmedText = message.text.trim();
     if (trimmedText.isEmpty) {
       return;
@@ -467,15 +487,7 @@ class ChatModel with ChangeNotifier {
   }
 
   updateConnIdOfKey(MessageKey key) {
-    if (_messages.keys
-            .toList()
-            .firstWhereOrNull((e) => e == key && e.connId != key.connId) !=
-        null) {
-      final value = _messages.remove(key);
-      if (value != null) {
-        _messages[key] = value;
-      }
-    }
+    // Never move a previous connection's history into a new connection.
     if (_currentKey == key || _currentKey.peerId.isEmpty) {
       _currentKey = key; // hash != assign
     }
@@ -507,11 +519,52 @@ class ChatModel with ChangeNotifier {
   close() {
     hideChatIconOverlay();
     hideChatWindowOverlay();
+    _memory.clear();
+    _outgoingChatGeneration++;
+    _resetChatSelection();
+    _buzzerTimer?.cancel();
+    buzzerCoolingDown = false;
     notifyListeners();
   }
 
   resetClientMode() {
-    _messages[clientModeID]?.clear();
+    _outgoingChatGeneration++;
+    _memory.clearOutgoing();
+    _resetChatSelection();
+    _buzzerTimer?.cancel();
+    buzzerCoolingDown = false;
+    notifyListeners();
+  }
+
+  void removeSession(int connId) {
+    _memory.removeConnection(connId);
+    _resetChatSelection();
+    notifyListeners();
+  }
+
+  void retainIncomingSessions(Set<int> connectedIds) {
+    _memory.retainIncoming(connectedIds);
+    _resetChatSelection();
+    notifyListeners();
+  }
+
+  void _resetChatSelection() {
+    if (!_messages.containsKey(_currentKey)) {
+      textController.clear();
+      _currentKey = MessageKey('', -2);
+    }
+    if (latestReceivedKey != null && !_messages.containsKey(latestReceivedKey)) {
+      latestReceivedKey = null;
+    }
+    mobileUpdateUnreadSum();
+  }
+
+  bool _isLiveChatConnection(int connId) {
+    final session = parent.target;
+    if (session == null) return false;
+    if (connId == clientModeID) return !session.closed;
+    return session.serverModel.clients.any((client) => client.id == connId &&
+        client.authorized && !client.disconnected);
   }
 
   void requestChatInputFocus() {

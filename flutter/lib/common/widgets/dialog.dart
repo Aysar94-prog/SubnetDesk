@@ -1,11 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
-import 'package:flutter_hbb/common/widgets/subnet_ui.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -269,130 +268,16 @@ void enterUserLoginDialog(
 void enterLanLoginDialog(
   SessionID sessionId,
   OverlayDialogManager dialogManager,
-  String description, {
-  bool credentialsRejected = false,
-}) async {
-  if (!isDesktop) {
-    await _connectDialog(
-      sessionId,
-      dialogManager,
-      osUsernameController: TextEditingController(),
-      osPasswordController: TextEditingController(),
-      osAccountDescTip: description,
-      lanAccess: true,
-      credentialsRejected: credentialsRejected,
-    );
-    return;
-  }
-
-  var identities = loadLanIdentityProfiles();
-  var selectedId = preferredLanIdentityId(identities);
-  var bindIdentity = true;
-  var errorText = '';
-  var dialogOpen = true;
-  dialogManager.dismissAll();
-  await dialogManager.show((setState, close, context) {
-    void cancel() {
-      close();
-      closeConnection();
-    }
-
-    void submit() {
-      final identityId = selectedId;
-      if (identityId == null) return;
-      final error = bind.sessionLoginLanIdentity(
-        sessionId: sessionId,
-        identityId: identityId,
-        bindOnSuccess: bindIdentity,
-      );
-      if (error.isNotEmpty) {
-        setState(() => errorText = error);
-        return;
-      }
-      close();
-      dialogManager.showLoading(
-        translate('Logging in...'),
-        onCancel: closeConnection,
-      );
-    }
-
-    Future<void> editAccounts({bool add = false}) async {
-      String? createdId;
-      if (add) {
-        createdId = await showLanIdentityEditor(context);
-      } else {
-        await showLanIdentityManager(context);
-      }
-      // The session may have ended while the account editor was open.
-      if (!dialogOpen || !context.mounted) return;
-      identities = loadLanIdentityProfiles();
-      setState(() {
-        selectedId = preferredLanIdentityId(
-          identities,
-          selectedId: createdId ?? selectedId,
-        );
-        errorText = '';
-      });
-    }
-
-    return CustomAlertDialog(
-      title: Text(subnetText(context, '选择连接账号', 'Select connection account')),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            credentialsRejected
-                ? subnetText(
-                    context,
-                    '账号验证失败，请选择其他账号，或在“管理账号”中更新凭据。',
-                    'Authentication failed. Choose another account or update its credentials in Manage accounts.',
-                  )
-                : subnetText(
-                    context,
-                    '使用已保存的账号连接远程设备。',
-                    'Use a saved account to connect to the remote device.',
-                  ),
-          ),
-          const SizedBox(height: 16),
-          LanIdentitySelector(
-            identities: identities,
-            selectedId: selectedId,
-            errorText: errorText,
-            onChanged: (value) => setState(() {
-              selectedId = value;
-              errorText = '';
-            }),
-            onAdd: () => editAccounts(add: true),
-            onManage: editAccounts,
-          ),
-          if (selectedId != null)
-            CheckboxListTile(
-              value: bindIdentity,
-              onChanged: (value) =>
-                  setState(() => bindIdentity = value == true),
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-              controlAffinity: ListTileControlAffinity.leading,
-              title: Text(
-                subnetText(
-                  context,
-                  '记住此设备使用的账号',
-                  'Remember this account for this device',
-                ),
-              ),
-            ),
-        ],
-      ),
-      actions: [
-        dialogButton('Cancel', onPressed: cancel, isOutline: true),
-        dialogButton('Connect', onPressed: selectedId == null ? null : submit),
-      ],
-      onSubmit: selectedId == null ? null : submit,
-      onCancel: cancel,
-    );
-  });
-  dialogOpen = false;
+  String description,
+) async {
+  await _connectDialog(
+    sessionId,
+    dialogManager,
+    osUsernameController: TextEditingController(),
+    osPasswordController: TextEditingController(),
+    osAccountDescTip: description,
+    lanAccess: true,
+  );
 }
 
 void enterUserLoginAndPasswordDialog(
@@ -419,13 +304,14 @@ _connectDialog(
   TextEditingController? passwordController,
   String? osAccountDescTip,
   bool lanAccess = false,
-  bool credentialsRejected = false,
 }) async {
   final errUsername = ''.obs;
-  final errPassword = (credentialsRejected
-      ? translate('Username or password is incorrect')
-      : '').obs;
+  final errPassword = ''.obs;
   bool rememberPassword = false;
+  final List<LanIdentityProfile> lanIdentities = lanAccess && isDesktop
+      ? loadLanIdentityProfiles()
+      : const [];
+  var selectedIdentityId = lanIdentityManualValue;
   if (osUsernameController != null) {
     osUsernameController.addListener(() {
       if (errUsername.value.isNotEmpty) {
@@ -436,13 +322,16 @@ _connectDialog(
 
   dialogManager.dismissAll();
   dialogManager.show((setState, close, context) {
+    final usingLanIdentity =
+        lanAccess && selectedIdentityId != lanIdentityManualValue;
+
     cancel() {
       close();
       closeConnection();
     }
 
     submit() {
-      if (osUsernameController != null) {
+      if (osUsernameController != null && !usingLanIdentity && !lanAccess) {
         if (osUsernameController.text.trim().isEmpty) {
           errUsername.value = translate('Empty Username');
           setState(() {});
@@ -453,23 +342,34 @@ _connectDialog(
       final osPassword = osPasswordController?.text ?? '';
       final password = passwordController?.text.trim() ?? '';
       if (lanAccess) {
-        if (osPassword.isEmpty) {
+        if (usingLanIdentity) {
+          final error = bind.sessionLoginLanIdentity(
+            sessionId: sessionId,
+            identityId: selectedIdentityId,
+            bindOnSuccess: rememberPassword,
+          );
+          if (error.isNotEmpty) {
+            errPassword.value = error;
+          setState(() {});
+          return;
+        }
+        } else if (osPassword.isEmpty) {
           errPassword.value = translate('Empty Password');
           setState(() {});
           return;
         } else {
-          final error = bind.sessionLoginLan(
-            sessionId: sessionId,
-            username: osUsername,
-            password: osPassword,
-            remember: rememberPassword,
-          );
-          osPasswordController?.clear();
-          if (error.isNotEmpty) {
-            errPassword.value = error;
-            setState(() {});
-            return;
-          }
+        final error = bind.sessionLoginLan(
+          sessionId: sessionId,
+          username: '',
+          password: osPassword,
+          remember: rememberPassword,
+        );
+        osPasswordController?.clear();
+        if (error.isNotEmpty) {
+          errPassword.value = error;
+          setState(() {});
+          return;
+        }
         }
       } else {
         if (passwordController != null && password.isEmpty) return;
@@ -507,7 +407,7 @@ _connectDialog(
       return Column(
         children: [
           if (osAccountDescTip != null) descWidget(translate(osAccountDescTip)),
-          DialogTextField(
+          if (!lanAccess) DialogTextField(
             title: translate(DialogTextField.kUsernameTitle),
             controller: osUsernameController,
             prefixIcon: DialogTextField.kUsernameIcon,
@@ -556,7 +456,7 @@ _connectDialog(
           Icon(Icons.password_rounded, color: MyTheme.accent),
           Text(
             translate(
-              lanAccess ? 'LAN access credentials' : 'Password Required',
+              lanAccess ? 'Unattended access' : 'Password Required',
             ),
           ).paddingOnly(left: 10),
         ],
@@ -564,12 +464,42 @@ _connectDialog(
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          osAccountWidget(),
+          if (lanAccess && isDesktop && lanIdentities.isNotEmpty)
+            DropdownButtonFormField<String>(
+              key: ValueKey(selectedIdentityId),
+              initialValue: selectedIdentityId,
+              decoration: InputDecoration(
+                labelText: translate('Account'),
+                prefixIcon: const Icon(Icons.badge_outlined),
+              ),
+              items: [
+                DropdownMenuItem(
+                  value: lanIdentityManualValue,
+                  child: Text(
+                    translate('Password'),
+                  ),
+                ),
+                ...lanIdentities.map(
+                  (identity) => DropdownMenuItem(
+                    value: identity.id,
+                    child: Text(
+                      identity.isDefault
+                          ? '${identity.name} (${translate('Default')})'
+                          : identity.name,
+                    ),
+                  ),
+                ),
+              ],
+              onChanged: (value) => setState(
+                () => selectedIdentityId = value ?? lanIdentityManualValue,
+              ),
+            ).paddingOnly(bottom: 12),
+          if (!usingLanIdentity) osAccountWidget(),
           osUsernameController == null || passwordController == null
               ? Offstage()
               : Container(height: 12),
           passwdWidget(),
-          if (lanAccess && isDesktop)
+          if (lanAccess && (isDesktop || isAndroid))
             CheckboxListTile(
               value: rememberPassword,
               onChanged: (value) =>
@@ -577,7 +507,11 @@ _connectDialog(
               contentPadding: EdgeInsets.zero,
               dense: true,
               controlAffinity: ListTileControlAffinity.leading,
-              title: Text(translate('Remember password')),
+              title: Text(
+                usingLanIdentity
+                    ? '${translate('Remember password')} · ${translate('Account')}'
+                    : translate('Remember password'),
+              ),
             ),
         ],
       ),
@@ -1086,6 +1020,11 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   bool qualitySet = false;
   bool fpsSet = false;
 
+  bool? direct;
+  try {
+    direct =
+        ConnectionTypeState.find(id).direct.value == ConnectionType.strDirect;
+  } catch (_) {}
   bool hideFps = versionCmp(ffi.ffiModel.pi.version, '1.2.0') < 0;
   bool hideMoreQuality = versionCmp(ffi.ffiModel.pi.version, '1.2.2') < 0;
 
@@ -1158,154 +1097,66 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   msgBoxCommon(ffi.dialogManager, 'Custom Image Quality', content, [btnClose]);
 }
 
-int? _validateTrackpadSpeed(String text) {
-  final speed = int.tryParse(text);
-  if (speed == null || speed < kMinTrackpadSpeed || speed > kMaxTrackpadSpeed) {
-    BotToast.showText(
-      text:
-          '${translate('Invalid format')}: $kMinTrackpadSpeed-$kMaxTrackpadSpeed',
-      contentColor: Colors.red,
-    );
-    return null;
-  }
-  return speed;
-}
-
-Future<void> _saveTrackpadSpeed({
-  required SessionID sessionId,
-  required FFI ffi,
-  required int initSpeed,
-  required int speed,
-}) async {
-  if (speed == initSpeed) {
-    return;
-  }
-  await bind.sessionSetTrackpadSpeed(sessionId: sessionId, value: speed);
-  await ffi.inputModel.updateTrackpadSpeed();
-}
-
-void _showTrackpadSpeedSaveError(Object error, StackTrace stackTrace) {
-  debugPrint('Failed to save trackpad speed: $error');
-  debugPrintStack(stackTrace: stackTrace);
-  BotToast.showText(
-    text: translate('Failed'),
-    contentColor: Colors.red,
-  );
-}
-
-List<Widget> _trackpadSpeedDialogActions({
-  required bool isSubmitting,
-  required VoidCallback close,
-  required VoidCallback submit,
-}) {
-  return [
-    dialogButton(
-      'Cancel',
-      icon: Icon(Icons.close_rounded),
-      onPressed: isSubmitting ? null : close,
-      isOutline: true,
-    ),
-    dialogButton(
-      'OK',
-      icon: Icon(Icons.done_rounded),
-      onPressed: isSubmitting ? null : submit,
-    ),
-  ];
-}
-
-void trackpadSpeedDialog(SessionID sessionId, FFI ffi) {
-  final initSpeed = ffi.inputModel.trackpadSpeed;
+trackpadSpeedDialog(SessionID sessionId, FFI ffi) async {
+  int initSpeed = ffi.inputModel.trackpadSpeed;
   final curSpeed = SimpleWrapper(initSpeed);
-  var speedText = initSpeed.toString();
-  var isSubmitting = false;
-  ffi.dialogManager.show((setState, close, context) {
-    Future<void> submit([String? submittedText]) async {
-      if (isSubmitting) {
-        return;
-      }
-      speedText = submittedText ?? speedText;
-      final speed = _validateTrackpadSpeed(speedText);
-      if (speed == null) {
-        return;
-      }
-      setState(() => isSubmitting = true);
-      try {
-        await _saveTrackpadSpeed(
+  final btnClose = dialogButton(
+    'Close',
+    onPressed: () async {
+      if (curSpeed.value <= kMaxTrackpadSpeed &&
+          curSpeed.value >= kMinTrackpadSpeed &&
+          curSpeed.value != initSpeed) {
+        await bind.sessionSetTrackpadSpeed(
           sessionId: sessionId,
-          ffi: ffi,
-          initSpeed: initSpeed,
-          speed: speed,
+          value: curSpeed.value,
         );
-        close();
-      } catch (error, stackTrace) {
-        _showTrackpadSpeedSaveError(error, stackTrace);
-        setState(() => isSubmitting = false);
+        await ffi.inputModel.updateTrackpadSpeed();
       }
-    }
-
-    return CustomAlertDialog(
-      title: Text(
-        translate('Trackpad speed'),
-        style: TextStyle(fontSize: 21),
-      ),
-      content: TrackpadSpeedWidget(
-        value: curSpeed,
-        onTextChanged: (text) => speedText = text,
-        onTextSubmitted: submit,
-      ),
-      actions: _trackpadSpeedDialogActions(
-        isSubmitting: isSubmitting,
-        close: close,
-        submit: submit,
-      ),
-      onSubmit: isSubmitting ? null : submit,
-      onCancel: isSubmitting ? null : close,
-    );
-  });
+      ffi.dialogManager.dismissAll();
+    },
+  );
+  msgBoxCommon(
+    ffi.dialogManager,
+    'Trackpad speed',
+    TrackpadSpeedWidget(value: curSpeed),
+    [btnClose],
+  );
 }
 
 void deleteConfirmDialog(Function onSubmit, String title) async {
-  gFFI.dialogManager.show(
-    (setState, close, context) {
-      submit() async {
-        await onSubmit();
-        close();
-      }
+  gFFI.dialogManager.show((setState, close, context) {
+    submit() async {
+      await onSubmit();
+      close();
+    }
 
-      return CustomAlertDialog(
-        title: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.delete_rounded,
-              color: Colors.red,
-            ),
-            Expanded(
-              child: Text(title, overflow: TextOverflow.ellipsis).paddingOnly(
-                left: 10,
-              ),
-            ),
-          ],
-        ),
-        content: SizedBox.shrink(),
-        actions: [
-          dialogButton(
-            "Cancel",
-            icon: Icon(Icons.close_rounded),
-            onPressed: close,
-            isOutline: true,
-          ),
-          dialogButton(
-            "OK",
-            icon: Icon(Icons.done_rounded),
-            onPressed: submit,
+    return CustomAlertDialog(
+      title: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.delete_rounded, color: Colors.red),
+          Expanded(
+            child: Text(
+              title,
+              overflow: TextOverflow.ellipsis,
+            ).paddingOnly(left: 10),
           ),
         ],
-        onSubmit: submit,
-        onCancel: close,
-      );
-    },
-  );
+      ),
+      content: SizedBox.shrink(),
+      actions: [
+        dialogButton(
+          "Cancel",
+          icon: Icon(Icons.close_rounded),
+          onPressed: close,
+          isOutline: true,
+        ),
+        dialogButton("OK", icon: Icon(Icons.done_rounded), onPressed: submit),
+      ],
+      onSubmit: submit,
+      onCancel: close,
+    );
+  });
 }
 
 void renameDialog({

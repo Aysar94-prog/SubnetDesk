@@ -1,5 +1,14 @@
 #[cfg(windows)]
 fn build_windows() {
+    // Build scripts use the host cfg; Windows can also build an Android target.
+    match std::env::var("CARGO_CFG_TARGET_OS") {
+        Ok(target_os) if target_os == "windows" => {}
+        Ok(_) => return,
+        Err(error) => {
+            eprintln!("Cannot determine native build target: {error}");
+            std::process::exit(1);
+        }
+    }
     let file = "src/platform/windows.cc";
     let file2 = "src/platform/windows_delete_test_cert.cc";
     cc::Build::new().file(file).file(file2).compile("windows");

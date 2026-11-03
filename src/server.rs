@@ -15,10 +15,10 @@ use hbb_common::{
     bytes::Bytes,
     config::Config,
     log,
+    message_proto::*,
     protobuf::{Enum, Message as _},
-    timeout, tokio, ResultType, Stream,
+    tokio, ResultType, Stream,
 };
-use base::message_proto::*;
 use scrap::camera;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use service::ServiceTmpl;
@@ -39,8 +39,6 @@ mod clipboard_service;
 pub use clipboard_service::is_clipboard_service_ok;
 #[cfg(target_os = "linux")]
 pub(crate) mod wayland;
-#[cfg(all(target_os = "linux", feature = "drm"))]
-pub(crate) mod drm_capturer;
 #[cfg(target_os = "linux")]
 pub mod uinput;
 #[cfg(target_os = "linux")]
@@ -64,6 +62,8 @@ pub mod input_service {
 }
 
 mod connection;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod cm_launch;
 pub mod display_service;
 mod login_failure_check;
 #[cfg(windows)]
@@ -71,6 +71,9 @@ pub mod portable_service;
 mod service;
 mod video_qos;
 pub mod video_service;
+
+#[cfg(all(target_os = "windows", feature = "flutter"))]
+pub mod printer_service;
 
 pub type Childs = Arc<Mutex<Vec<std::process::Child>>>;
 type ConnMap = HashMap<i32, ConnInner>;
@@ -103,11 +106,6 @@ pub struct Server {
     connections: ConnMap,
     services: HashMap<String, Box<dyn Service>>,
     id_count: i32,
-    // Which connection ids were added as screen/monitor viewers (as opposed
-    // to camera-only connections), so `remove_connection` can tell whether a
-    // disconnecting connection should affect display power-save state at all.
-    #[cfg(target_os = "linux")]
-    monitor_conn_ids: std::collections::HashSet<i32>,
 }
 
 pub type ServerPtr = Arc<RwLock<Server>>;
@@ -118,8 +116,6 @@ pub fn new() -> ServerPtr {
         connections: HashMap::new(),
         services: HashMap::new(),
         id_count: hbb_common::rand::random::<i32>() % 1000 + 1000, // ensure positive
-        #[cfg(target_os = "linux")]
-        monitor_conn_ids: Default::default(),
     };
     server.add_service(Box::new(audio_service::new()));
     #[cfg(not(target_os = "ios"))]
@@ -145,6 +141,20 @@ pub fn new() -> ServerPtr {
             }
             #[cfg(not(target_os = "linux"))]
             server.add_service(Box::new(input_service::new_window_focus()));
+        }
+    }
+    #[cfg(all(target_os = "windows", feature = "flutter"))]
+    {
+        match printer_service::init(&crate::get_app_name()) {
+            Ok(()) => {
+                log::info!("printer service initialized");
+                server.add_service(Box::new(printer_service::new(
+                    printer_service::NAME.to_owned(),
+                )));
+            }
+            Err(e) => {
+                log::error!("printer service init failed: {}", e);
+            }
         }
     }
     // Terminal service is created per connection, not globally
@@ -201,13 +211,15 @@ impl Server {
         }
     }
 
-    pub fn try_add_monitor_service(&mut self, display_idx: usize) {
-        let monitor_service_name =
-            video_service::get_service_name(VideoSource::Monitor, display_idx);
-        if !self.contains(&monitor_service_name) {
+    pub fn try_add_primay_video_service(&mut self) {
+        let primary_video_service_name = video_service::get_service_name(
+            VideoSource::Monitor,
+            *display_service::PRIMARY_DISPLAY_IDX,
+        );
+        if !self.contains(&primary_video_service_name) {
             self.add_service(Box::new(video_service::new(
                 VideoSource::Monitor,
-                display_idx,
+                *display_service::PRIMARY_DISPLAY_IDX,
             )));
         }
     }
@@ -223,17 +235,14 @@ impl Server {
         self.connections.insert(conn.id(), conn);
     }
 
-    pub fn add_monitor_connection(
-        &mut self,
-        conn: ConnInner,
-        noperms: &Vec<&'static str>,
-        display_idx: usize,
-    ) {
-        let monitor_service_name =
-            video_service::get_service_name(VideoSource::Monitor, display_idx);
+    pub fn add_connection(&mut self, conn: ConnInner, noperms: &Vec<&'static str>) {
+        let primary_video_service_name = video_service::get_service_name(
+            VideoSource::Monitor,
+            *display_service::PRIMARY_DISPLAY_IDX,
+        );
         for s in self.services.values() {
             let name = s.name();
-            if Self::is_video_service_name(&name) && name != monitor_service_name {
+            if Self::is_video_service_name(&name) && name != primary_video_service_name {
                 continue;
             }
             if !noperms.contains(&(&name as _)) {
@@ -242,16 +251,6 @@ impl Server {
         }
         #[cfg(target_os = "macos")]
         self.update_enable_retina();
-        // A locked-and-powered-down screen (e.g. a user's own power-save
-        // script) has no frames to capture; wake it so this connection
-        // actually gets an image instead of hanging on "waiting for
-        // image..." forever. See dbus::wake_display_if_locked for details.
-        #[cfg(target_os = "linux")]
-        {
-            self.monitor_conn_ids.insert(conn.id());
-            dbus::note_monitor_connected();
-            dbus::wake_display_if_locked();
-        }
         self.connections.insert(conn.id(), conn);
     }
 
@@ -262,14 +261,6 @@ impl Server {
         self.connections.remove(&conn.id());
         #[cfg(target_os = "macos")]
         self.update_enable_retina();
-        // Restore the power-saving behavior once no monitor viewers remain
-        // (a camera-only connection never wakes the display, so it should
-        // never trigger a re-blank either), if the screen is still locked.
-        // See dbus::reblank_display_if_still_locked.
-        #[cfg(target_os = "linux")]
-        if self.monitor_conn_ids.remove(&conn.id()) && dbus::note_monitor_disconnected() <= 0 {
-            dbus::reblank_display_if_still_locked();
-        }
     }
 
     pub fn close_connections(&mut self) {
@@ -446,7 +437,7 @@ pub async fn start_server(is_server: bool, no_server: bool) {
             log::info!("XAUTHORITY={:?}", std::env::var("XAUTHORITY"));
         }
         #[cfg(windows)]
-        base::platform::windows::start_cpu_performance_monitor();
+        hbb_common::platform::windows::start_cpu_performance_monitor();
     });
 
     if is_server {
@@ -454,40 +445,20 @@ pub async fn start_server(is_server: bool, no_server: bool) {
         std::thread::spawn(move || {
             if let Err(err) = crate::ipc::start("") {
                 log::error!("Failed to start ipc: {}", err);
-                // A second instance must never kill the process that owns the listener.
-                if !crate::desktop_runtime::is_host() {
-                    std::process::exit(1);
+                if crate::is_server() {
+                    log::error!("ipc is occupied by another process, try kill it");
+                    std::thread::spawn(stop_main_window_process).join().ok();
                 }
+                std::process::exit(-1);
             }
         });
-        // Warm the DRM availability cache before any client connects, so the first connection does
-        // not race a cold `_drm` probe and ship an empty display list ("No displays" + retry).
-        // X11 is skipped -- probing there makes the root service open DRM readers for a path this
-        // session can never take -- but that decision belongs to `warm_availability`, which already
-        // makes it, and NOT to this call site. Deciding it here is the same one-shot-at-startup
-        // mistake the pre-warm had: `is_x11()` answers "x11" whenever loginctl cannot yet name the
-        // seat0 session, which during a boot is exactly when this runs, and nothing revisits it --
-        // so a Wayland host that came up slowly skipped the warm for the life of the process and
-        // got back the cold-probe "No displays" symptom the warm exists to remove.
-        #[cfg(all(target_os = "linux", feature = "drm"))]
-        if let Err(err) = std::thread::Builder::new()
-            .name("drm-warm".into())
-            .spawn(drm_capturer::warm_availability)
-        {
-            // Same reason as the root service's startup threads: `thread::spawn` panics on EAGAIN
-            // and that would abort `start_server`. Skipping the warm costs the first session the
-            // cold probe, which is what happened before the warm existed.
-            log::warn!("drm: could not spawn the availability warm ({err}); skipping it");
-        }
         input_service::fix_key_down_timeout_loop();
         #[cfg(target_os = "linux")]
         if input_service::wayland_use_uinput() {
             allow_err!(input_service::setup_uinput(0, 1920, 0, 1080).await);
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if !crate::desktop_runtime::is_host() {
-            wait_initial_config_sync().await;
-        }
+        wait_initial_config_sync().await;
         #[cfg(target_os = "windows")]
         crate::platform::try_kill_broker();
         #[cfg(feature = "hwcodec")]

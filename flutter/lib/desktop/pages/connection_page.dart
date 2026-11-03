@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/peer_card.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
+import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/lan_discovery_refresh.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
@@ -14,12 +15,14 @@ import 'package:get/get.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../common.dart';
+import '../../common/widgets/connection_diagnostic_dialog.dart';
+import '../../common/widgets/scan_range_dialog.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../common/widgets/peer_tab_page.dart';
-import '../../common/widgets/subnet_ui.dart';
 import '../../models/favorite_group_model.dart';
 import '../../models/platform_model.dart';
 import '../lan_identity_manager.dart';
+import '../widgets/windows_lan_access_dialog.dart';
 
 class OnlineStatusWidget extends StatefulWidget {
   const OnlineStatusWidget({Key? key, this.onSvcStatusChanged})
@@ -35,6 +38,9 @@ class OnlineStatusWidget extends StatefulWidget {
 class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   final _svcStopped = Get.find<RxBool>(tag: 'stop-service');
   Timer? _updateTimer;
+  final _activeSessionCount = 0.obs;
+  final _runtimeError = ''.obs;
+  bool _updating = false;
 
   double get em => 14.0;
   double? get height => bind.isIncomingOnly() ? null : em * 3;
@@ -86,10 +92,10 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
                         : Color.fromARGB(255, 224, 79, 95)),
               ),
             ).marginSymmetric(horizontal: em),
-            Container(
+            Flexible(child: Container(
               width: isIncomingOnly ? 226 : null,
               child: _buildConnStatusMsg(),
-            ),
+            )),
             // stop
             if (!isIncomingOnly) startServiceWidget(),
           ],
@@ -115,34 +121,44 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
 
   _buildConnStatusMsg() {
     widget.onSvcStatusChanged?.call();
-    return Text(
+    return Tooltip(message: _runtimeError.value, child: Text(
       _svcStopped.value
           ? translate("Service is not running")
           : stateGlobal.svcStatus.value == SvcStatus.connecting
               ? translate("connecting_status")
               : stateGlobal.svcStatus.value == SvcStatus.notReady
-                  ? translate("not_ready_status")
-                  : translate('Ready'),
+                  ? translate('Receiver service is unavailable')
+                  : '${translate('Receiving connections')} · ${translate('Active sessions')}: ${_activeSessionCount.value}',
       style: TextStyle(fontSize: em),
-    );
+    ));
   }
 
-  updateStatus() async {
-    final status =
-        jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
-    final statusNum = status['status_num'] as int;
-    if (statusNum == 0) {
-      stateGlobal.svcStatus.value = SvcStatus.connecting;
-    } else if (statusNum == -1) {
-      stateGlobal.svcStatus.value = SvcStatus.notReady;
-    } else if (statusNum == 1) {
-      stateGlobal.svcStatus.value = SvcStatus.ready;
-    } else {
-      stateGlobal.svcStatus.value = SvcStatus.notReady;
-    }
+  Future<void> updateStatus() async {
+    if (_updating) return;
+    _updating = true;
     try {
+      final status = jsonDecode(await bind.mainGetConnectStatus()) as Map<String, dynamic>;
+      final receiver = jsonDecode(await bind.mainGetLanServerInfo()) as Map<String, dynamic>;
+      if (!mounted) return;
+      _runtimeError.value = receiver['runtime_error']?.toString() ?? '';
+      if (receiver['runtime_state'] == 'starting') {
+        stateGlobal.svcStatus.value = SvcStatus.connecting;
+      } else if (receiver['running'] == true) {
+        stateGlobal.svcStatus.value = SvcStatus.ready;
+      } else {
+        stateGlobal.svcStatus.value = SvcStatus.notReady;
+      }
       stateGlobal.videoConnCount.value = status['video_conn_count'] as int;
-    } catch (_) {}
+      _activeSessionCount.value = (status['active_session_count'] as int?) ?? status['video_conn_count'] as int;
+    } catch (error) {
+      debugPrint('Unable to read receiver status: $error');
+      stateGlobal.svcStatus.value = SvcStatus.notReady;
+      stateGlobal.videoConnCount.value = 0;
+      _activeSessionCount.value = 0;
+      _runtimeError.value = translate('Unable to read receiver status');
+    } finally {
+      _updating = false;
+    }
   }
 }
 
@@ -168,6 +184,9 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
 
   final FocusNode _idFocusNode = FocusNode();
   final TextEditingController _idEditingController = TextEditingController();
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  bool _rememberPassword = false;
   List<LanIdentityProfile> _lanIdentities = const [];
   Timer? _lanDiscoveryTimer;
 
@@ -200,12 +219,13 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
     Get.put<IDTextEditingController>(_idController);
     windowManager.addListener(this);
     _reloadLanIdentities();
-    _refreshPeers();
+    _loadSelectedPeers();
     _lanDiscoveryTimer = Timer.periodic(lanDiscoveryRefreshInterval, (_) {
       if (shouldRefreshLanDiscovery(
+        lanTabSelected: widget.selectedPeerTab == PeerTabIndex.lan,
         windowMinimized: isWindowMinimized,
       )) {
-        _refreshPeers();
+        bind.mainDiscover();
       }
     });
   }
@@ -217,7 +237,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
         oldWidget.favoriteGroupId != widget.favoriteGroupId) {
       peerSearchText.value = '';
       peerSearchTextController.clear();
-      _refreshPeers();
+      _loadSelectedPeers();
     }
   }
 
@@ -231,14 +251,9 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
         break;
       case PeerTabIndex.lan:
         bind.mainLoadLanPeers();
+        bind.mainDiscover();
         break;
     }
-  }
-
-  void _refreshPeers() {
-    // Reload first so expired cache entries immediately become unknown.
-    _loadSelectedPeers();
-    bind.mainDiscover();
   }
 
   void _reloadLanIdentities() {
@@ -253,6 +268,8 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
     _idFocusNode.removeListener(onFocusChanged);
     _idFocusNode.dispose();
     _idEditingController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
     if (Get.isRegistered<IDTextEditingController>()) {
       Get.delete<IDTextEditingController>();
     }
@@ -273,13 +290,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
         Get.forceAppUpdate();
       }
       isWindowMinimized = false;
-      _refreshPeers();
     }
-  }
-
-  @override
-  void onWindowFocus() {
-    if (!isWindowMinimized) _refreshPeers();
   }
 
   @override
@@ -332,6 +343,8 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
     };
     return Column(
       children: [
+        Padding(padding: const EdgeInsets.symmetric(horizontal: 22),
+          child: OnlineStatusWidget()),
         Container(
           height: 72,
           padding: const EdgeInsets.symmetric(horizontal: 22),
@@ -342,6 +355,13 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
           child: Row(
             children: [
               const Spacer(),
+              IconButton(tooltip: translate('Check connection'),
+                onPressed: () => showConnectionDiagnostic(context, ''),
+                icon: const Icon(Icons.network_check)),
+              if (widget.selectedPeerTab == PeerTabIndex.lan)
+                IconButton(tooltip: translate('Scan IP range'),
+                  onPressed: () => showScanRangeDialog(context),
+                  icon: const Icon(Icons.travel_explore)),
               OutlinedButton.icon(
                 onPressed: () async {
                   await showLanIdentityManager(context);
@@ -386,7 +406,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                     onChanged: (value) => peerSearchText.value = value,
                     decoration: InputDecoration(
                       hintText:
-                          '${translate('Search')} · ${translate('Local Address')}',
+                          '${translate('Search')} · ${translate('Name')} / IP / ${translate('Group')}',
                       prefixIcon: const Icon(Icons.search, size: 21),
                       suffixIcon: Obx(
                         () => peerSearchText.value.isEmpty
@@ -438,37 +458,34 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                               peers.peers.map((peer) => peer.id),
                               widget.favoriteGroupId,
                             )
-                          : peers.peers.length;
-                      return Row(
-                        children: [
-                          Expanded(
-                            child: Text.rich(
-                              TextSpan(
-                                children: [
-                                  TextSpan(
-                                    text: sectionTitle(),
-                                    style: const TextStyle(
-                                      fontSize: 20,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                  TextSpan(
-                                    text: '  ($count)',
-                                    style: TextStyle(
-                                      fontSize: 15,
-                                      color: Theme.of(context).hintColor,
-                                    ),
-                                  ),
-                                ],
+                          : widget.selectedPeerTab == PeerTabIndex.lan
+                              // The Discovered list only shows currently-online
+                              // devices, so the header must count the same set;
+                              // otherwise an offline device keeps the old
+                              // number up while the list is empty.
+                              ? peers.peers
+                                  .where(includeInDiscoveredList)
+                                  .length
+                              : peers.peers.length;
+                      return Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text: sectionTitle(),
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w600,
                               ),
                             ),
-                          ),
-                          IconButton(
-                            tooltip: translate('Refresh devices'),
-                            icon: const Icon(Icons.refresh),
-                            onPressed: _refreshPeers,
-                          ),
-                        ],
+                            TextSpan(
+                              text: '  ($count)',
+                              style: TextStyle(
+                                fontSize: 15,
+                                color: Theme.of(context).hintColor,
+                              ),
+                            ),
+                          ],
+                        ),
                       );
                     },
                   ),
@@ -563,71 +580,151 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
   }
 
   Future<void> _showAddDeviceDialog(BuildContext context) async {
+    if (isWindows) {
+      final selection = await showDialog<WindowsLanAccessSelection>(context: context,
+        builder: (_) => WindowsLanAccessDialog(endpoint: _idController.id,
+          editEndpoint: true, translateText: translate));
+      if (selection == null || !context.mounted) return;
+      await connect(context, selection.endpoint, password: selection.payload,
+        lanAccessSelected: true);
+      return;
+    }
     _reloadLanIdentities();
-    var selectedIdentityId = preferredLanIdentityId(_lanIdentities);
+    var selectedIdentityId = lanIdentityManualValue;
     var bindIdentity = true;
 
     await showDialog<void>(
       context: context,
       builder: (dialogContext) => StatefulBuilder(
         builder: (context, setDialogState) {
+          final usingIdentity = selectedIdentityId != lanIdentityManualValue;
+
           Future<void> connectNow() async {
-            if (selectedIdentityId == null) return;
             final connected = await onConnect(
-              identityId: selectedIdentityId,
-              bindIdentity: bindIdentity,
+              identityId: usingIdentity ? selectedIdentityId : null,
+              bindIdentity: usingIdentity && bindIdentity,
             );
             if (connected && dialogContext.mounted) {
               Navigator.of(dialogContext).pop();
             }
           }
 
-          Future<void> editAccounts({bool add = false}) async {
-            String? createdId;
-            if (add) {
-              createdId = await showLanIdentityEditor(context);
-            } else {
-              await showLanIdentityManager(context);
-            }
-            if (!dialogContext.mounted) return;
+          Future<void> manageIdentities() async {
+            await showLanIdentityManager(context);
             _reloadLanIdentities();
-            setDialogState(() {
-              selectedIdentityId = preferredLanIdentityId(
-                _lanIdentities,
-                selectedId: createdId ?? selectedIdentityId,
-              );
-            });
+            if (!_lanIdentities.any(
+              (identity) => identity.id == selectedIdentityId,
+            )) {
+              selectedIdentityId =
+                  defaultLanIdentityId(_lanIdentities) ??
+                  lanIdentityManualValue;
+            }
+            if (dialogContext.mounted) {
+              setDialogState(() {});
+            }
+          }
+
+          Future<void> createIdentity() async {
+            final identityId = await showLanIdentityEditor(context);
+            if (identityId == null) return;
+            _reloadLanIdentities();
+            selectedIdentityId = identityId;
+            if (dialogContext.mounted) {
+              setDialogState(() {});
+            }
           }
 
           return AlertDialog(
-            title: Text(translate('Add')),
-            content: SizedBox(
-              width: 440,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: _idEditingController,
-                    focusNode: _idFocusNode,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    decoration: InputDecoration(
-                      labelText: '${translate('Local Address')} (IP / DNS)',
-                      prefixIcon: const Icon(Icons.desktop_windows_outlined),
-                    ),
-                    onChanged: (value) => _idController.id = value,
+          title: Text(translate('Add')),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: _idEditingController,
+                  focusNode: _idFocusNode,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: InputDecoration(
+                    labelText: '${translate('Local Address')} (IP / DNS)',
+                    prefixIcon: const Icon(Icons.desktop_windows_outlined),
+                  ),
+                  onChanged: (value) => _idController.id = value,
                     onSubmitted: (_) => connectNow(),
+                ),
+                const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          key: ValueKey(selectedIdentityId),
+                          initialValue: selectedIdentityId,
+                          decoration: InputDecoration(
+                            labelText: translate('Account'),
+                            prefixIcon: const Icon(Icons.badge_outlined),
+                          ),
+                          items: [
+                            DropdownMenuItem(
+                              value: lanIdentityManualValue,
+                              child: Text(
+                                translate('Password'),
+                              ),
+                            ),
+                            ..._lanIdentities.map(
+                              (identity) => DropdownMenuItem(
+                                value: identity.id,
+                                child: Text(
+                                  identity.isDefault
+                                      ? '${identity.name} (${translate('Default')})'
+                                      : identity.name,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) => setDialogState(
+                            () => selectedIdentityId =
+                                value ?? lanIdentityManualValue,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: translate('Add'),
+                        onPressed: createIdentity,
+                        icon: const Icon(Icons.person_add_alt_1_outlined),
+                      ),
+                      IconButton(
+                        tooltip: translate('Settings'),
+                        onPressed: manageIdentities,
+                        icon: const Icon(Icons.settings_outlined),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
-                  LanIdentitySelector(
-                    identities: _lanIdentities,
-                    selectedId: selectedIdentityId,
-                    onChanged: (value) =>
-                        setDialogState(() => selectedIdentityId = value),
-                    onAdd: () => editAccounts(add: true),
-                    onManage: editAccounts,
+                  if (!usingIdentity) ...[
+                TextField(
+                  controller: _passwordController,
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  decoration: InputDecoration(
+                    labelText: translate('Password'),
+                    prefixIcon: const Icon(Icons.lock_outline),
                   ),
-                  if (selectedIdentityId != null)
+                      onSubmitted: (_) => connectNow(),
+                ),
+                CheckboxListTile(
+                  value: _rememberPassword,
+                  onChanged: (value) => setDialogState(
+                    () => _rememberPassword = value == true,
+                  ),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: Text(translate('Remember password')),
+                ),
+                  ] else
                     CheckboxListTile(
                       value: bindIdentity,
                       onChanged: (value) =>
@@ -636,26 +733,22 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
                       dense: true,
                       controlAffinity: ListTileControlAffinity.leading,
                       title: Text(
-                        subnetText(
-                          context,
-                          '记住此设备使用的账号',
-                          'Remember this account for this device',
-                        ),
+                        '${translate('Remember password')} · ${translate('Account')}',
                       ),
                     ),
-                ],
-              ),
+              ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext).pop(),
-                child: Text(translate('Cancel')),
-              ),
-              ElevatedButton(
-                onPressed: selectedIdentityId == null ? null : connectNow,
-                child: Text(translate('Connect')),
-              ),
-            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(translate('Cancel')),
+            ),
+            ElevatedButton(
+                onPressed: connectNow,
+              child: Text(translate('Connect')),
+            ),
+          ],
           );
         },
       ),
@@ -672,13 +765,23 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
     bool bindIdentity = false,
   }) async {
     final endpoint = _idController.id;
+    final password = _passwordController.text;
     if (endpoint.isEmpty) {
-      showToast(translate('Local Address'));
+      showToast(
+        translate('Local Address'),
+      );
       return false;
     }
-    final credentialPayload = identityId == null
+    final credentialPayload = identityId != null
+        ? buildLanIdentityPayload(identityId, bindIdentity: bindIdentity)
+        : password.isEmpty
         ? null
-        : buildLanIdentityPayload(identityId, bindIdentity: bindIdentity);
+        : jsonEncode({
+            'lan_version': 1,
+            'username': '',
+            'password': password,
+            'remember': _rememberPassword,
+          });
     await connect(
       context,
       endpoint,
@@ -687,6 +790,7 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
       isTerminal: isTerminal,
       password: credentialPayload,
     );
+    _passwordController.clear();
     return true;
   }
 }

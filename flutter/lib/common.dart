@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'package:flutter_hbb/common/widgets/subnet_ui.dart';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:app_links/app_links.dart';
 import 'package:back_button_interceptor/back_button_interceptor.dart';
@@ -38,6 +36,8 @@ import 'mobile/pages/remote_page.dart';
 import 'mobile/pages/view_camera_page.dart';
 import 'mobile/pages/terminal_page.dart';
 import 'desktop/pages/remote_page.dart' as desktop_remote;
+import 'desktop/widgets/windows_lan_access_dialog.dart';
+import 'desktop/widgets/windows_file_transfer_access.dart';
 import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
@@ -64,7 +64,6 @@ final isWebOnWindows = isWebOnWindows_;
 final isWebOnLinux = isWebOnLinux_;
 final isWebOnMacOs = isWebOnMacOS_;
 var isMobile = isAndroid || isIOS;
-bool desktopTrayAvailable = false;
 var version = '';
 int androidVersion = 0;
 
@@ -86,6 +85,8 @@ const double _kPositionEpsilon = 1e-6;
 
 bool get isMainDesktopWindow =>
     desktopType == DesktopType.main || desktopType == DesktopType.cm;
+
+String get screenInfo => screenInfo_;
 
 /// Check if the app is running with single view mode.
 bool isSingleViewApp() {
@@ -262,17 +263,17 @@ class ColorThemeExtension extends ThemeExtension<ColorThemeExtension> {
 class MyTheme {
   MyTheme._();
 
-  static const Color grayBg = Color(0xFFF0EAF2);
-  static const Color accent = Color(0xFF332B3B);
-  static const Color accent50 = Color(0x77332B3B);
-  static const Color accent80 = Color(0xAA332B3B);
+  static const Color grayBg = Color(0xFFEFEFF2);
+  static const Color accent = Color(0xFF0071FF);
+  static const Color accent50 = Color(0x770071FF);
+  static const Color accent80 = Color(0xAA0071FF);
   static const Color canvasColor = Color(0xFF212121);
   static const Color border = Color(0xFFCCCCCC);
   static const Color idColor = Color(0xFF00B6F0);
   static const Color darkGray = Color.fromARGB(255, 148, 148, 148);
   static const Color cmIdColor = Color(0xFF21790B);
   static const Color dark = Colors.black87;
-  static const Color button = Color(0xFF332B3B);
+  static const Color button = Color(0xFF2C8CFF);
   static const Color hoverBorder = Color(0xFF999999);
 
   // ListTile
@@ -591,8 +592,8 @@ class MyTheme {
   );
 
   static void applyPlatformFontFallback(TargetPlatform platform) {
-    lightTheme = applySafePlatformFontFallback(SubnetPalette.apply(lightTheme), platform);
-    darkTheme = applySafePlatformFontFallback(SubnetPalette.apply(darkTheme), platform);
+    lightTheme = applySafePlatformFontFallback(lightTheme, platform);
+    darkTheme = applySafePlatformFontFallback(darkTheme, platform);
   }
 
   static ThemeMode getThemeModePreference() {
@@ -687,7 +688,7 @@ List<Locale> supportedLocales = const [
   Locale('da'),
   Locale('eo'),
   Locale('tr'),
-  Locale('kk'),
+  Locale('kz'),
   Locale('es'),
   Locale('nl'),
   Locale('nb'),
@@ -695,7 +696,7 @@ List<Locale> supportedLocales = const [
   Locale('eu'),
   Locale('bg'),
   Locale('be'),
-  Locale('vi'),
+  Locale('vn'),
   Locale('uk'),
   Locale('fa'),
   Locale('ca'),
@@ -711,12 +712,6 @@ List<Locale> supportedLocales = const [
   Locale('ar'),
   Locale('he'),
   Locale('hr'),
-  Locale('fi'),
-  Locale('ka'),
-  Locale('ta'),
-  Locale('ml'),
-  Locale('hi'),
-  Locale('gu'),
 ];
 
 String formatDurationToTime(Duration duration) {
@@ -763,127 +758,6 @@ closeConnection({String? id}) {
   }
 }
 
-// TODO(upstream window_manager): rustdesk-org/window_manager's Linux plugin
-// raises the window via a bare gtk_window_present(get_window(self))
-// (linux/window_manager_plugin.cc), with no timestamp -- GTK treats that as
-// GDK_CURRENT_TIME, which every modern WM's focus-stealing prevention
-// (Mutter, KWin) can defer or ignore when it doesn't follow a live GTK
-// input event (e.g. right after a slow Flutter cold start triggered by the
-// tray's "Open", or a D-Bus-triggered re-show of an already-hidden window).
-// A matching Rust-side workaround exists in src/server/dbus.rs for the
-// D-Bus entry point, but it only retries for ~1s from the moment of the
-// tray click -- nowhere near long enough to cover a slow cold start, since
-// the window doesn't exist yet for xdotool to find. Firing this here,
-// immediately after show()/focus() actually return, runs it at exactly the
-// right moment regardless of how long startup took, instead of guessing a
-// timeout. xdotool sends a proper EWMH _NET_ACTIVE_WINDOW client message
-// (source_indication=2, "pager"), which WMs honor without the same
-// timestamp scrutiny. Best-effort: xdotool is optional (Recommends on the
-// .deb, a hard dependency on the Arch package) and any failure -- missing
-// binary, no matching window -- is swallowed silently, leaving prior
-// behavior. Remove once window_manager's Linux backend calls
-// gtk_window_present_with_time() with a real server timestamp instead.
-// Note this searches by PID, not a specific window handle: desktop_multi_
-// window runs every window (main plus every remote-desktop/file-transfer/
-// etc. sub-window) in this one process, so a call here can end up raising
-// more than the intended window when several are open. That's an accepted
-// imprecision of this best-effort workaround, not a targeted fix -- see
-// multi_window_manager.dart's `_newSession` for the other call site.
-//
-// KWin (KDE Plasma) applies a stricter focus-stealing-prevention policy to
-// this externally-sourced EWMH request than GNOME/Mutter does: the same
-// xdotool call below activates a window within ~0.3s under Mutter but was
-// observed (live-tested, 2026-09-12) taking several seconds under KWin,
-// until some unrelated fresh user input event (e.g. right-clicking the
-// tray again) happened to make KWin finally honor it. _activateViaKWinScript
-// sidesteps that policy entirely by using KWin's own scripting D-Bus
-// interface (org.kde.KWin, /Scripting) to set `workspace.activeWindow`
-// directly -- an internal, privileged KWin mechanism, not an external
-// activation *request* -- verified live to activate instantly where
-// xdotool alone was unreliable. A near-identical implementation exists in
-// src/server/dbus.rs's activate_via_kwin_script() for the D-Bus entry
-// point; duplicated here via a plain dbus-send shell-out (matching this
-// function's existing xdotool pattern) rather than adding a new FFI
-// binding just for this best-effort, KDE-only workaround.
-Future<void> _activateViaKWinScript() async {
-  Directory? scriptDir;
-  try {
-    // A shared temp dir keyed only on the PID is a symlink/overwrite target
-    // for another local user (see the matching hardening in
-    // src/server/dbus.rs's activate_via_kwin_script()). createTemp() creates
-    // a privately-owned, uniquely-named directory atomically.
-    scriptDir =
-        await Directory.systemTemp.createTemp('subnetdesk-kwin-activate-');
-    final scriptPath = '${scriptDir.path}/$pid.js';
-    final pluginName = 'subnetdesk-activate-$pid';
-    // `workspace.windowList()` (KWin 5) was renamed to the `workspace.windows`
-    // property in KWin 6's scripting API; support either.
-    //
-    // Setting `activeWindow` alone is not enough: live-tested (2026-09-12),
-    // the main window ends up in KWin's window list with `minimized: true`
-    // (window_manager's `.show()` on Linux doesn't restore a minimized
-    // window itself), and `workspace.activeWindow = win` silently does
-    // nothing for a still-minimized window. Explicitly clearing `minimized`
-    // first is what actually brings it on screen.
-    final script = "var wins = (typeof workspace.windowList === 'function') "
-        "? workspace.windowList() : workspace.windows;\n"
-        "for (var i = 0; i < wins.length; i++) {\n"
-        "\tif (wins[i].pid == $pid) {\n"
-        "\t\twins[i].minimized = false;\n"
-        "\t\tworkspace.activeWindow = wins[i];\n"
-        "\t}\n"
-        "}\n";
-    await File(scriptPath).writeAsString(script);
-    final loadResult = await Process.run('dbus-send', [
-      '--session',
-      '--print-reply',
-      '--dest=org.kde.KWin',
-      '/Scripting',
-      'org.kde.kwin.Scripting.loadScript',
-      'string:$scriptPath',
-      'string:$pluginName',
-    ]);
-    final match =
-        RegExp(r'int32\s+(-?\d+)').firstMatch(loadResult.stdout.toString());
-    if (match != null) {
-      final scriptId = match.group(1);
-      await Process.run('dbus-send', [
-        '--session',
-        '--print-reply',
-        '--dest=org.kde.KWin',
-        '/Scripting/Script$scriptId',
-        'org.kde.kwin.Script.run',
-      ]);
-      await Process.run('dbus-send', [
-        '--session',
-        '--print-reply',
-        '--dest=org.kde.KWin',
-        '/Scripting',
-        'org.kde.kwin.Scripting.unloadScript',
-        'string:$pluginName',
-      ]);
-    }
-    try {
-      await scriptDir.delete(recursive: true);
-    } catch (_) {}
-  } catch (_) {
-    // dbus-send missing, or org.kde.KWin absent (non-KDE desktop) -- harmless no-op.
-    try {
-      await scriptDir?.delete(recursive: true);
-    } catch (_) {}
-  }
-}
-
-Future<void> activateWindowWorkaroundLinux() async {
-  if (!isLinux) return;
-  await _activateViaKWinScript();
-  try {
-    await Process.run('xdotool', ['search', '--pid', '$pid', 'windowactivate']);
-  } catch (_) {
-    // xdotool not installed -- harmless no-op.
-  }
-}
-
 Future<void> windowOnTop(int? id) async {
   if (!isDesktop) {
     return;
@@ -896,7 +770,6 @@ Future<void> windowOnTop(int? id) async {
     }
     await windowManager.show();
     await windowManager.focus();
-    await activateWindowWorkaroundLinux();
     await rustDeskWinManager.registerActiveWindow(kWindowMainId);
   } else {
     WindowController.fromWindowId(id)
@@ -906,7 +779,7 @@ Future<void> windowOnTop(int? id) async {
   }
 }
 
-typedef DialogBuilder = CustomAlertDialog Function(
+typedef DialogBuilder = Widget Function(
   StateSetter setState,
   void Function([dynamic]) close,
   BuildContext context,
@@ -1512,7 +1385,7 @@ Color? _msgboxColor(String type) {
   if (type.contains("error") || type == "re-input-password") {
     return Color(0xFFE04F5F);
   }
-  return Color(0xFF332B3B);
+  return Color(0xFF2C8CFF);
 }
 
 Widget msgboxIcon(String type) {
@@ -1728,6 +1601,18 @@ class AccessibilityListener extends StatelessWidget {
       child: child,
     );
   }
+}
+
+/// Android outgoing voice call: request the microphone at runtime, only when
+/// the user starts a voice call. Returns true when granted (or not Android).
+Future<bool> ensureAndroidVoiceCallMicrophone() async {
+  if (!isAndroid) return true;
+  if (await AndroidPermissionManager.check(kRecordAudio)) return true;
+  final granted = await AndroidPermissionManager.request(kRecordAudio);
+  if (!granted) {
+    showToast(translate('Microphone permission is required for voice calls'));
+  }
+  return granted;
 }
 
 class AndroidPermissionManager {
@@ -2193,41 +2078,16 @@ Future _saveSessionWindowPosition(
   }
 }
 
-Size mainWindowSizeForWorkArea(Size desired, Size workArea) {
-  final minSize = kDesktopMainWindowMinimumSize;
-  return Size(
-    desired.width.clamp(minSize.width,
-        workArea.width < minSize.width ? minSize.width : workArea.width).toDouble(),
-    desired.height.clamp(minSize.height,
-        workArea.height < minSize.height ? minSize.height : workArea.height).toDouble(),
-  );
-}
-
-Future<Size> fitMainWindowToCurrentScreen(Size desired) async {
-  try {
-    final screen = await window_size.getCurrentScreen();
-    if (screen != null) {
-      // window_size returns physical screen coordinates on Windows, points on macOS.
-      final scale = isWindows && screen.scaleFactor > 0 ? screen.scaleFactor : 1.0;
-      return mainWindowSizeForWorkArea(desired,
-          Size(screen.visibleFrame.width / scale, screen.visibleFrame.height / scale));
-    }
-  } catch (error) {
-    debugPrint('Unable to read main-window work area: $error');
-  }
-  return desired;
-}
-
-Future<Size> _adjustRestoreMainWindowSize(double? width, double? height, {Size? fallbackSize}) async {
+Future<Size> _adjustRestoreMainWindowSize(double? width, double? height) async {
   const double minWidth = 1;
   const double minHeight = 1;
   const double maxWidth = 6480;
   const double maxHeight = 6480;
 
-  final defaultWidth = fallbackSize?.width ??
+  final defaultWidth =
       ((isDesktop || isWebDesktop) ? 1280 : kMobileDefaultDisplayWidth)
           .toDouble();
-  final defaultHeight = fallbackSize?.height ??
+  final defaultHeight =
       ((isDesktop || isWebDesktop) ? 720 : kMobileDefaultDisplayHeight)
           .toDouble();
   double restoreWidth = width ?? defaultWidth;
@@ -2389,11 +2249,7 @@ Future<bool> restoreWindowPosition(
     }
   }
 
-  var size = await _adjustRestoreMainWindowSize(lpos.width, lpos.height,
-      fallbackSize: type == WindowType.Main ? kDesktopMainWindowSize : null);
-  if (type == WindowType.Main && !bind.isIncomingOnly()) {
-    size = await fitMainWindowToCurrentScreen(size);
-  }
+  final size = await _adjustRestoreMainWindowSize(lpos.width, lpos.height);
   final offsetLeftTop = await _adjustRestoreMainWindowOffset(
     lpos.offsetWidth,
     lpos.offsetHeight,
@@ -2751,6 +2607,16 @@ connectMainDesktop(
   }
 }
 
+Future<void> connectWindowsFileTransfer(BuildContext context, String id) async {
+  final stableContext = Navigator.of(context, rootNavigator: true).context;
+  await requestWindowsFileTransferAccess(stableContext, id,
+    translateText: translate, connect: (selection) async {
+      if (!stableContext.mounted) return;
+      await connect(stableContext, selection.endpoint, isFileTransfer: true,
+        password: selection.payload, lanAccessSelected: true);
+    });
+}
+
 /// Connect to a peer with [id].
 /// If [isFileTransfer], starts a session only for file transfer.
 /// If [isViewCamera], starts a session only for view camera.
@@ -2766,8 +2632,33 @@ connect(
   bool isRDP = false,
   String? password,
   String? username,
+  bool lanAccessSelected = false,
 }) async {
+  if (bind.isIncomingOnly()) {
+    showToast(translate('This device is receiver-only and cannot connect to other devices'));
+    return;
+  }
   if (id == '') return;
+  if (isViewCamera) {
+    showToast('Camera access is disabled in this private build');
+    return;
+  }
+  // Covers discovered/recent/favorite cards, not only the Add dialog. Explicit
+  // legacy account payloads keep their existing path; Android is unchanged.
+  if (isWindows &&
+      !lanAccessSelected &&
+      (password == null || password.isEmpty) &&
+      !isTerminal && !isTcpTunneling && !isRDP) {
+    if (isFileTransfer) {
+      await connectWindowsFileTransfer(context, id);
+      return;
+    }
+    final selection = await showDialog<WindowsLanAccessSelection>(
+      context: context,
+      builder: (_) => WindowsLanAccessDialog(endpoint: id, translateText: translate));
+    if (selection == null || !context.mounted) return;
+    password = selection.payload;
+  }
   if (!isDesktop || desktopType == DesktopType.main) {
     try {
       if (Get.isRegistered<IDTextEditingController>()) {
@@ -2810,13 +2701,8 @@ connect(
     }
   } else {
     if (isFileTransfer) {
-      if (isAndroid) {
-        if (!await AndroidPermissionManager.check(kManageExternalStorage)) {
-          if (!await AndroidPermissionManager.request(kManageExternalStorage)) {
-            return;
-          }
-        }
-      }
+      // Android uses the app transfer folder plus the system file picker, so
+      // outgoing file transfer needs no broad storage permission.
       if (isWeb) {
         Navigator.push(
           context,
@@ -2996,18 +2882,51 @@ bool isRunningInPortableMode() {
 }
 
 /// Window status callback
-/// All windows may be hidden while the host continues accepting connections.
 Future<void> onActiveWindowChanged() async {
+  print(
+    "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}",
+  );
   if (rustDeskWinManager.getActiveWindows().isEmpty) {
-    await windowManager.hide();
+    // close all sub windows
+    try {
+      if (isLinux) {
+        await Future.wait([
+          saveWindowPosition(WindowType.Main),
+          rustDeskWinManager.closeAllSubWindows(),
+        ]);
+      } else {
+        await rustDeskWinManager.closeAllSubWindows();
+      }
+    } catch (err) {
+      debugPrintStack(label: "$err");
+    } finally {
+      debugPrint("Start closing SubnetDesk...");
+      await windowManager.setPreventClose(false);
+      await windowManager.close();
+      if (isMacOS) {
+        // If we call without delay, `flutter/macos/Runner/MainFlutterWindow.swift` can handle the "terminate" event.
+        // But the app will not close.
+        //
+        // No idea why we need to delay here, `terminate()` itself is also an async function.
+        //
+        // A quick workaround, use `Timer.periodic` to avoid the app not closing.
+        // Because `await windowManager.close()` and `RdPlatformChannel.instance.terminate()`
+        // may not work since `Flutter 3.24.4`, see the following logs.
+        // A delay will allow the app to close.
+        //
+        //```
+        // embedder.cc (2725): 'FlutterPlatformMessageCreateResponseHandle' returned 'kInvalidArguments'. Engine handle was invalid.
+        // 2024-11-11 11:41:11.546 RustDesk[90272:2567686] Failed to create a FlutterPlatformMessageResponseHandle (2)
+        // embedder.cc (2672): 'FlutterEngineSendPlatformMessage' returned 'kInvalidArguments'. Invalid engine handle.
+        // 2024-11-11 11:41:11.565 RustDesk[90272:2567686] Failed to send message to Flutter engine on channel 'flutter/lifecycle' (2).
+        // ```
+        periodic_immediate(
+          Duration(milliseconds: 30),
+          RdPlatformChannel.instance.terminate,
+        );
+      }
+    }
   }
-}
-
-Future<void> quitDesktopApp() async {
-  await saveWindowPosition(WindowType.Main);
-  await rustDeskWinManager.closeAllSubWindows();
-  await bind.mainSetLocalOption(key: 'desktop-shutdown', value: 'Y');
-  await RdPlatformChannel.instance.terminate();
 }
 
 Timer periodic_immediate(Duration duration, Future<void> Function() callback) {
@@ -3040,9 +2959,6 @@ int getWindowsTargetBuildNumber() {
 }
 
 bool get isWin10 => windowsBuildNumber.windowsVersion == WindowsTarget.w10;
-
-bool get isWin7 =>
-    isWindows && windowsBuildNumber >= 7600 && windowsBuildNumber < 9200;
 
 Widget dialogButton(
   String text, {
@@ -3192,7 +3108,12 @@ Future<bool> callMainCheckSuperUserPermission() async {
 }
 
 Future<void> start_service(bool is_start) async {
-  await mainSetBoolOption(kOptionStopService, !is_start);
+  bool checked = !bind.mainIsInstalled() ||
+      !isMacOS ||
+      await callMainCheckSuperUserPermission();
+  if (checked) {
+    await mainSetBoolOption(kOptionStopService, !is_start);
+  }
 }
 
 Future<bool> canBeBlocked() async {
@@ -3934,8 +3855,7 @@ disableWindowMovable(int? windowId) {
   }
 }
 
-// Win7 uses a fully frameless main window, so Flutter must provide every edge.
-List<ResizeEdge>? get windowManagerEnableResizeEdges => isWindows && !isWin7
+List<ResizeEdge>? get windowManagerEnableResizeEdges => isWindows
     ? [ResizeEdge.topLeft, ResizeEdge.top, ResizeEdge.topRight]
     : null;
 
@@ -4026,6 +3946,24 @@ void updateTextAndPreserveSelection(
       baseOffset: 0,
       extentOffset: controller.value.text.length,
     );
+  }
+}
+
+List<String> getPrinterNames() {
+  final printerNamesJson = bind.mainGetPrinterNames();
+  if (printerNamesJson.isEmpty) {
+    return [];
+  }
+  try {
+    final List<dynamic> printerNamesList = jsonDecode(printerNamesJson);
+    final appPrinterName = '$appName Printer';
+    return printerNamesList
+        .map((e) => e.toString())
+        .where((name) => name != appPrinterName)
+        .toList();
+  } catch (e) {
+    debugPrint('failed to parse printer names, err: $e');
+    return [];
   }
 }
 

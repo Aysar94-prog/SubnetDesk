@@ -18,5 +18,6 @@ void UninstallDriver(LPCWSTR hardwareId, BOOL &rebootRequired);
 
 namespace RemotePrinter
 {
+    VOID installUpdatePrinter(const std::wstring& installFolder);
     VOID uninstallPrinter();
 }

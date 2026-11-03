@@ -7,16 +7,16 @@ use crate::{
     ui_interface::use_texture_render,
 };
 use async_trait::async_trait;
-#[cfg(all(target_os = "windows", not(feature = "flutter")))]
-use base::config::keys;
-#[cfg(not(feature = "flutter"))]
-use base::fs;
-use base::message_proto::*;
 use bytes::Bytes;
+#[cfg(all(target_os = "windows", not(feature = "flutter")))]
+use hbb_common::config::keys;
+#[cfg(not(feature = "flutter"))]
+use hbb_common::fs;
 use hbb_common::{
     allow_err,
     config::{Config, PeerConfig},
     get_version_number, log,
+    message_proto::*,
     rendezvous_proto::ConnType,
     tokio::{
         self,
@@ -55,6 +55,8 @@ const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct LanSessionCredential {
+    pub access_method: u32,
+    pub temporary_code: String,
     pub username: String,
     pub password: Vec<u8>,
     pub remember: bool,
@@ -83,6 +85,7 @@ pub struct Session<T: InvokeUiSession> {
     pub server_clipboard_enabled: Arc<RwLock<bool>>,
     pub last_change_display: Arc<Mutex<ChangeDisplayRecord>>,
     pub connection_round_state: Arc<Mutex<ConnectionRoundState>>,
+    pub printer_names: Arc<RwLock<HashMap<i32, String>>>,
     // Indicate whether the session is reconnected.
     // Used to auto start file transfer after reconnection.
     pub reconnect_count: Arc<AtomicUsize>,
@@ -217,9 +220,11 @@ impl<T: InvokeUiSession> Session<T> {
         mut password: String,
         remember: bool,
     ) -> hbb_common::ResultType<()> {
-        let username = hbb_common::lan::validate_username(&username)?;
+        let username = hbb_common::lan::validate_credential_username(&username)?;
         hbb_common::lan::validate_password(password.as_bytes())?;
         let credential = LanSessionCredential {
+            access_method: hbb_common::lan::ACCESS_PASSWORD,
+            temporary_code: String::new(),
             username: username.clone(),
             password: password.as_bytes().to_vec(),
             remember,
@@ -231,6 +236,30 @@ impl<T: InvokeUiSession> Session<T> {
         *self.lan_identity_request.lock().unwrap() = None;
         *self.lan_credential.lock().unwrap() = Some(credential);
         self.send(Data::SubmitLanCredentials);
+        Ok(())
+    }
+
+    pub fn submit_optional_file_access(&self, method: u32, code: String) -> hbb_common::ResultType<()> {
+        let code = zeroize::Zeroizing::new(code);
+        {
+            let login = self.lc.read().unwrap();
+            crate::file_transfer_access::validate_optional_retry(
+                login.conn_type == ConnType::FILE_TRANSFER, login.peer_info.is_some(), method, &code)
+                .map_err(|error| hbb_common::anyhow::anyhow!(error))?;
+        }
+        let sender = self.sender.read().unwrap().as_ref().cloned()
+            .ok_or_else(|| hbb_common::anyhow::anyhow!("Connection is no longer available"))?;
+        self.lc.write().unwrap().lan_access_username.clear();
+        *self.lan_identity_request.lock().unwrap() = None;
+        *self.lan_credential.lock().unwrap() = Some(LanSessionCredential {
+            access_method: method, temporary_code: code.to_string(),
+            username: String::new(), password: Vec::new(), remember: false,
+            identity_id: String::new(), bind_identity_on_success: false,
+        });
+        if sender.send(Data::SubmitLanCredentials).is_err() {
+            *self.lan_credential.lock().unwrap() = None;
+            hbb_common::anyhow::bail!("Connection is no longer available");
+        }
         Ok(())
     }
 
@@ -828,6 +857,10 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         self.send(Data::Message(msg_out));
+    }
+
+    pub fn request_chat_attention(&self) {
+        self.send(Data::RequestChatAttention);
     }
 
     // Terminal methods
@@ -1632,6 +1665,20 @@ impl<T: InvokeUiSession> Session<T> {
         msg.set_misc(misc);
         self.send(Data::Message(msg));
     }
+
+    pub fn printer_response(&self, id: i32, path: String, printer_name: String) {
+        self.printer_names.write().unwrap().insert(id, printer_name);
+        let to = std::env::temp_dir().join(format!("rustdesk_printer_{id}"));
+        self.send(Data::SendFiles((
+            id,
+            hbb_common::fs::JobType::Printer,
+            path,
+            to.to_string_lossy().to_string(),
+            0,
+            false,
+            true,
+        )));
+    }
 }
 
 pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
@@ -1696,6 +1743,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn is_multi_ui_session(&self) -> bool;
     fn update_record_status(&self, start: bool);
     fn update_empty_dirs(&self, _res: ReadEmptyDirsResponse) {}
+    fn printer_request(&self, id: i32, path: String);
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn handle_terminal_response(&self, response: TerminalResponse);
 }
@@ -1734,6 +1782,12 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     }
 
     async fn handle_login_error(&self, err: &str) -> bool {
+        // Optional login never clears a saved password or falls back to its dialog,
+        // even if a remote version returns a password-specific error string.
+        if self.lan_credential().map(|c| c.access_method != hbb_common::lan::ACCESS_PASSWORD).unwrap_or(false) {
+            self.msgbox("error", "Login Error", err, "");
+            return false;
+        }
         handle_login_error(self.lc.clone(), err, self).await
     }
 
@@ -1789,6 +1843,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         // legacy fingerprint-bound credential only now, never when the user
         // merely submits the dialog.
         if let Some(credential) = self.lan_credential.lock().unwrap().take() {
+            if credential.access_method == hbb_common::lan::ACCESS_PASSWORD {
             let lc = self.lc.clone();
             let interface = self.clone();
             let _ = tokio::task::spawn_blocking(move || {
@@ -1810,9 +1865,12 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                         interface.msgbox("error", "Failed", "Remember password", "");
                     }
                 } else {
-                    lc.clear_remembered_lan_credential();
+                    if lc.clear_remembered_lan_credential_checked().is_err() {
+                        interface.msgbox("error", "Failed", "Unable to remove the saved credential", "");
+                    }
                 }
             });
+            }
         }
         // Save recent peers, then push event to flutter. So flutter can refresh peer page.
         self.lc.write().unwrap().handle_peer_info(&pi);
@@ -1855,6 +1913,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     async fn send_initial_lan_login(&self, peer: &mut Stream) {
         let mut credential = self.lan_credential();
+        if let Some(optional) = credential.as_mut().filter(|c| c.access_method != hbb_common::lan::ACCESS_PASSWORD) {
+            let result = crate::client::send_optional_lan_login(self.lc.clone(), optional.access_method,
+                std::mem::take(&mut optional.temporary_code), peer).await;
+            if let Err(err) = result {
+                self.msgbox("error", "Login Error", &err.to_string(), "");
+                self.send(Data::Close);
+            }
+            return;
+        }
         let mut explicit_identity_requested = false;
         if credential.is_none() {
             let requested_identity = self.lan_identity_request.lock().unwrap().clone();
@@ -1865,14 +1932,18 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     crate::lan_identity::load(&request.identity_id)
                         .map(|identity| Some((identity, request.bind_on_success)))
                 } else {
-                    crate::lan_identity::load_for_fingerprint(&fingerprint)
-                        .map(|identity| identity.map(|identity| (identity, false)))
+                    // Account profiles are legacy, explicit opt-ins. Normal login uses
+                    // a fingerprint-bound saved password, never a hidden account.
+                    let _ = fingerprint;
+                    Ok(None)
                 }
             })
             .await;
             match identity_result {
                 Ok(Ok(Some((identity, bind_identity_on_success)))) => {
                     let identity_credential = LanSessionCredential {
+                        access_method: hbb_common::lan::ACCESS_PASSWORD,
+                        temporary_code: String::new(),
                         username: identity.username,
                         password: identity.password,
                         remember: false,
@@ -1894,23 +1965,27 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             }
         }
         if credential.is_none() && !explicit_identity_requested {
-            // The credential store can wait for OS authorization. Never retain
-            // the session lock while it does so, including after cancellation.
-            let fingerprint = self.lc.read().unwrap().lan_fingerprint.clone();
+            let lc = self.lc.clone();
             let remembered = match tokio::task::spawn_blocking(move || {
-                crate::client::load_remembered_lan_credential_for_fingerprint(&fingerprint)
+                lc.read().unwrap().load_remembered_lan_credential_checked()
             })
             .await
             {
-                Ok(remembered) => remembered,
+                Ok(Ok(remembered)) => remembered,
+                Ok(Err(_)) => {
+                    self.msgbox("error", "Failed", "Unable to read the encrypted credential store. Enter credentials manually or use Forget password.", "");
+                    None
+                }
                 Err(err) => {
                     log::warn!("Failed to read the remembered LAN credential: {err}");
                     None
                 }
             };
-            if let Some((username, password)) = remembered {
+            if let Some((_legacy_username, password)) = remembered {
                 let remembered = LanSessionCredential {
-                    username,
+                    access_method: hbb_common::lan::ACCESS_PASSWORD,
+                    temporary_code: String::new(),
+                    username: String::new(),
                     password,
                     remember: true,
                     identity_id: String::new(),
@@ -1922,18 +1997,22 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             }
         }
         if let Some(mut credential) = credential {
-            crate::client::send_lan_login(
+            let result = crate::client::send_lan_login(
                 self.lc.clone(),
                 std::mem::take(&mut credential.username),
                 std::mem::take(&mut credential.password),
                 peer,
             )
             .await;
+            if let Err(err) = result {
+                self.msgbox("error", "Login Error", &err.to_string(), "");
+                self.send(Data::Close);
+            }
         } else {
             self.msgbox(
                 "lan-login-required",
-                "LAN access credentials required",
-                "Enter the access username and password configured on the remote device.",
+                "Password Required",
+                "Enter the unattended access password configured on the remote device.",
                 "",
             );
         }
@@ -1948,7 +2027,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         peer: &mut Stream,
     ) {
         if let Some(mut credential) = self.lan_credential() {
-            handle_login_from_ui(
+            let result = handle_login_from_ui(
                 self.lc.clone(),
                 os_username,
                 os_password,
@@ -1959,11 +2038,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 peer,
             )
             .await;
+            if let Err(err) = result {
+                self.msgbox("error", "Login Error", &err.to_string(), "");
+                self.send(Data::Close);
+            }
         } else {
             self.msgbox(
                 "lan-login-required",
-                "LAN access credentials required",
-                "Enter the access username and password configured on the remote device.",
+                "Password Required",
+                "Enter the unattended access password configured on the remote device.",
                 "",
             );
         }
@@ -1980,7 +2063,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         }
     }
 
-    fn swap_modifier_mouse(&self, msg: &mut base::protos::message::MouseEvent) {
+    fn swap_modifier_mouse(&self, msg: &mut hbb_common::protos::message::MouseEvent) {
         let allow_swap_key = self.get_toggle_option("allow_swap_key".to_string());
         if allow_swap_key {
             msg.modifiers = msg

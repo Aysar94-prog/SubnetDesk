@@ -1,8 +1,7 @@
-use base::config::keys::{self, *};
 use hbb_common::{
     allow_err,
     bytes::Bytes,
-    config::{self, Config, LocalConfig, PeerConfig, CONNECT_TIMEOUT},
+    config::{self, keys::*, Config, LocalConfig, PeerConfig, CONNECT_TIMEOUT},
     directories_next,
     futures::future::join_all,
     log,
@@ -41,6 +40,8 @@ pub struct UiStatus {
     pub id: String,
     #[cfg(feature = "flutter")]
     pub video_conn_count: usize,
+    #[cfg(feature = "flutter")]
+    pub active_session_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +62,8 @@ lazy_static::lazy_static! {
         id: "".to_owned(),
         #[cfg(feature = "flutter")]
         video_conn_count: 0,
+        #[cfg(feature = "flutter")]
+        active_session_count: 0,
     }));
     static ref ASYNC_JOB_STATUS : Arc<Mutex<String>> = Default::default();
     static ref ASYNC_HTTP_STATUS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
@@ -70,6 +73,7 @@ lazy_static::lazy_static! {
 lazy_static::lazy_static! {
     static ref OPTION_SYNCED: Arc<Mutex<bool>> = Default::default();
     static ref OPTIONS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(Config::get_options()));
+    #[cfg(feature = "flutter")]
     static ref LAN_SERVER_RUNTIME_STATUS: Arc<Mutex<(String, String)>> = Arc::new(Mutex::new((
         crate::lan_server::RUNTIME_STATE_STARTING.to_owned(),
         String::new(),
@@ -105,6 +109,10 @@ pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) 
 
 #[inline]
 pub fn update_me(_path: String) {
+    if !crate::private_build::software_updates_enabled() {
+        log::warn!("{}", crate::private_build::UPDATE_DISABLED_MESSAGE);
+        return;
+    }
     goto_install();
 }
 
@@ -141,10 +149,6 @@ pub fn refresh_options() {
 #[inline]
 pub fn get_option<T: AsRef<str>>(key: T) -> String {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if crate::desktop_runtime::is_host() {
-        return Config::get_option(key.as_ref());
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let map = OPTIONS.lock().unwrap();
         if let Some(v) = map.get(key.as_ref()) {
@@ -168,11 +172,11 @@ pub fn use_texture_render() -> bool {
 
     #[cfg(target_os = "macos")]
     return cfg!(feature = "flutter")
-        && LocalConfig::get_option(keys::OPTION_TEXTURE_RENDER) == "Y";
+        && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) == "Y";
 
     #[cfg(target_os = "linux")]
     return cfg!(feature = "flutter")
-        && LocalConfig::get_option(keys::OPTION_TEXTURE_RENDER) != "N";
+        && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N";
 
     #[cfg(target_os = "windows")]
     {
@@ -185,9 +189,9 @@ pub fn use_texture_render() -> bool {
         #[cfg(not(debug_assertions))]
         let default_texture = crate::platform::is_win_10_or_greater();
         if default_texture {
-            LocalConfig::get_option(keys::OPTION_TEXTURE_RENDER) != "N"
+            LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N"
         } else {
-            return LocalConfig::get_option(keys::OPTION_TEXTURE_RENDER) == "Y";
+            return LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) == "Y";
         }
     }
 }
@@ -293,10 +297,6 @@ pub fn set_peer_option(id: String, name: String, value: String) {
 
 #[inline]
 pub fn get_options() -> String {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if crate::desktop_runtime::is_host() {
-        return serde_json::to_string(&Config::get_options()).unwrap_or_default();
-    }
     let options = {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
@@ -368,12 +368,6 @@ pub fn get_sound_inputs() -> Vec<String> {
 #[inline]
 pub fn set_options(m: HashMap<String, String>) {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if crate::desktop_runtime::is_host() {
-        let _restart = ipc::CheckIfRestart::new();
-        Config::set_options(m);
-        return;
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         *OPTIONS.lock().unwrap() = m.clone();
         ipc::set_options(m).ok();
@@ -382,17 +376,57 @@ pub fn set_options(m: HashMap<String, String>) {
     Config::set_options(m);
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn should_start_portable_service(is_installed: bool, value: &str, running: bool) -> bool {
+    !is_installed && value != "Y" && !running
+}
+
+#[cfg(target_os = "windows")]
+fn start_portable_service_if_needed(value: &str) {
+    if !should_start_portable_service(
+        crate::platform::is_installed(),
+        value,
+        crate::portable_service::client::running(),
+    ) {
+        return;
+    }
+    if let Err(err) = crate::portable_service::client::start_portable_service(
+        crate::portable_service::client::StartPara::Direct,
+    ) {
+        log::warn!("Failed to start Windows portable service: {err}");
+    }
+}
+
 #[inline]
 pub fn set_option(key: String, value: String) {
-    if &key == "audio-input" {
+    if &key == "stop-service" {
+        #[cfg(target_os = "macos")]
+        {
+            let is_stop = value == "Y";
+            if is_stop && crate::platform::uninstall_service(true, false) {
+                return;
+            }
+        }
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            if crate::platform::is_installed() {
+                if value == "Y" {
+                    if crate::platform::uninstall_service(true, false) {
+                        return;
+                    }
+                } else {
+                    if crate::platform::install_service() {
+                        return;
+                    }
+                }
+                return;
+            }
+            #[cfg(target_os = "windows")]
+            start_portable_service_if_needed(&value);
+        }
+    } else if &key == "audio-input" {
         #[cfg(not(target_os = "ios"))]
         crate::audio_service::restart();
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if crate::desktop_runtime::is_host() {
-        let _restart = ipc::CheckIfRestart::new();
-        Config::set_option(key, value);
-        return;
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -410,6 +444,18 @@ pub fn set_option(key: String, value: String) {
     }
 }
 
+#[cfg(test)]
+mod portable_service_tests {
+    use super::should_start_portable_service;
+
+    #[test]
+    fn portable_windows_enable_requests_elevation() {
+        assert!(should_start_portable_service(false, "", false));
+        assert!(!should_start_portable_service(false, "Y", false));
+        assert!(!should_start_portable_service(true, "", false));
+        assert!(!should_start_portable_service(false, "", true));
+    }
+}
 
 #[inline]
 pub fn install_path() -> String {
@@ -482,23 +528,15 @@ pub fn check_mouse_time() {
 #[inline]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn get_connect_status() -> UiStatus {
-    let mut status = UI_STATUS.lock().unwrap().clone();
-    if crate::desktop_runtime::is_host() {
-        status.status_num = if crate::lan_server::LanServer::is_running() { 1 } else { -1 };
-        #[cfg(feature = "flutter")]
-        { status.video_conn_count = crate::server::AUTHED_CONNS.lock().unwrap().iter()
-            .filter(|conn| conn.conn_type == crate::server::AuthConnType::Remote).count(); }
-    }
-    status
+    UI_STATUS.lock().unwrap().clone()
 }
 
 #[inline]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(all(
+    feature = "flutter",
+    not(any(target_os = "android", target_os = "ios"))
+))]
 pub fn get_lan_server_runtime_status() -> (String, String) {
-    if crate::desktop_runtime::is_host() {
-        let status = crate::lan_server::LanServer::runtime_status();
-        return (status.state, status.last_error);
-    }
     LAN_SERVER_RUNTIME_STATUS.lock().unwrap().clone()
 }
 
@@ -622,58 +660,40 @@ pub fn peer_exists(id: &str) -> bool {
 }
 
 #[inline]
-pub fn get_lan_peers() -> Vec<serde_json::Value> {
-    let now = hbb_common::get_time();
+pub fn get_lan_peers() -> Vec<HashMap<&'static str, String>> {
+    let now_ms = hbb_common::get_time();
     config::LanPeers::load()
         .peers
         .iter()
-        .map(|peer| discovery_peer_to_json(peer, now))
+        .map(|peer| {
+            let reachability = match peer.reachability(now_ms) {
+                config::LanReachability::Online => "online",
+                config::LanReachability::Unknown => "unknown",
+                config::LanReachability::Offline => "offline",
+            };
+            HashMap::<&str, String>::from_iter([
+                (
+                    "id",
+                    if peer.endpoint.is_empty() {
+                        peer.id.clone()
+                    } else {
+                        peer.endpoint.clone()
+                    },
+                ),
+                ("username", peer.username.clone()),
+                ("hostname", peer.hostname.clone()),
+                ("platform", peer.platform.clone()),
+                ("fingerprint", peer.fingerprint.clone()),
+                ("alias", PeerConfig::load(if peer.endpoint.is_empty() { &peer.id } else { &peer.endpoint })
+                    .options.get("alias").cloned().unwrap_or_default()),
+                // Discovery-derived tri-state reachability and timestamps,
+                // distinct from the legacy boolean `online` projection.
+                ("reachability", reachability.to_owned()),
+                ("last_seen_at", peer.last_seen_at.to_string()),
+                ("last_known_endpoint", peer.endpoint.clone()),
+            ])
+        })
         .collect()
-}
-
-fn discovery_peer_to_json(peer: &config::DiscoveryPeer, now: i64) -> serde_json::Value {
-    serde_json::json!({
-        "id": if peer.endpoint.is_empty() { &peer.id } else { &peer.endpoint },
-        "username": peer.username,
-        "hostname": peer.hostname,
-        "platform": peer.platform,
-        "device_type": peer.device_type,
-        "fingerprint": peer.fingerprint,
-        "online": peer.online_state(now),
-        "last_seen": peer.last_seen,
-        "last_checked": peer.last_checked,
-    })
-}
-
-#[cfg(test)]
-mod discovery_payload_tests {
-    use super::*;
-
-    #[test]
-    fn discovery_payload_matches_flutter_contract() {
-        let fixture: Vec<serde_json::Value> = serde_json::from_str(include_str!(
-            "../flutter/test/fixtures/peer_presence.json"
-        ))
-        .unwrap();
-        for expected in fixture {
-            let mut peer: config::DiscoveryPeer = serde_json::from_value(expected.clone()).unwrap();
-            if expected["online"] == false {
-                peer.missed_discoveries = 4;
-            }
-            assert_eq!(discovery_peer_to_json(&peer, 100_000), expected);
-        }
-    }
-
-    #[test]
-    fn discovery_payload_does_not_present_cached_online_as_live() {
-        let mut peer = config::DiscoveryPeer::default();
-        peer.mark_seen(100_000);
-        assert_eq!(
-            discovery_peer_to_json(&peer, 130_000)["online"],
-            serde_json::Value::Null
-        );
-        assert_eq!(discovery_peer_to_json(&peer, 130_000)["last_seen"], 100_000);
-    }
 }
 
 #[inline]
@@ -750,38 +770,8 @@ pub fn get_langs() -> String {
     json!(x).to_string()
 }
 
-// Preserve relative paths for existing configurations and only remove accidental
-// surrounding whitespace. Config values are not shell-expanded (for example, `~`).
-fn trim_video_save_directory(value: &str) -> Option<&str> {
-    let value = value.trim();
-    if !value.is_empty() {
-        Some(value)
-    } else {
-        None
-    }
-}
-
-// A Windows service typically runs with System32 as its working directory, so
-// require an absolute path to avoid resolving recordings there unexpectedly.
-#[cfg(any(windows, test))]
-fn validate_windows_service_video_save_directory(value: &str) -> Option<&str> {
-    let value = trim_video_save_directory(value)?;
-    if std::path::Path::new(value).is_absolute() {
-        Some(value)
-    } else {
-        None
-    }
-}
-
 #[inline]
 pub fn video_save_directory(root: bool) -> String {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if let Some(paths) = hbb_common::app_paths::get() {
-        let configured = LocalConfig::get_option(OPTION_VIDEO_SAVE_DIRECTORY);
-        return if configured.is_empty() {
-            paths.root.join("recordings").to_string_lossy().into_owned()
-        } else { configured };
-    }
     let appname = crate::get_app_name();
     // ui process can show it correctly Once vidoe process created it.
     let try_create = |path: &std::path::Path| {
@@ -799,15 +789,6 @@ pub fn video_save_directory(root: bool) -> String {
         // Currently, only installed windows run as root
         #[cfg(windows)]
         {
-            let dir = Config::get_option(OPTION_WINDOWS_SERVICE_VIDEO_SAVE_DIRECTORY);
-            if let Some(dir) = validate_windows_service_video_save_directory(&dir) {
-                return dir.to_owned();
-            }
-            if !dir.trim().is_empty() {
-                log::warn!(
-                    "Ignoring {OPTION_WINDOWS_SERVICE_VIDEO_SAVE_DIRECTORY}: path must be absolute"
-                );
-            }
             let drive = std::env::var("SystemDrive").unwrap_or("C:".to_owned());
             let dir =
                 std::path::PathBuf::from(format!("{drive}\\ProgramData\\{appname}\\recording",));
@@ -819,8 +800,8 @@ pub fn video_save_directory(root: bool) -> String {
     let dir = LocalConfig::get_option_from_file(OPTION_VIDEO_SAVE_DIRECTORY);
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let dir = LocalConfig::get_option(OPTION_VIDEO_SAVE_DIRECTORY);
-    if let Some(dir) = trim_video_save_directory(&dir) {
-        return dir.to_owned();
+    if !dir.is_empty() {
+        return dir;
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Ok(home) = config::APP_HOME_DIR.read() {
@@ -1017,10 +998,6 @@ pub fn new_remote(id: String, remote_type: String, _force_relay: bool) {
 #[inline]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn start_option_status_sync() {
-    if crate::desktop_runtime::is_host() {
-        *OPTION_SYNCED.lock().unwrap() = true;
-        return;
-    }
     let _sender = SENDER.lock().unwrap();
 }
 
@@ -1045,10 +1022,6 @@ pub fn get_user_default_option(key: String) -> String {
 }
 
 pub fn get_fingerprint() -> String {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if crate::desktop_runtime::is_host() {
-        return hbb_common::lan::device_fingerprint(&Config::get_key_pair().1);
-    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     return hbb_common::lan::device_fingerprint(&Config::get_key_pair().1);
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1081,6 +1054,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
     let mut mouse_time = 0;
     #[cfg(feature = "flutter")]
     let mut video_conn_count = 0;
+    #[cfg(feature = "flutter")]
+    let mut active_session_count = 0;
     let is_cm = crate::common::is_cm();
 
     loop {
@@ -1110,6 +1085,12 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                             Ok(Some(ipc::Data::VideoConnCount(Some(n)))) => {
                                 video_conn_count = n;
                             }
+                            #[cfg(feature = "flutter")]
+                            Ok(Some(ipc::Data::ActiveSessionCount(Some(n)))) => {
+                                active_session_count = n;
+                                UI_STATUS.lock().unwrap().active_session_count = n;
+                            }
+                            #[cfg(feature = "flutter")]
                             Ok(Some(ipc::Data::LanServerStatus(Some(status)))) => {
                                 *LAN_SERVER_RUNTIME_STATUS.lock().unwrap() = status;
                             }
@@ -1131,6 +1112,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                     id: String::new(),
                                     #[cfg(feature = "flutter")]
                                     video_conn_count,
+                                    #[cfg(feature = "flutter")]
+                                    active_session_count,
                                 };
                             }
                             _ => {}
@@ -1145,8 +1128,9 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                         #[cfg(feature = "flutter")]
                         {
                             c.send(&ipc::Data::VideoConnCount(None)).await.ok();
+                            allow_err!(c.send(&ipc::Data::ActiveSessionCount(None)).await);
+                            c.send(&ipc::Data::LanServerStatus(None)).await.ok();
                         }
-                        c.send(&ipc::Data::LanServerStatus(None)).await.ok();
                     }
                 }
             }
@@ -1168,7 +1152,10 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
             id: String::new(),
             #[cfg(feature = "flutter")]
             video_conn_count,
+            #[cfg(feature = "flutter")]
+            active_session_count: 0,
         };
+        #[cfg(feature = "flutter")]
         {
             *LAN_SERVER_RUNTIME_STATUS.lock().unwrap() = (
                 crate::lan_server::RUNTIME_STATE_FAILED.to_owned(),
@@ -1255,42 +1242,4 @@ pub fn set_unlock_pin(pin: String) -> String {
 #[cfg(feature = "flutter")]
 pub fn max_encrypt_len() -> usize {
     hbb_common::config::ENCRYPT_MAX_LEN
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{trim_video_save_directory, validate_windows_service_video_save_directory};
-
-    #[test]
-    fn trim_configured_video_save_directory() {
-        assert_eq!(
-            trim_video_save_directory("  relative/recordings  "),
-            Some("relative/recordings")
-        );
-        assert_eq!(trim_video_save_directory("  "), None);
-    }
-
-    #[test]
-    fn validate_service_video_save_directory() {
-        let absolute = if cfg!(windows) {
-            r"C:\recordings"
-        } else {
-            "/recordings"
-        };
-        let padded = format!("  {absolute}  ");
-
-        assert_eq!(
-            validate_windows_service_video_save_directory(&padded),
-            Some(absolute)
-        );
-        assert_eq!(
-            validate_windows_service_video_save_directory("recordings"),
-            None
-        );
-        assert_eq!(
-            validate_windows_service_video_save_directory(&format!("\"{absolute}\"")),
-            None
-        );
-        assert_eq!(validate_windows_service_video_save_directory("  "), None);
-    }
 }

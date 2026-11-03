@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter_hbb/common/widgets/subnet_ui.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -11,6 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
+import 'package:flutter_hbb/desktop/pages/management_console_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_view_camera_screen.dart';
@@ -26,13 +26,10 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'common.dart';
-import 'common/diagnostics.dart';
-import 'common/desktop_runtime.dart';
-import 'common/app_language.dart';
 import 'common/platform_font_fallback.dart';
 import 'consts.dart';
 import 'mobile/pages/home_page.dart';
-import 'mobile/pages/server_page.dart';
+import 'mobile/android_channel.dart';
 import 'models/platform_model.dart';
 
 import 'package:flutter_hbb/plugin/handlers.dart'
@@ -42,6 +39,9 @@ import 'package:flutter_hbb/plugin/handlers.dart'
 int? kWindowId;
 WindowType? kWindowType;
 late List<String> kBootArgs;
+const _deploymentUtilityBuild = bool.fromEnvironment(
+  'SUBNETDESK_DEPLOYMENT_UTILITY',
+);
 
 Future<void> main(List<String> args) async {
   earlyAssert();
@@ -52,8 +52,6 @@ Future<void> main(List<String> args) async {
     runApp(const MaterialApp(home: _LanOnlyWebUnavailablePage()));
     return;
   }
-
-  Diagnostics.install();
 
   // Launch arguments can contain LAN credentials for a newly-created session.
   // Never log their contents, including in debug builds.
@@ -107,7 +105,10 @@ Future<void> main(List<String> args) async {
     desktopType = DesktopType.cm;
     await windowManager.ensureInitialized();
     runConnectionManagerScreen();
-  } else if (args.contains('--install')) {
+  } else if (_deploymentUtilityBuild &&
+      (args.isEmpty || args.contains('--deploy-helper'))) {
+    runRemoteDeploymentPage();
+  } else if (!_deploymentUtilityBuild && args.contains('--install')) {
     runInstallPage();
   } else {
     desktopType = DesktopType.main;
@@ -142,7 +143,6 @@ class _LanOnlyWebUnavailablePage extends StatelessWidget {
 Future<void> initEnv(String appType) async {
   // global shared preference
   await platformFFI.init(appType);
-  Diagnostics.ready();
   // global FFI, use this **ONLY** for global configuration
   // for convenience, use global FFI on mobile platform
   // focus on multi-ffi on desktop first
@@ -156,7 +156,6 @@ Future<void> initEnv(String appType) async {
 void runMainApp(bool startService) async {
   // register uni links
   await initEnv(kAppTypeMain);
-  await initializeDesktopRuntime();
   // trigger connection status updater
   await bind.mainCheckConnectStatus();
   if (startService) {
@@ -176,36 +175,20 @@ void runMainApp(bool startService) async {
   WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
     isMainWindow: true,
     alwaysOnTop: alwaysOnTop,
-    size: bind.isIncomingOnly() ? null : await fitMainWindowToCurrentScreen(kDesktopMainWindowSize),
-    minimumSize: bind.isIncomingOnly() ? null : kDesktopMainWindowMinimumSize,
   );
   windowManager.waitUntilReadyToShow(windowOptions, () async {
-    // Hidden title bars retain 8px native borders on the sides and bottom.
-    // Apply this after WindowOptions, which resets the plugin's frameless flag.
-    if (isWin7) await windowManager.setAsFrameless();
     // Restore the location of the main window before window hide or show.
     await restoreWindowPosition(WindowType.Main);
-    if (kDebugMode) {
-      // Optional developer viewport for reproducible DPI/design captures.
-      final width = double.tryParse(const String.fromEnvironment('SUBNET_UI_QA_WIDTH'));
-      final height = double.tryParse(const String.fromEnvironment('SUBNET_UI_QA_HEIGHT'));
-      if (width != null && height != null && width >= 320 && height >= 320) {
-        await windowManager.setSize(Size(width, height));
-      }
-    }
     // Check the startup argument, if we successfully handle the argument, we keep the main window hidden.
     final handledByUniLinks = await initUniLinks();
     debugPrint("handled by uni links: $handledByUniLinks");
-    if ((kBootArgs.contains('--background') && desktopTrayAvailable) || handledByUniLinks || handleUriLink(cmdArgs: kBootArgs)) {
+    if (handledByUniLinks || handleUriLink(cmdArgs: kBootArgs)) {
       windowManager.hide();
     } else {
-      // Goes through windowOnTop() rather than raw show()/focus() calls so a
-      // cold start (e.g. the tray's "Open" spawning a fresh process because
-      // no instance was running to receive its D-Bus call) also gets the
-      // Linux window-activation workaround -- see the TODO on
-      // _activateWindowWorkaroundLinux in common.dart. Also registers the
-      // active main window (moved here to prevent from async visible check).
-      await windowOnTop(null);
+      windowManager.show();
+      windowManager.focus();
+      // Move registration of active main window here to prevent from async visible check.
+      rustDeskWinManager.registerActiveWindow(kWindowMainId);
     }
     windowManager.setOpacity(1);
     windowManager.setTitle(getWindowName());
@@ -217,7 +200,6 @@ void runMainApp(bool startService) async {
 void runMobileApp() async {
   await initEnv(kAppTypeMain);
   if (isAndroid) androidChannelInit();
-  if (isAndroid) platformFFI.syncAndroidServiceAppDirConfigPath();
   draggablePositions.load();
   runApp(App());
   await initUniLinks();
@@ -304,7 +286,8 @@ void runMultiWindow(Map<String, dynamic> argument, String appType) async {
 void runConnectionManagerScreen() async {
   await initEnv(kAppTypeConnectionManager);
   _runApp('', const DesktopServerPage(), MyTheme.currentThemeMode());
-  final hide = await bind.cmGetConfig(name: "hide_cm") == 'true';
+  // This helper's Windows session dock is always visible on incoming access.
+  final hide = !isWindows && await bind.cmGetConfig(name: "hide_cm") == 'true';
   gFFI.serverModel.hideCm = hide;
   if (hide) {
     await hideCmWindow(isStartup: true);
@@ -318,14 +301,29 @@ void runConnectionManagerScreen() async {
 
 bool _isCmReadyToShow = false;
 
-showCmWindow({bool isStartup = false}) async {
+Future<void> resizeWindowsCmPanel() async {
+  await windowManager.setSizeAlignment(
+    gFFI.serverModel.windowsCmCollapsed
+        ? kWindowsCmPanelFoldedSize
+        : kWindowsCmPanelSize,
+    Alignment.bottomRight,
+  );
+}
+
+showCmWindow({bool isStartup = false, bool restore = false, bool focus = true}) async {
+  if (isWindows && !isStartup && !focus && _isCmReadyToShow) {
+    // The pinned window_manager Windows plugin ignores inactive and focuses on show.
+    // Use our own HWND channel instead, including a non-activating DPI-aware resize.
+    await const MethodChannel('subnetdesk/window')
+        .invokeMethod<void>('showAttentionDock');
+    return;
+  }
   if (isStartup) {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-      size: kConnectionManagerWindowSizeClosedChat,
+      size: isWindows ? kWindowsCmPanelSize : kConnectionManagerWindowSizeClosedChat,
       alwaysOnTop: true,
     );
     await windowManager.waitUntilReadyToShow(windowOptions, null);
-    if (isWin7) await windowManager.setAsFrameless();
     bind.mainHideDock();
     await Future.wait([
       windowManager.show(),
@@ -333,21 +331,40 @@ showCmWindow({bool isStartup = false}) async {
       windowManager.setOpacity(1),
     ]);
     // ensure initial window size to be changed
-    await windowManager.setSizeAlignment(
-      kConnectionManagerWindowSizeClosedChat,
-      Alignment.topRight,
-    );
-    _isCmReadyToShow = true;
-  } else if (_isCmReadyToShow) {
-    if (await windowManager.getOpacity() != 1) {
-      await windowManager.setOpacity(1);
-      await windowManager.focus();
-      await windowManager.minimize(); //needed
+    if (isWindows) {
+      await resizeWindowsCmPanel();
+    } else {
       await windowManager.setSizeAlignment(
         kConnectionManagerWindowSizeClosedChat,
         Alignment.topRight,
       );
-      windowOnTop(null);
+    }
+    _isCmReadyToShow = true;
+  } else if (_isCmReadyToShow) {
+    if (await windowManager.getOpacity() != 1) {
+      await windowManager.setOpacity(1);
+      if (isWindows) {
+        await windowManager.show(inactive: !focus);
+        if (focus) await windowManager.restore();
+      } else {
+        await windowManager.focus();
+        await windowManager.minimize(); //needed
+      }
+      if (isWindows) {
+        await resizeWindowsCmPanel();
+      } else {
+        await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat,
+          Alignment.topRight,
+        );
+      }
+      if (focus) windowOnTop(null);
+    } else if (isWindows && restore) {
+      // Restore for a new incoming session, never for the periodic state poll.
+      await windowManager.show(inactive: !focus);
+      if (focus) await windowManager.restore();
+      await resizeWindowsCmPanel();
+      if (focus) await windowManager.focus();
     }
   }
 }
@@ -359,7 +376,6 @@ hideCmWindow({bool isStartup = false}) async {
     );
     windowManager.setOpacity(0);
     await windowManager.waitUntilReadyToShow(windowOptions, null);
-    if (isWin7) await windowManager.setAsFrameless();
     bind.mainHideDock();
     await windowManager.minimize();
     await windowManager.hide();
@@ -392,7 +408,6 @@ void _runApp(String title, Widget home, ThemeMode themeMode) {
           GlobalCupertinoLocalizations.delegate,
         ],
         supportedLocales: supportedLocales,
-        locale: currentAppLocale(),
         navigatorObservers: [
           // FirebaseAnalyticsObserver(analytics: analytics),
           BotToastNavigatorObserver(),
@@ -419,7 +434,6 @@ void runInstallPage() async {
     center: true,
   );
   windowManager.waitUntilReadyToShow(windowOptions, () async {
-    if (isWin7) await windowManager.setAsFrameless();
     windowManager.show();
     windowManager.focus();
     windowManager.setOpacity(1);
@@ -427,16 +441,33 @@ void runInstallPage() async {
   });
 }
 
+void runRemoteDeploymentPage() async {
+  await windowManager.ensureInitialized();
+  await initEnv(kAppTypeMain);
+  await windowManager.setTitle('SubnetDesk Deploy');
+  await windowManager.setPreventClose(true);
+  await windowManager.setMinimumSize(const Size(1000, 700));
+  _runApp('', const ManagementConsolePage(), MyTheme.currentThemeMode());
+  final windowOptions = getHiddenTitleBarWindowOptions(
+    size: const Size(1360, 900),
+    center: true,
+  );
+  windowManager.waitUntilReadyToShow(windowOptions, () async {
+    windowManager.show();
+    windowManager.focus();
+    windowManager.setOpacity(1);
+    windowManager.setAlignment(Alignment.center);
+  });
+}
+
 WindowOptions getHiddenTitleBarWindowOptions({
   bool isMainWindow = false,
   Size? size,
-  Size? minimumSize,
   bool center = false,
   bool? alwaysOnTop,
 }) {
   return WindowOptions(
     size: size,
-    minimumSize: minimumSize,
     center: center,
     backgroundColor: (isMacOS && isMainWindow) ? null : Colors.transparent,
     skipTaskbar: false,
@@ -540,14 +571,18 @@ class _AppState extends State<App> with WidgetsBindingObserver {
               GlobalCupertinoLocalizations.delegate,
             ],
             supportedLocales: supportedLocales,
-            locale: currentAppLocale(),
             navigatorObservers: [
               // FirebaseAnalyticsObserver(analytics: analytics),
               BotToastNavigatorObserver(),
             ],
             builder: isAndroid
                 ? (context, child) => AccessibilityListener(
-                    child: _keepScaleBuilder(context, child),
+                    child: MediaQuery(
+                      data: MediaQuery.of(
+                        context,
+                      ).copyWith(textScaler: TextScaler.linear(1.0)),
+                      child: child ?? Container(),
+                    ),
                   )
                 : (context, child) {
                     child = _keepScaleBuilder(context, child);
@@ -574,28 +609,10 @@ class _AppState extends State<App> with WidgetsBindingObserver {
 }
 
 Widget _keepScaleBuilder(BuildContext context, Widget? child) {
-  // Preserve system text scaling and logical pixels. The remote canvas has
-  // independent per-session zoom and must not change local UI density.
-  return SubnetLanguage(
-    languageCode: bind.mainGetLocalOption(key: kCommConfKeyLang),
-    translate: translate,
-    child: child ?? const SizedBox.shrink(),
+  return MediaQuery(
+    data: MediaQuery.of(context).copyWith(textScaler: TextScaler.linear(1.0)),
+    child: child ?? Container(),
   );
-}
-
-Locale currentAppLocale() {
-  final language = resolveAppLanguage(
-    bind.mainGetLocalOption(key: kCommConfKeyLang),
-    localeName,
-  );
-  if (language == 'zh-cn') return const Locale('zh', 'CN');
-  if (language == 'zh-tw') return const Locale('zh', 'TW');
-  return Locale(switch (language) {
-    'kz' => 'kk',
-    'ge' => 'ka',
-    '' => 'en',
-    final code => code,
-  });
 }
 
 _registerEventHandler() {

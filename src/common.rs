@@ -8,7 +8,6 @@ use std::{
 
 use serde_json::{json, Map, Value};
 
-use base::{config::keys, message_proto::*};
 #[cfg(not(target_os = "ios"))]
 use hbb_common::whoami;
 use hbb_common::{
@@ -16,10 +15,11 @@ use hbb_common::{
     anyhow::anyhow,
     bail, base64,
     bytes::Bytes,
-    config::{self, LocalConfig},
+    config::{self, keys, LocalConfig},
     futures::future::join_all,
     futures_util::future::poll_fn,
     get_version_number, log,
+    message_proto::*,
     protobuf::{Enum, Message as _},
     sodiumoxide::crypto::{box_, secretbox, sign},
     tokio::{
@@ -96,7 +96,7 @@ lazy_static::lazy_static! {
     static ref IS_SERVER: bool = std::env::args().nth(1) == Some("--server".to_owned());
     // Is server logic running. The server code can invoked to run by the main process if --server is not running.
     static ref SERVER_RUNNING: Arc<RwLock<bool>> = Default::default();
-    static ref IS_MAIN: bool = std::env::args().skip(1).all(|arg| !arg.starts_with("--") || matches!(arg.as_str(), "--background" | "--portable" | "--data-dir") || arg.starts_with("--data-dir="));
+    static ref IS_MAIN: bool = std::env::args().nth(1).map_or(true, |arg| !arg.starts_with("--"));
     static ref IS_CM: bool = std::env::args().nth(1) == Some("--cm".to_owned()) || std::env::args().nth(1) == Some("--cm-no-ui".to_owned());
 }
 
@@ -114,8 +114,6 @@ impl Drop for SimpleCallOnReturn {
 }
 
 pub fn global_init() -> bool {
-    #[cfg(all(target_os = "linux", feature = "drm"))]
-    crate::platform::linux::dispatch_wayland_display_probe();
     #[cfg(target_os = "linux")]
     {
         if !crate::platform::linux::is_x11() {
@@ -154,6 +152,10 @@ pub fn is_support_file_copy_paste_num(ver: i64) -> bool {
     ver >= hbb_common::get_version_number("1.3.8")
 }
 
+pub fn is_support_remote_print(ver: &str) -> bool {
+    hbb_common::get_version_number(ver) >= hbb_common::get_version_number("1.3.9")
+}
+
 pub fn is_support_file_paste_if_macos(ver: &str) -> bool {
     hbb_common::get_version_number(ver) >= hbb_common::get_version_number("1.3.9")
 }
@@ -183,39 +185,6 @@ mod subnetdesk_capability_tests {
     use super::*;
 
     #[test]
-    fn release_version_enables_inherited_features() {
-        let version = crate::VERSION;
-        let number = hbb_common::get_version_number(version);
-        assert_eq!(version, env!("CARGO_PKG_VERSION"));
-        assert!(is_support_multi_ui_session(version));
-        assert!(is_support_file_paste_if_macos(version));
-        assert!(is_support_screenshot(version));
-        assert!(is_support_file_transfer_resume(version));
-        assert!(is_support_relative_mouse_mode(version));
-        #[cfg(not(target_os = "ios"))]
-        {
-            assert!(crate::clipboard::is_support_multi_clipboard(version, "Windows"));
-            assert!(crate::clipboard::is_support_multi_clipboard(version, "Android"));
-        }
-        for minimum in ["1.3.8", "1.3.9", "1.4.0", "1.4.1", "1.4.2", "1.4.8"] {
-            assert!(number >= hbb_common::get_version_number(minimum), "{minimum}");
-        }
-        #[cfg(feature = "unix-file-copy-paste")]
-        assert!(is_support_file_copy_paste(version));
-    }
-
-    #[test]
-    fn legacy_peers_keep_their_feature_limits() {
-        assert!(!is_support_file_paste_if_macos("1.3.8"));
-        assert!(!is_support_screenshot("1.3.9"));
-        assert!(!is_support_file_transfer_resume("1.4.1"));
-        #[cfg(not(target_os = "ios"))]
-        assert!(!crate::clipboard::is_support_multi_clipboard("1.2.7", "Windows"));
-        #[cfg(feature = "unix-file-copy-paste")]
-        assert!(!is_support_file_copy_paste("1.3.7"));
-    }
-
-    #[test]
     fn current_subnetdesk_release_supports_multiple_displays() {
         assert!(is_support_multi_ui_session("1.2.1"));
         assert!(!is_support_multi_ui_session("1.2.0"));
@@ -226,38 +195,11 @@ mod subnetdesk_capability_tests {
         assert!(!is_support_screenshot("1.2.1"));
         assert!(is_support_screenshot("1.4.0"));
     }
-
-    #[test]
-    fn subnetdesk_releases_support_relative_mouse_mode() {
-        for version in ["1.0.0", "1.0.0-1", "1.2.3", "1.3.0", "2.0.0"] {
-            assert!(is_support_relative_mouse_mode(version), "{version}");
-            assert!(
-                is_support_relative_mouse_mode_num(hbb_common::get_version_number(version)),
-                "{version}"
-            );
-        }
-        for version in ["", "0.0.0", "0.9.9"] {
-            assert!(!is_support_relative_mouse_mode(version), "{version}");
-            assert!(
-                !is_support_relative_mouse_mode_num(hbb_common::get_version_number(version)),
-                "{version}"
-            );
-        }
-    }
-
-    #[test]
-    fn relative_mouse_version_gate_matches_flutter() {
-        let dart_consts = include_str!("../flutter/lib/consts.dart");
-        assert!(dart_consts.contains(&format!(
-            "const String kMinVersionForRelativeMouseMode = '{MIN_VERSION_RELATIVE_MOUSE_MODE}';"
-        )));
-    }
 }
 
-/// SubnetDesk inherited relative mouse mode before its first 1.0.0 release.
-/// Its release versions are independent of upstream RustDesk's 1.4.5 gate.
+/// Minimum server version required for relative mouse mode support.
 /// This constant must mirror Flutter's `kMinVersionForRelativeMouseMode` in `consts.dart`.
-const MIN_VERSION_RELATIVE_MOUSE_MODE: &str = "1.0.0";
+const MIN_VERSION_RELATIVE_MOUSE_MODE: &str = "1.4.5";
 
 #[inline]
 pub fn is_support_relative_mouse_mode(ver: &str) -> bool {
@@ -272,8 +214,6 @@ pub fn is_support_relative_mouse_mode_num(ver: i64) -> bool {
 // is server process, with "--server" args
 #[inline]
 pub fn is_server() -> bool {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    if crate::desktop_runtime::is_host() { return true; }
     *IS_SERVER
 }
 
