@@ -45,6 +45,7 @@ use hbb_common::{
     },
     tokio_util::codec::{BytesCodec, Framed},
 };
+use sha2::{Digest, Sha256};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use scrap::android::{call_main_service_key_event, call_main_service_pointer_input};
 use scrap::camera;
@@ -356,6 +357,8 @@ pub struct Connection {
     // handle input messages
     video_ack_required: bool,
     lr: LoginRequest,
+    // Bind authentication retries to the original controller and session scope.
+    login_scope: Option<[u8; 32]>,
     peer_argb: u32,
     session_last_recv_time: Option<Arc<Mutex<Instant>>>,
     chat_unanswered: bool,
@@ -527,6 +530,7 @@ impl Connection {
             tx_input,
             video_ack_required: false,
             lr: Default::default(),
+            login_scope: None,
             peer_argb: 0u32,
             session_last_recv_time: None,
             chat_unanswered: false,
@@ -2169,6 +2173,87 @@ impl Connection {
         true
     }
 
+    fn login_scope_digest(lr: &LoginRequest) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        // Length prefixes keep adjacent peer-controlled fields unambiguous.
+        let mut push = |bytes: &[u8]| {
+            hasher.update((bytes.len() as u64).to_le_bytes());
+            hasher.update(bytes);
+        };
+        push(lr.my_id.as_bytes());
+        match lr.union.as_ref() {
+            Some(login_request::Union::FileTransfer(ft)) => {
+                let FileTransfer {
+                    dir,
+                    show_hidden,
+                    special_fields: _,
+                } = ft;
+                push(b"file_transfer");
+                push(dir.as_bytes());
+                push(&[*show_hidden as u8]);
+            }
+            Some(login_request::Union::ViewCamera(vc)) => {
+                let ViewCamera { special_fields: _ } = vc;
+                push(b"view_camera");
+            }
+            Some(login_request::Union::Terminal(terminal)) => {
+                let Terminal {
+                    service_id,
+                    special_fields: _,
+                } = terminal;
+                push(b"terminal");
+                push(service_id.as_bytes());
+            }
+            Some(login_request::Union::PortForward(pf)) => {
+                let PortForward {
+                    host,
+                    port,
+                    special_fields: _,
+                } = pf;
+                push(b"port_forward");
+                push(host.as_bytes());
+                push(&port.to_le_bytes());
+            }
+            None | Some(_) => push(b"remote"),
+        }
+        hasher.finalize().into()
+    }
+
+    fn login_scope_kind(lr: &LoginRequest) -> &'static str {
+        match lr.union.as_ref() {
+            Some(login_request::Union::FileTransfer(_)) => "file_transfer",
+            Some(login_request::Union::ViewCamera(_)) => "view_camera",
+            Some(login_request::Union::Terminal(_)) => "terminal",
+            Some(login_request::Union::PortForward(_)) => "port_forward",
+            _ => "remote",
+        }
+    }
+
+    fn latch_login_scope(scope: &mut Option<[u8; 32]>, lr: &LoginRequest) -> bool {
+        let requested = Self::login_scope_digest(lr);
+        match *scope {
+            Some(initial) => initial == requested,
+            None => {
+                *scope = Some(requested);
+                true
+            }
+        }
+    }
+
+    async fn check_login_scope(&mut self, lr: &LoginRequest) -> bool {
+        if Self::latch_login_scope(&mut self.login_scope, lr) {
+            return true;
+        }
+        log::warn!(
+            "Rejected login scope change: conn_id={}, initial={}, requested={}",
+            self.inner.id(),
+            Self::login_scope_kind(&self.lr),
+            Self::login_scope_kind(lr),
+        );
+        self.send_login_error("Connection not allowed").await;
+        false
+    }
+
     async fn handle_login_request_without_validation(&mut self, lr: &LoginRequest) {
         self.lr = lr.clone();
         self.peer_argb = crate::str2color(&format!("{}{}", &lr.my_id, &lr.my_platform), 0xff);
@@ -2243,6 +2328,9 @@ impl Connection {
         }
         // After handling CloseReason messages, proceed to process other message types
         if let Some(message::Union::LoginRequest(lr)) = msg.union {
+            if !self.check_login_scope(&lr).await {
+                return false;
+            }
             self.handle_login_request_without_validation(&lr).await;
             if self.authorized {
                 return true;
@@ -6025,6 +6113,94 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn login_scope_allows_credential_and_display_updates() {
+        let mut initial = LoginRequest::new();
+        initial.my_id = "test-controller".into();
+        let mut scope = None;
+        assert!(Connection::latch_login_scope(&mut scope, &initial));
+        let original_scope = scope;
+
+        let mut retry = initial;
+        retry.password = b"synthetic-test-credential".to_vec().into();
+        retry.hwid = b"test-hardware".to_vec().into();
+        retry.my_name = "Updated display name".into();
+        retry.avatar = "test-avatar".into();
+        retry.os_login = Some(OSLogin {
+            username: "test-account".into(),
+            password: "synthetic-os-credential".into(),
+            ..Default::default()
+        })
+        .into();
+        retry.lan_login = Some(LanLoginRequest {
+            access_method: 3,
+            temporary_code: "synthetic-code".into(),
+            ..Default::default()
+        })
+        .into();
+        retry.special_fields.mut_unknown_fields().add_varint(9999, 1);
+        assert!(Connection::latch_login_scope(&mut scope, &retry));
+        assert_eq!(scope, original_scope);
+    }
+
+    #[test]
+    fn login_scope_rejects_identity_type_and_target_changes_without_relatching() {
+        let remote = LoginRequest {
+            my_id: "test-controller".into(),
+            ..Default::default()
+        };
+        let mut file = remote.clone();
+        file.set_file_transfer(FileTransfer {
+            dir: "approved-directory".into(),
+            ..Default::default()
+        });
+        let mut terminal = remote.clone();
+        terminal.set_terminal(Terminal {
+            service_id: "approved-service".into(),
+            ..Default::default()
+        });
+        let mut forward = remote.clone();
+        forward.set_port_forward(PortForward {
+            host: "localhost".into(),
+            port: 3389,
+            ..Default::default()
+        });
+        let mut other_id = remote.clone();
+        other_id.my_id = "different-controller".into();
+        let mut other_dir = file.clone();
+        other_dir.mut_file_transfer().dir = "other-directory".into();
+        let mut hidden_files = file.clone();
+        hidden_files.mut_file_transfer().show_hidden = true;
+        let mut other_service = terminal.clone();
+        other_service.mut_terminal().service_id = "other-service".into();
+        let mut other_host = forward.clone();
+        other_host.mut_port_forward().host = "192.0.2.1".into();
+        let mut other_port = forward.clone();
+        other_port.mut_port_forward().port = 22;
+        let mut camera = remote.clone();
+        camera.set_view_camera(ViewCamera::new());
+
+        for (initial, changed) in [
+            (&remote, &other_id),
+            (&remote, &file),
+            (&file, &remote),
+            (&file, &other_dir),
+            (&file, &hidden_files),
+            (&terminal, &other_service),
+            (&forward, &other_host),
+            (&forward, &other_port),
+            (&remote, &terminal),
+            (&remote, &camera),
+        ] {
+            let mut scope = None;
+            assert!(Connection::latch_login_scope(&mut scope, initial));
+            let original_scope = scope;
+            assert!(!Connection::latch_login_scope(&mut scope, changed));
+            assert_eq!(scope, original_scope);
+            assert!(Connection::latch_login_scope(&mut scope, initial));
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
