@@ -1522,6 +1522,30 @@ pub async fn sync_current_config_to_server(ms_timeout: u64) -> ResultType<()> {
     Ok(())
 }
 
+/// Installer command: do not report success until the running receiver has
+/// acknowledged and returned the newly persisted configuration.
+#[tokio::main(flavor = "current_thread")]
+pub async fn apply_installer_config_to_receiver() -> ResultType<()> {
+    let expected = (Config::get(), Config2::get());
+    for _ in 0..20 {
+        let attempt = async {
+            let mut connection = connect(1_000, "").await?;
+            connection.send(&Data::SyncConfig(Some(expected.clone().into()))).await?;
+            if !is_sync_config_ack(connection.next_timeout(1_000).await?) {
+                bail!("Receiver did not acknowledge installer configuration");
+            }
+            connection.send(&Data::SyncConfig(None)).await?;
+            match connection.next_timeout(1_000).await? {
+                Some(Data::SyncConfig(Some(actual))) if *actual == expected => Ok(()),
+                _ => Err(hbb_common::anyhow::anyhow!("Receiver configuration readback did not match")),
+            }
+        }.await;
+        if attempt.is_ok() { return Ok(()); }
+        hbb_common::tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    bail!("Unable to apply and verify unattended access on the running receiver")
+}
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn send_url_scheme(url: String) -> ResultType<()> {
     connect(1_000, "_url")

@@ -115,7 +115,7 @@ async fn connect_and_login(
     } else {
         ConnType::PORT_FORWARD
     };
-    let (mut stream, device_public_key, connected_endpoint, verified_fingerprint) =
+    let (mut stream, device_public_key, connected_endpoint, verified_fingerprint, expected_saved_fingerprint) =
         Client::start(id, conn_type, interface.clone()).await?;
     interface.update_direct(Some(true));
     if device_public_key.is_empty()
@@ -125,6 +125,7 @@ async fn connect_and_login(
             &connected_endpoint,
             &device_public_key,
             verified_fingerprint.as_deref(),
+            expected_saved_fingerprint.as_deref(),
         )
         .await
     {

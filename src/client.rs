@@ -269,7 +269,7 @@ impl Client {
         peer: &str,
         _conn_type: ConnType,
         interface: impl Interface,
-    ) -> ResultType<(Stream, Vec<u8>, String, Option<String>)> {
+    ) -> ResultType<(Stream, Vec<u8>, String, Option<String>, Option<String>)> {
         if !crate::camera_access::allowed(_conn_type == ConnType::VIEW_CAMERA) {
             bail!(crate::camera_access::DISABLED_MESSAGE);
         }
@@ -300,6 +300,7 @@ impl Client {
         });
         let mut attempted = HashSet::new();
         let mut errors = Vec::new();
+        let mut mismatched_saved_device = None;
 
         loop {
             for candidate in std::mem::take(&mut candidates) {
@@ -344,13 +345,14 @@ impl Client {
                             expected
                         );
                         if intent == crate::lan::ConnectionIntent::SavedDevice {
-                            // A saved device's identity is proven only by a prior
-                            // verified connection. A mismatch here means the
-                            // endpoint is occupied by a different device (e.g. an
-                            // IP reassignment); never trust or log into it, and
-                            // never surface a re-trust prompt for it.
-                            errors.push(format!(
-                                "{endpoint}: fingerprint mismatch for saved device"
+                            // Prefer any candidate that still proves the saved
+                            // identity. Keep a changed identity only as a last
+                            // resort so a stale address cannot mask the real
+                            // device at a refreshed address.
+                            mismatched_saved_device = Some((
+                                stream,
+                                identity.device_public_key,
+                                endpoint.authority().to_owned(),
                             ));
                             continue;
                         }
@@ -372,6 +374,11 @@ impl Client {
                     identity.device_public_key,
                     connected_endpoint,
                     verified_fingerprint,
+                    if intent == crate::lan::ConnectionIntent::SavedDevice {
+                        expected_fingerprint.clone()
+                    } else {
+                        None
+                    },
                 ));
             }
 
@@ -390,6 +397,16 @@ impl Client {
             } else {
                 break;
             }
+        }
+
+        if let Some((stream, device_public_key, connected_endpoint)) = mismatched_saved_device {
+            return Ok((
+                stream,
+                device_public_key,
+                connected_endpoint,
+                None,
+                expected_fingerprint,
+            ));
         }
 
         let detail = errors
@@ -2143,7 +2160,7 @@ impl LoginConfigHandler {
             (seconds > 0).then(|| Instant::now() + Duration::from_secs(seconds.into()));
     }
 
-    fn auth_retry_remaining(&self) -> Option<Duration> {
+    pub(crate) fn auth_retry_remaining(&self) -> Option<Duration> {
         self.auth_retry_until
             .and_then(|until| until.checked_duration_since(Instant::now()))
     }
@@ -3089,6 +3106,7 @@ pub async fn confirm_lan_device(
     endpoint: &str,
     device_public_key: &[u8],
     verified_fingerprint: Option<&str>,
+    expected_saved_fingerprint: Option<&str>,
 ) -> bool {
     let endpoint = match hbb_common::lan::Endpoint::parse(endpoint) {
         Ok(value) => value,
@@ -3099,6 +3117,39 @@ pub async fn confirm_lan_device(
     };
     let fingerprint = crate::lan_protocol::fingerprint(device_public_key);
     let trusted = Config::get_trusted_lan_fingerprint(endpoint.authority());
+    if let Some(expected) = expected_saved_fingerprint {
+        if !expected.eq_ignore_ascii_case(&fingerprint) {
+            // Do not auto-accept a different identity merely because it is
+            // trusted at another endpoint. Require an explicit decision once;
+            // remember that decision for this endpoint afterward.
+            if trusted.as_deref() == Some(fingerprint.as_str()) {
+                return true;
+            }
+            interface.msgbox(
+                "lan-device-key-changed",
+                "Saved device identity changed",
+                &format!(
+                    "The saved device at {} previously had fingerprint {} and now presents {}. Verify the new fingerprint on the device before continuing.",
+                    endpoint, expected, fingerprint
+                ),
+                "",
+            );
+            while let Some(data) = receiver.recv().await {
+                match data {
+                    Data::TrustLanDevice => {
+                        if let Err(err) = Config::trust_lan_fingerprint(endpoint.authority(), &fingerprint) {
+                            log::error!("Failed to save LAN device fingerprint: {err}");
+                            return false;
+                        }
+                        return true;
+                    }
+                    Data::RejectLanDevice | Data::Close => return false,
+                    _ => {}
+                }
+            }
+            return false;
+        }
+    }
     if trusted.as_deref() == Some(fingerprint.as_str()) {
         return true;
     }

@@ -2,15 +2,15 @@
 <Include xmlns="http://wixtoolset.org/schemas/v4/wxs">
 
 	<!--$PreVarsStart$-->
-	<?define Version="1.4.5.121" ?>
+	<?define Version="1.4.9.128" ?>
 	<?define Manufacturer="SubnetDesk" ?>
 	<?define Product="SubnetDesk" ?>
 	<?define Description="SubnetDesk Installer" ?>
 	<?define ProductLower="subnetdesk" ?>
 	<?define RegKeyRoot=".$(var.ProductLower)" ?>
 	<?define RegKeyInstall="$(var.RegKeyRoot)\Install" ?>
-	<?define BuildDir="D:\Projects AI\SubnetDesk-Helper\output\release-helper-1.4.5-build121\HelperBundle" ?>
-	<?define BuildDate="2026-10-25 18:21" ?>
+	<?define BuildDir="D:\Projects AI\SubnetDesk-Helper\outputs\new\SubnetDesk-Helper-1.4.9-build128\Windows-x64\WindowsBundle" ?>
+	<?define BuildDate="2026-11-03 18:09" ?>
 
 	<!-- The UpgradeCode must be consistent for each product. ! -->
 	<?define UpgradeCode = "dc0e791c-3b4d-5a51-9aa8-629d81975868" ?>

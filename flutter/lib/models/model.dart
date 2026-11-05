@@ -1008,6 +1008,7 @@ class FfiModel with ChangeNotifier {
       if (isWindows && parent.target?.connType == ConnType.fileTransfer) {
         dialogManager.dismissAll();
         dialogManager.show((setState, close, context) => WindowsLanAccessDialog(
+          hasSavedPassword: (endpoint) => bind.mainHasLegacyLanCredential(fingerprint: endpoint),
           endpoint: peerId, title: 'File transfer access', allowSavedPassword: false,
           translateText: translate,
           onCancel: () { close(); closeConnection(id: peerId); },

@@ -1,6 +1,6 @@
 import 'dart:convert';
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import '../../common/widgets/connection_diagnostic_dialog.dart';
 
 class WindowsLanAccessSelection {
@@ -18,6 +18,7 @@ class WindowsLanAccessDialog extends StatefulWidget {
     required this.translateText,
     this.title = 'Connect',
     this.allowSavedPassword = true,
+    this.hasSavedPassword,
     this.onSubmit,
     this.onCancel,
   });
@@ -26,6 +27,7 @@ class WindowsLanAccessDialog extends StatefulWidget {
   final String Function(String) translateText;
   final String title;
   final bool allowSavedPassword;
+  final bool Function(String endpoint)? hasSavedPassword;
   final Future<String> Function(WindowsLanAccessSelection)? onSubmit;
   final VoidCallback? onCancel;
   @override
@@ -35,14 +37,23 @@ class WindowsLanAccessDialog extends StatefulWidget {
 class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
   late final TextEditingController _endpoint;
   final _password = TextEditingController();
+  bool _useSaved = false;
   bool _remember = false;
   String _error = '';
   bool _busy = false;
   String t(String text) => widget.translateText(text);
+
   @override
   void initState() {
     super.initState();
     _endpoint = TextEditingController(text: widget.endpoint);
+    _refreshSaved();
+  }
+
+  void _refreshSaved() {
+    _useSaved = widget.allowSavedPassword &&
+        (widget.hasSavedPassword?.call(_endpoint.text.trim()) ?? false);
+    _remember = _useSaved;
   }
 
   void _clearCredentials() {
@@ -58,12 +69,20 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
       setState(() => _error = 'Enter the receiver IP address or hostname');
       return;
     }
+
     final entered = _password.text;
-    final payload = jsonEncode({
-      'lan_version': 1,
-      'access_method': 4,
-      'temporary_code': entered,
-    });
+    final String? payload;
+    if (_useSaved && entered.isEmpty) {
+      payload = null; // Native code loads the fingerprint-bound secret.
+    } else if (entered.isEmpty) {
+      payload = jsonEncode({'lan_version': 1, 'access_method': 2,
+        'temporary_code': ''});
+    } else {
+      payload = jsonEncode({'lan_version': 1, 'username': '',
+        'password': entered, 'remember': widget.allowSavedPassword && _remember,
+        'auto_access': true});
+    }
+
     _clearCredentials();
     final selection = WindowsLanAccessSelection(endpoint, payload);
     if (widget.onSubmit == null) {
@@ -98,7 +117,9 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
   Widget build(BuildContext context) => AlertDialog(
     title: Text(t(widget.title)),
     content: SizedBox(
-      width: 440,
+      width: (MediaQuery.sizeOf(context).width - 128)
+          .clamp(0.0, 440.0)
+          .toDouble(),
       child: SingleChildScrollView(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -114,7 +135,10 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
                 decoration: InputDecoration(
                   labelText: '${t('Local Address')} (IP / DNS)',
                 ),
-                onChanged: (_) => setState(_clearCredentials),
+                onChanged: (_) => setState(() {
+                  _clearCredentials();
+                  _refreshSaved();
+                }),
                 onSubmitted: (_) => _submit(),
               )
             else
@@ -128,14 +152,23 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
               autocorrect: false,
               enableSuggestions: false,
               decoration: InputDecoration(
-                labelText: t('Password or temporary code (optional)'),
-                helperText: t('Leave blank to request manual approval'),
+                labelText: t('Password or temporary code'),
+                hintText: _useSaved ? '********' : null,
+                helperText: t(_useSaved
+                    ? 'Saved password will be used'
+                    : 'Leave empty to request manual approval'),
+                suffixIcon: _useSaved ? IconButton(
+                  tooltip: t('Use another password or manual approval'),
+                  icon: const Icon(Icons.clear),
+                  onPressed: () => setState(() { _useSaved = false; _remember = false; }),
+                ) : null,
               ),
+              onChanged: (value) => setState(() { _useSaved = false; }),
               onSubmitted: (_) => _submit(),
             ),
-            const SizedBox(height: 12),
             if (widget.allowSavedPassword)
               CheckboxListTile(
+                key: const ValueKey('windows-lan-remember'),
                 contentPadding: EdgeInsets.zero,
                 dense: true,
                 title: Text(t('Remember password')),
@@ -150,8 +183,12 @@ class _WindowsLanAccessDialogState extends State<WindowsLanAccessDialog> {
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             TextButton.icon(
-              onPressed: _busy ? null : () => showConnectionDiagnostic(context, _endpoint.text, translateText: t),
-              icon: const Icon(Icons.network_check), label: Text(t('Check connection')),
+              onPressed: _busy
+                  ? null
+                  : () => showConnectionDiagnostic(
+                      context, _endpoint.text, translateText: t),
+              icon: const Icon(Icons.network_check),
+              label: Text(t('Check connection')),
             ),
           ],
         ),

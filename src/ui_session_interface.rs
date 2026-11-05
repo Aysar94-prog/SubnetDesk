@@ -224,7 +224,9 @@ impl<T: InvokeUiSession> Session<T> {
         hbb_common::lan::validate_password(password.as_bytes())?;
         let credential = LanSessionCredential {
             access_method: hbb_common::lan::ACCESS_PASSWORD,
-            temporary_code: String::new(),
+            temporary_code: if username.is_empty() && password.len() == 6
+                && password.bytes().all(|b| b.is_ascii_digit()) { password.clone() }
+                else { String::new() },
             username: username.clone(),
             password: password.as_bytes().to_vec(),
             remember,
@@ -1782,6 +1784,24 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     }
 
     async fn handle_login_error(&self, err: &str) -> bool {
+        // A single input first authenticates as a password. Only a rejected
+        // six-digit candidate may retry once as a temporary code. Code success
+        // never reaches the remembered-password persistence branch.
+        if err == crate::client::LOGIN_MSG_LAN_CREDENTIALS_WRONG
+            && self.lc.read().unwrap().auth_retry_remaining().is_none() {
+            let retry = {
+                let mut guard = self.lan_credential.lock().unwrap();
+                if let Some(c) = guard.as_mut().filter(|c|
+                    c.access_method == hbb_common::lan::ACCESS_PASSWORD
+                    && !c.temporary_code.is_empty()) {
+                    c.access_method = hbb_common::lan::ACCESS_CODE;
+                    c.password.zeroize();
+                    c.remember = false;
+                    true
+                } else { false }
+            };
+            if retry { self.send(Data::SubmitLanCredentials); return true; }
+        }
         // Optional login never clears a saved password or falls back to its dialog,
         // even if a remote version returns a password-specific error string.
         if self.lan_credential().map(|c| c.access_method != hbb_common::lan::ACCESS_PASSWORD).unwrap_or(false) {
@@ -1981,11 +2001,11 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     None
                 }
             };
-            if let Some((_legacy_username, password)) = remembered {
+            if let Some((saved_username, password)) = remembered {
                 let remembered = LanSessionCredential {
                     access_method: hbb_common::lan::ACCESS_PASSWORD,
                     temporary_code: String::new(),
-                    username: String::new(),
+                    username: saved_username,
                     password,
                     remember: true,
                     identity_id: String::new(),

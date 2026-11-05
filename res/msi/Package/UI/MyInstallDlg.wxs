@@ -76,17 +76,18 @@ Patch dialog sequence:
             <Publish Dialog="MyInstallDirDlg" Control="Next" Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="4" />
             <Publish Dialog="MyInstallDirDlg" Control="Next" Event="SpawnDialog" Value="InvalidDirDlg" Order="6" Condition="NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID&lt;&gt;&quot;1&quot;" />
             <Publish Dialog="MyInstallDirDlg" Control="Next" Event="NewDialog" Value="UnattendedPasswordDlg" Order="7" Condition="WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;" />
-            <Publish Dialog="UnattendedPasswordDlg" Control="Back" Event="NewDialog" Value="MyInstallDirDlg" />
-            <Publish Dialog="UnattendedPasswordDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+            <Publish Dialog="UnattendedPasswordDlg" Control="Back" Event="NewDialog" Value="MyInstallDirDlg" Order="1" Condition="NOT Installed" />
+            <Publish Dialog="UnattendedPasswordDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed" />
             <Publish Dialog="MyInstallDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1" />
             <Publish Dialog="MyInstallDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2" />
             <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="UnattendedPasswordDlg" Order="1" Condition="NOT Installed" />
-            <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+            <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH AND WixUI_InstallMode&lt;&gt;&quot;Repair&quot;" />
+            <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="UnattendedPasswordDlg" Order="3" Condition="Installed AND NOT PATCH AND WixUI_InstallMode=&quot;Repair&quot;" />
             <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="Installed AND PATCH" />
 
             <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
 
-            <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+            <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="UnattendedPasswordDlg" />
             <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
             <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
 

@@ -7,13 +7,6 @@ import 'package:flutter_hbb/desktop/widgets/windows_file_transfer_access.dart';
 import 'package:flutter_hbb/desktop/widgets/windows_lan_access_dialog.dart';
 
 void main() {
-  Future<void> choose(WidgetTester tester, String text) async {
-    await tester.tap(find.byKey(const ValueKey('windows-lan-method')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text(text).last);
-    await tester.pumpAndSettle();
-  }
-
   Future<void> submit(WidgetTester tester) async {
     await tester.tap(find.byKey(const ValueKey('windows-lan-connect')));
     await tester.pumpAndSettle();
@@ -21,7 +14,7 @@ void main() {
 
   Future<void> toolbar(
     WidgetTester tester,
-    List<WindowsLanAccessSelection> dispatched,
+    List<WindowsLanAccessSelection> dispatched, {bool saved = false}
   ) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -40,6 +33,7 @@ void main() {
                             context,
                             '192.168.1.61',
                             translateText: (text) => text,
+                            hasSavedPassword: (_) => saved,
                             connect: (selection) async {
                               dispatched.add(selection);
                             },
@@ -69,7 +63,6 @@ void main() {
       await toolbar(tester, calls);
       expect(find.text('File transfer access'), findsOneWidget);
       expect(find.text('Username'), findsNothing);
-      await choose(tester, 'Manual approval');
       await submit(tester);
       expect(calls.length, 1);
       expect(jsonDecode(calls.single.payload!), {
@@ -85,16 +78,17 @@ void main() {
     (tester) async {
       final calls = <WindowsLanAccessSelection>[];
       await toolbar(tester, calls);
-      await choose(tester, 'Temporary code');
       await tester.enterText(
-        find.byKey(const ValueKey('windows-lan-code')),
+        find.byKey(const ValueKey('windows-lan-password')),
         '012345',
       );
       await submit(tester);
       expect(jsonDecode(calls.single.payload!), {
         'lan_version': 1,
-        'access_method': 1,
-        'temporary_code': '012345',
+        'username': '',
+        'password': '012345',
+        'remember': false,
+        'auto_access': true,
       });
     },
   );
@@ -102,7 +96,7 @@ void main() {
     tester,
   ) async {
     final calls = <WindowsLanAccessSelection>[];
-    await toolbar(tester, calls);
+    await toolbar(tester, calls, saved: true);
     await submit(tester);
     expect(calls.single.payload, isNull);
   });
@@ -138,17 +132,8 @@ void main() {
         ),
       );
       await submit(tester);
-      expect(calls, 0);
-      expect(
-        find.text(
-          'Enter the receiver password or choose another access method',
-        ),
-        findsOneWidget,
-      );
-      expect(find.textContaining('Leave blank'), findsNothing);
-      await choose(tester, 'Manual approval');
-      await submit(tester);
       expect(calls, 1);
+      expect(find.text('Leave empty to request manual approval'), findsOneWidget);
     },
   );
   testWidgets(
@@ -175,8 +160,7 @@ void main() {
         find.byKey(const ValueKey('windows-lan-password')),
         'test-secret',
       );
-      await tester.tap(find.byType(CheckboxListTile));
-      await choose(tester, 'Manual approval');
+      await tester.enterText(find.byKey(const ValueKey('windows-lan-password')), '');
       await submit(tester);
       expect(jsonDecode(payload!), {
         'lan_version': 1,
@@ -207,7 +191,6 @@ void main() {
           ),
         ),
       );
-      await choose(tester, 'Manual approval');
       await tester.tap(find.byKey(const ValueKey('windows-lan-connect')));
       await tester.pump();
       expect(

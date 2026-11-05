@@ -1267,6 +1267,11 @@ pub fn main_get_bound_lan_identity_id(fingerprint: String) -> SyncReturn<String>
 }
 
 pub fn main_has_legacy_lan_credential(fingerprint: String) -> SyncReturn<bool> {
+    // Accept an endpoint as well as a fingerprint, without exposing the secret.
+    let endpoint = hbb_common::lan::Endpoint::parse(&fingerprint)
+        .map(|endpoint| endpoint.to_string()).unwrap_or_else(|_| fingerprint.clone());
+    let fingerprint = Config::get_trusted_lan_fingerprint(&endpoint)
+        .unwrap_or(fingerprint);
     SyncReturn(crate::lan_identity::has_legacy_credential(&fingerprint))
 }
 

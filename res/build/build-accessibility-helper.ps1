@@ -1,6 +1,6 @@
 param(
-    [string]$Version = '1.4.7',
-    [int]$Build = 125,
+    [string]$Version = '1.4.9',
+    [int]$Build = 127,
     [switch]$ReuseFrontendBuild,
     [string]$ToolsRoot = 'D:\Projects AI\tools\SubnetDesk-v1.3.0\tools'
 )

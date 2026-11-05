@@ -640,7 +640,17 @@ pub fn core_main() -> Option<Vec<String>> {
                     std::process::exit(1);
                 }
             }
+            if !config::Config::verify_lan_password(password.as_bytes()).unwrap_or(false) {
+                password.zeroize();
+                log::error!("Unattended password local verification failed");
+                std::process::exit(1);
+            }
             password.zeroize();
+            if let Err(err) = crate::ipc::apply_installer_config_to_receiver() {
+                log::error!("Unattended password receiver verification failed: {err}");
+                std::process::exit(1);
+            }
+            log::info!("Unattended password applied and verified on running receiver");
             return None;
         } else if args[0] == "--check-hwcodec-config" {
             #[cfg(feature = "hwcodec")]

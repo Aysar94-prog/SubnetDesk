@@ -172,7 +172,7 @@ impl<T: InvokeUiSession> Remote<T> {
         };
 
         match Client::start(&self.handler.get_id(), conn_type, self.handler.clone()).await {
-            Ok((mut peer, device_public_key, connected_endpoint, verified_fingerprint)) => {
+            Ok((mut peer, device_public_key, connected_endpoint, verified_fingerprint, expected_saved_fingerprint)) => {
                 if device_public_key.is_empty()
                     || !client::confirm_lan_device(
                         &self.handler,
@@ -180,6 +180,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         &connected_endpoint,
                         &device_public_key,
                         verified_fingerprint.as_deref(),
+                        expected_saved_fingerprint.as_deref(),
                     )
                     .await
                 {
@@ -586,7 +587,8 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             Data::SubmitLanCredentials => {
                 if let Some(optional) = self.handler.lan_credential()
-                    .filter(|credential| credential.access_method != hbb_common::lan::ACCESS_PASSWORD) {
+                    .filter(|credential| self.handler.is_file_transfer()
+                        && credential.access_method != hbb_common::lan::ACCESS_PASSWORD) {
                     // Authentication may finish between UI submission and queue
                     // delivery. Never reauthenticate an active file channel.
                     if let Err(error) = crate::file_transfer_access::validate_optional_retry(

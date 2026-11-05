@@ -582,7 +582,8 @@ class _ConnectionPageState extends State<ConnectionPage> with WindowListener {
   Future<void> _showAddDeviceDialog(BuildContext context) async {
     if (isWindows) {
       final selection = await showDialog<WindowsLanAccessSelection>(context: context,
-        builder: (_) => WindowsLanAccessDialog(endpoint: _idController.id,
+        builder: (_) => WindowsLanAccessDialog(
+          hasSavedPassword: (endpoint) => bind.mainHasLegacyLanCredential(fingerprint: endpoint),endpoint: _idController.id,
           editEndpoint: true, translateText: translate));
       if (selection == null || !context.mounted) return;
       await connect(context, selection.endpoint, password: selection.payload,

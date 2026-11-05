@@ -7,7 +7,7 @@
 			<RegistrySearch Id="HelperProfileSearch" Root="HKLM" Key="Software\SubnetDesk\Helper" Name="ProfileId" Type="raw" />
 		</Property>
 		<DirectoryRef Id="INSTALLFOLDER_INNER">
-			<Component Id="Helper.InstallationProfile" Guid="2f553757-38c3-46bf-ba3d-6eadf4d2b974">
+			<Component Id="Helper.InstallationProfile" Guid="d0ac99d3-f2db-40c5-9226-a9dc304c52eb">
 				<RegistryValue Root="HKLM" Key="Software\SubnetDesk\Helper" Name="ProfileId" Value="[HELPER_PROFILE_ID]" Type="string" KeyPath="yes" />
 				<RegistryValue Root="HKLM" Key="Software\SubnetDesk\Helper" Name="InstallFolder" Value="[INSTALLFOLDER_INNER]" Type="string" />
 				<RegistryValue Root="HKLM" Key="Software\SubnetDesk\Helper" Name="ReceiverPolicyProtocol" Value="1" Type="integer" />
@@ -16,19 +16,19 @@
 		<!-- Regs for shortcuts are defined in "Fragments/ShortcutProperties.wxs" -->
 		<!-- Component that persists the property values to the registry so they are available during an upgrade/modify -->
 		<DirectoryRef Id="INSTALLFOLDER_INNER">
-			<Component Id="Product.Registry.InstallFolder" Guid="35b64788-65af-4dbd-833e-9af2b98a3ed9">
+			<Component Id="Product.Registry.InstallFolder" Guid="bcd961f5-a451-40df-8134-5ccfea48d72f">
 				<RegistryKey Root="HKCR" Key="$(var.RegKeyRoot)">
 					<RegistryValue Type="string" Name="INSTALLFOLDER" Value="[INSTALLFOLDER_INNER]" />
 				</RegistryKey>
 			</Component>
 
-			<Component Id="Product.Registry.DefaultIcon" Guid="90f25105-3744-491b-a58d-16c00a071ff5">
+			<Component Id="Product.Registry.DefaultIcon" Guid="b4488690-a4bc-4cd5-b180-fea04a7f9388">
 				<RegistryKey Root="HKCR" Key="$(var.RegKeyRoot)\DefaultIcon">
 					<RegistryValue Type="string" Value='"[INSTALLFOLDER_INNER]$(var.Product).exe",0' />
 				</RegistryKey>
 			</Component>
 
-			<Component Id="Product.Registry.CommandPlay" Guid="e719c4a9-7f27-46e9-bb0a-ae0425f22256">
+			<Component Id="Product.Registry.CommandPlay" Guid="b3bf4ac1-6423-4d16-bcd5-155edbf06d21">
 				<RegistryKey Root="HKCR" Key="$(var.RegKeyRoot)\shell" />
 				<RegistryKey Root="HKCR" Key="$(var.RegKeyRoot)\shell\open" />
 				<RegistryKey Root="HKCR" Key="$(var.RegKeyRoot)\shell\open\command">
@@ -36,13 +36,13 @@
 				</RegistryKey>
 			</Component>
 
-			<Component Id="Product.Registry.URLProtocol" Guid="89494cf3-bf52-417c-afb7-3b5d04bfd256">
+			<Component Id="Product.Registry.URLProtocol" Guid="19b2c64f-a6f8-4257-b7e0-9aea53355632">
 				<RegistryKey Root="HKCR" Key="$(var.ProductLower)">
 					<RegistryValue Type="string" Name="URL Protocol" Value="" />
 				</RegistryKey>
 			</Component>
 
-			<Component Id="Product.Registry.Command" Guid="d6b2c039-24c1-45da-b4b2-2baea9058d8c">
+			<Component Id="Product.Registry.Command" Guid="03e72ed0-1b79-40a2-91b1-2c334f10869c">
 				<RegistryKey Root="HKCR" Key="$(var.ProductLower)\shell" />
 				<RegistryKey Root="HKCR" Key="$(var.ProductLower)\shell\open" />
 				<RegistryKey Root="HKCR" Key="$(var.ProductLower)\shell\open\command">
@@ -51,7 +51,7 @@
 			</Component>
 
 			<!--For compatibility with registry values from previous versions-->
-			<Component Id="Product.Registry.UninstallApp" Guid="b5536298-c515-4071-88a6-eb0f77bbf17f">
+			<Component Id="Product.Registry.UninstallApp" Guid="a91ba363-0d96-4c27-a54e-ab66c5fbfc14">
 				<RegistryKey Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\$(var.Product)" >
 					<RegistryValue Type="string" Name="BuildDate" Value="$(var.BuildDate)" />
 					<RegistryValue Type="string" Name="share_rdp" Value="" />

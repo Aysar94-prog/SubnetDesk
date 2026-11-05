@@ -2655,7 +2655,8 @@ connect(
     }
     final selection = await showDialog<WindowsLanAccessSelection>(
       context: context,
-      builder: (_) => WindowsLanAccessDialog(endpoint: id, translateText: translate));
+      builder: (_) => WindowsLanAccessDialog(
+          hasSavedPassword: (endpoint) => bind.mainHasLegacyLanCredential(fingerprint: endpoint),endpoint: id, translateText: translate));
     if (selection == null || !context.mounted) return;
     password = selection.payload;
   }

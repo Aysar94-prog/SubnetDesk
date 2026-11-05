@@ -3,10 +3,14 @@
 ## Release outputs
 
 Publish validated deliverables to `outputs/new/<product>-<version-and-build>/`.
-Before promoting a replacement, move the previous current folder for that same
-product to `outputs/old/`. Helper, Deploy and Agent rotate independently. Keep
-build caches, tests, intermediate bundles and candidates in `output/`; they are
-not releases. Never delete historical artifacts. Final delivery links must use
+Before promoting a replacement, archive the previous current artifacts for the
+same product and platform in `outputs/old/`. Helper, Deploy and Agent rotate
+independently, and Windows/Android rotate independently within each product.
+Keep the latest artifacts for other platforms in `outputs/new/` at their actual
+version/build; a Windows-only release must not archive the current Android APK.
+Clearly label a user-requested Android candidate as a candidate. Keep build
+caches, tests, intermediate bundles and unpromoted candidates in `output/`; they
+are not releases. Never delete historical artifacts. Final delivery links must use
 `outputs/new`. Use the personal `release-output-rotation` skill and its verified
 publisher when available. Each current release must include `release.json` with
 product, version/build and artifact hashes. Show the actual version and build in

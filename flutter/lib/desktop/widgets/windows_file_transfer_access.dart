@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../../models/platform_model.dart' show bind;
 import 'package:flutter/material.dart';
 import 'windows_lan_access_dialog.dart';
 
@@ -7,12 +8,14 @@ Future<void> requestWindowsFileTransferAccess(
   BuildContext context,
   String endpoint, {
   required String Function(String) translateText,
+  bool Function(String endpoint)? hasSavedPassword,
   required Future<void> Function(WindowsLanAccessSelection) connect,
 }) async {
   final stableContext = Navigator.of(context, rootNavigator: true).context;
   final selection = await showDialog<WindowsLanAccessSelection>(
     context: stableContext,
     builder: (_) => WindowsLanAccessDialog(
+          hasSavedPassword: hasSavedPassword ?? (endpoint) => bind.mainHasLegacyLanCredential(fingerprint: endpoint),
       endpoint: endpoint,
       title: 'File transfer access',
       translateText: translateText,
@@ -75,6 +78,7 @@ Future<String> submitWindowsFileAccessPayload(
           'password',
           'remember',
           'access_method',
+          'auto_access',
         }.contains(key),
       )) {
     return 'Invalid password-only file transfer access';

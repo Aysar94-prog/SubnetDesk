@@ -63,6 +63,8 @@ struct LanCredentialPayload {
     remember: bool,
     #[serde(default)]
     bind_identity: bool,
+    #[serde(default)]
+    auto_access: bool,
 }
 
 lazy_static::lazy_static! {
@@ -1437,7 +1439,10 @@ pub fn session_add(
             (
                 Some(LanSessionCredential {
                     access_method: hbb_common::lan::ACCESS_PASSWORD,
-                    temporary_code: String::new(),
+                    temporary_code: if payload.auto_access && payload.password.len() == 6
+                        && payload.password.bytes().all(|b| b.is_ascii_digit()) {
+                        payload.password.clone()
+                    } else { String::new() },
                     username,
                     password: payload.password.into_bytes(),
                     remember: payload.remember,

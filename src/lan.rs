@@ -380,8 +380,8 @@ pub async fn discover() -> ResultType<()> {
 /// evidence (a prior successful, fingerprint-recorded connection) from one
 /// resolved only from unauthenticated LAN advertisements (UDP/mDNS discovery
 /// cache) or typed manually. Only `SavedDevice` may be trusted or logged into
-/// automatically; a fingerprint mismatch for `SavedDevice` must hard-fail
-/// rather than fall through to a trust-on-first-use/re-trust prompt.
+/// automatically. A changed saved identity must pass the explicit fingerprint
+/// confirmation step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionIntent {
     SavedDevice,

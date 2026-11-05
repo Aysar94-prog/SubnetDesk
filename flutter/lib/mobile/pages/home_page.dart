@@ -113,7 +113,8 @@ class HomePageState extends State<HomePage> {
                 actions: [
                   TextButton(onPressed: inbox.files.isEmpty ? () => inbox.refresh() : () async {
                     final selection = await showDialog<WindowsLanAccessSelection>(context: context,
-                      builder: (_) => WindowsLanAccessDialog(endpoint: '', editEndpoint: true,
+                      builder: (_) => WindowsLanAccessDialog(
+          hasSavedPassword: (endpoint) => bind.mainHasLegacyLanCredential(fingerprint: endpoint),endpoint: '', editEndpoint: true,
                         translateText: translate, title: 'Transfer file'));
                     if (selection != null && context.mounted) {
                       await connect(context, selection.endpoint, isFileTransfer: true,
