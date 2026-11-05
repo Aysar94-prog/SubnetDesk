@@ -1,5 +1,42 @@
 # SubnetDesk Windows helper status
 
+## Windows accessibility stability mode — 1.5.0 Build137 (2026-11-06)
+
+Build135 and Build136 failed real outgoing connections inside different Flutter
+accessibility tree methods; neither is an accepted stability repair. Build137
+uses the unmodified pinned Flutter 3.44.1 engine with an application runner
+WM_GETOBJECT fallback to the Windows generic accessibility proxy on the host,
+Flutter view and multi-window remote views. The user does not use a screen
+reader and explicitly accepted the resulting limitation of widget-level UIA/
+screen-reader access. Normal input/rendering paths and authentication remain.
+No system accessibility/security settings are changed.
+
+Four native runner tests pass, including 4000 provider requests and subclass
+lifetime/message forwarding. The production confy writer round-trips all four
+empty/populated favorites/group combinations; empty vectors are omitted to avoid
+TOML 0.5 table ordering failures. The 26 selected Flutter access/session/file
+transfer regressions pass. Native/Flutter release builds, MSI validation and
+extracted engine/backend/executable hashes pass (existing ICE60/61/84 warnings).
+MSI install exit 0; installed executable 1.5.0+137; service Running/Automatic.
+Receiver-only is reset before service startup on install/repair/upgrade. Profile,
+identity and credential digests were preserved; the user unlocked manually.
+
+Installed engine SHA256:
+`a147927018fcc1a843fb3938ead58838d2e185ce7d840bc4191a7a1b90c21015`.
+Installed backend SHA256:
+`f4dfd1a6377824de07a1fe67f14494451e11ce87be212e8f455d55efeb0eb9cc`.
+Main and remote views expose the intended generic FLUTTERVIEW pane. The real
+Mint connection displays live video and responds to mouse clicks. The 30-minute
+monitor completed from 00:11:25 to 00:41:25 local time on 2026-11-06: 120
+periodic checks retained the same live process and established TCP connection,
+with no Windows Application Error/WER reports for SubnetDesk during the test.
+Physical keyboard acceptance passed: after the user typed A in the remote test
+window, its X11 log confirmed keycode38/keysym0x41 press and release. Automated
+key calls alone had not proved delivery. Build137 is accepted for this observed
+scenario and published to ../outputs/new/SubnetDesk-Helper-1.5.0-build137/.
+The test does not exclude every future failure. Raw diagnostics remain local
+under tools/diagnostics. Other platform releases are preserved.
+
 ## Session File Transfer87 / Administrator MSI:2026-10-09 (built; device pending)
 
 User explicitly authorized fix/version bump and confirmed Administrator during MSI

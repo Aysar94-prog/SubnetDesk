@@ -1,7 +1,8 @@
 param(
-    [string]$Version = '1.4.9',
-    [int]$Build = 127,
+    [string]$Version = '1.5.0',
+    [int]$Build = 137,
     [switch]$ReuseFrontendBuild,
+    [switch]$UseNativeAccessibilityFallback = $true,
     [string]$ToolsRoot = 'D:\Projects AI\tools\SubnetDesk-v1.3.0\tools'
 )
 $ErrorActionPreference = 'Stop'
@@ -26,8 +27,10 @@ if ($Version -eq '1.4.6') {
         throw 'The versioned native build manifest does not match the backend.'
     }
 }
-& python (Join-Path $PSScriptRoot 'test_flutter_accessibility.py') -v
-if ($LASTEXITCODE -ne 0) { throw 'Native accessibility guard regression failed.' }
+if (!$UseNativeAccessibilityFallback) {
+    & python (Join-Path $PSScriptRoot 'test_flutter_accessibility.py') -v
+    if ($LASTEXITCODE -ne 0) { throw 'Native accessibility guard regression failed.' }
+}
 $vcvars = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat'
 $environment = & $env:ComSpec /d /c ('"' + $vcvars + '" >nul && set')
 if ($LASTEXITCODE -ne 0) { throw 'Visual Studio environment setup failed.' }
@@ -56,6 +59,26 @@ Copy-Item -LiteralPath $native -Destination (Join-Path $bundle 'librustdesk.dll'
 if ((Get-FileHash -LiteralPath (Join-Path $bundle 'librustdesk.dll')).Hash -ne (Get-FileHash -LiteralPath $native).Hash) {
     throw 'Stale backend in the release bundle.'
 }
+if ($UseNativeAccessibilityFallback) {
+    $engineHash = (Get-FileHash (Join-Path $bundle 'flutter_windows.dll')).Hash.ToLowerInvariant()
+    $sdkEngine = Join-Path $ToolsRoot 'flutter\bin\cache\artifacts\engine\windows-x64-release\flutter_windows.dll'
+    if ($engineHash -ne 'a147927018fcc1a843fb3938ead58838d2e185ce7d840bc4191a7a1b90c21015' -or
+        $engineHash -ne (Get-FileHash $sdkEngine).Hash.ToLowerInvariant()) {
+        throw 'Native-proxy build must use the unmodified pinned SDK engine.'
+    }
+    $cmake = 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
+    $ctest = Join-Path (Split-Path $cmake) 'ctest.exe'
+    $runnerTests = Join-Path $project "output\helper-$Version-build$Build-runner-tests"
+    & $cmake -S (Join-Path $project 'flutter\windows\runner\tests') -B $runnerTests -G 'Visual Studio 17 2022' -A x64 '-DCMAKE_GENERATOR_INSTANCE=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools'
+    if ($LASTEXITCODE -ne 0) { throw 'Runner test configuration failed.' }
+    & $cmake --build $runnerTests --config Release
+    if ($LASTEXITCODE -ne 0) { throw 'Runner test build failed.' }
+    & $ctest --test-dir $runnerTests -C Release --output-on-failure
+    if ($LASTEXITCODE -ne 0) { throw 'Native accessibility fallback regression failed.' }
+    @{engineSha256=$engineHash; mode='windows-native-accessibility-proxy'; flutterWidgetAccessibility=$false;
+      engineModified=$false; nativeQueryRegressionCount=4000} | ConvertTo-Json |
+        Set-Content (Join-Path $bundle 'flutter-accessibility-fix.json') -Encoding utf8
+} else {
 & python (Join-Path $PSScriptRoot 'patch_flutter_accessibility.py') (Join-Path $bundle 'flutter_windows.dll') --manifest (Join-Path $bundle 'flutter-accessibility-fix.json')
 if ($LASTEXITCODE -ne 0) { throw 'Pinned engine patch failed.' }
 & python (Join-Path $PSScriptRoot 'test_flutter_accessibility_engine.py') (Join-Path $ToolsRoot 'flutter\bin\cache\artifacts\engine\windows-x64-release\flutter_windows.dll') $engineRegression
@@ -63,6 +86,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Patched engine integration regression failed.'
 if ((Get-FileHash -LiteralPath (Join-Path $bundle 'flutter_windows.dll')).Hash -ne
     (Get-FileHash -LiteralPath (Join-Path $engineRegression 'flutter_windows.dll')).Hash) {
     throw 'Packaged engine differs from the integration-tested engine.'
+}
 }
 # Preserve the previously validated installer custom actions, including the
 # device-wide Receiver-only reset on install/reinstall/repair/upgrade.

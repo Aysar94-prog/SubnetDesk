@@ -1,4 +1,4 @@
-param([string]$Version = '1.4.9', [int]$Build = 127)
+param([string]$Version = '1.5.0', [int]$Build = 137)
 $ErrorActionPreference = 'Stop'
 $project = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $installer = New-Object -ComObject WindowsInstaller.Installer

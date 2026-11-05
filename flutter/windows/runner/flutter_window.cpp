@@ -1,4 +1,5 @@
 #include "flutter_window.h"
+#include "accessibility_stability.h"
 
 #include <desktop_multi_window/desktop_multi_window_plugin.h>
 #include <texture_rgba_renderer/texture_rgba_renderer_plugin_c_api.h>
@@ -41,6 +42,11 @@ bool FlutterWindow::OnCreate() {
       frame.right - frame.left, frame.bottom - frame.top, project_);
   // Ensure that basic setup of the controller was successful.
   if (!flutter_controller_->engine() || !flutter_controller_->view()) {
+    return false;
+  }
+  if (!subnetdesk::UseStableAccessibility(GetHandle()) ||
+      !subnetdesk::UseStableAccessibility(
+          flutter_controller_->view()->GetNativeWindow())) {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
@@ -156,6 +162,11 @@ bool FlutterWindow::OnCreate() {
   DesktopMultiWindowSetWindowCreatedCallback([](void *controller) {
     auto *flutter_view_controller =
         reinterpret_cast<flutter::FlutterViewController *>(controller);
+    const HWND view_window = flutter_view_controller->view()->GetNativeWindow();
+    if (!subnetdesk::UseStableAccessibility(view_window) ||
+        !subnetdesk::UseStableAccessibility(GetParent(view_window))) {
+      OutputDebugStringW(L"SubnetDesk: could not initialize stable accessibility for subwindow\n");
+    }
     auto *registry = flutter_view_controller->engine();
     TextureRgbaRendererPluginCApiRegisterWithRegistrar(
         registry->GetRegistrarForPlugin("TextureRgbaRendererPlugin"));

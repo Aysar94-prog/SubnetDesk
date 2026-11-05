@@ -2251,9 +2251,9 @@ pub struct LocalConfig {
     // were added after `options`/`recent_lan_endpoints`/etc., which is why
     // LAN favorites and recent sessions appeared to vanish on relaunch:
     // the write never actually reached disk.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     favorites: Vec<FavoriteDevice>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     favorite_groups: Vec<FavoriteGroup>,
     #[serde(default, deserialize_with = "deserialize_hashmap_string_string")]
     options: HashMap<String, String>,
@@ -4795,6 +4795,42 @@ mod tests {
         assert_eq!(reloaded.favorite_groups, config.favorite_groups);
 
         let _ = fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn local_config_confy_roundtrips_empty_and_populated_favorite_tables() {
+        for has_favorite in [false, true] {
+            for has_group in [false, true] {
+                let mut config = LocalConfig::default();
+                config.schema_version = 1;
+                config.options.insert("test-option".into(), "preserved".into());
+                config.ui_flutter.insert("window".into(), "preserved".into());
+                if has_favorite {
+                    config.favorites.push(FavoriteDevice {
+                        fingerprint: "a".repeat(64),
+                        endpoint: "192.168.1.50:21118".into(),
+                        group_id: String::new(),
+                    });
+                }
+                if has_group {
+                    config.favorite_groups.push(FavoriteGroup {
+                        id: "group-1".into(),
+                        name: "Office".into(),
+                    });
+                }
+                let path = std::env::temp_dir().join(format!(
+                    "subnetdesk-local-empty-tables-{}-{}-{}.toml",
+                    std::process::id(), has_favorite, has_group
+                ));
+                store_path(path.clone(), &config).expect("production confy writer must accept empty tables");
+                let restored: LocalConfig = confy::load_path(&path).expect("stored config must load");
+                assert_eq!(restored.favorites, config.favorites);
+                assert_eq!(restored.favorite_groups, config.favorite_groups);
+                assert_eq!(restored.options, config.options);
+                assert_eq!(restored.ui_flutter, config.ui_flutter);
+                fs::remove_file(path).expect("remove this test's temporary config");
+            }
+        }
     }
 
     #[test]

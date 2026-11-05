@@ -17,3 +17,11 @@ ctest --test-dir D:/LAN-Messenger/outputs/SubnetDesk-helper-cm/checks/native-cma
 Tests pass only when the actual helper preserves launch arguments. This does not prove IPC,
 Flutter CM initialization or panel visibility; run the rebuilt app with `--cm` alongside its
 main window, then test an actual incoming session. Do not reuse an old/headless CM or backend.
+
+## Native accessibility fallback
+
+`native_accessibility_fallback` exercises the actual production subclass with
+a real message-only HWND. It verifies 4000 MSAA/UIA provider queries use Windows
+default handling, other messages still reach the original procedure, and callback
+removal/destruction work. This fallback intentionally limits Flutter widget-level
+screen-reader/UIA support; normal window proxies, input and rendering remain.
